@@ -169,7 +169,7 @@ where
     })
 }
 
-fn finalize_temp(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {
+pub(crate) fn finalize_temp(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {
     // shortcut: hard links need NTFS-like support; exFAT/FAT32 destinations fail
     // with Io instead of overwriting. Upgrade to MoveFileExW without REPLACE_EXISTING.
     match std::fs::hard_link(temp, final_path) {
