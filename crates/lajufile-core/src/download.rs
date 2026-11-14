@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use reqwest::header::CONTENT_RANGE;
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
 use crate::http::{RequestOptions, apply_headers, ensure_identity_encoding, parse_content_range};
+use crate::speed::RateLimiter;
 
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
@@ -44,6 +46,18 @@ pub enum DownloadError {
 pub async fn download_single<F>(
     client: &reqwest::Client,
     spec: &DownloadSpec,
+    on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    download_single_with_limiter(client, spec, None, on_progress).await
+}
+
+pub async fn download_single_with_limiter<F>(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
     mut on_progress: F,
 ) -> Result<DownloadOutcome, DownloadError>
 where
@@ -123,6 +137,9 @@ where
                     actual: downloaded,
                 });
             }
+        }
+        if let Some(limiter) = &limiter {
+            limiter.throttle(length).await;
         }
         file.write_all(&chunk).await?;
         on_progress(downloaded);

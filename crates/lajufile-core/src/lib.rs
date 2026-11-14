@@ -7,4 +7,5 @@ pub mod paths;
 pub mod probe;
 pub mod segment;
 pub mod settings;
+pub mod speed;
 pub mod store;
