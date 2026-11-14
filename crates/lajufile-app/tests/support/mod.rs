@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -59,7 +60,13 @@ pub fn start_server() -> TestServer {
 fn app() -> Router {
     Router::new()
         .route("/file.bin", get(file))
+        .route("/slow.bin", get(slow))
         .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
+}
+
+async fn slow() -> impl axum::response::IntoResponse {
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    file().await
 }
 
 async fn file() -> impl axum::response::IntoResponse {
