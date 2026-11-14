@@ -1,0 +1,27 @@
+[package]
+name = "lajufile-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lajufile"
+path = "src/main.rs"
+
+[dependencies]
+lajufile-core = { path = "../lajufile-core" }
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+tray-icon.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
