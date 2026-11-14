@@ -1,8 +1,13 @@
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use axum::{
     Router,
     body::{Body, Bytes},
+    extract::State,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
@@ -10,12 +15,28 @@ use axum::{
 use tokio::net::TcpListener;
 
 pub const SIZE: usize = 1_048_576;
+pub const SEG_SIZE: usize = 4_194_304;
 
 pub fn payload() -> Vec<u8> {
     (0..SIZE).map(|i| (i % 251) as u8).collect()
 }
 
+pub fn seg_payload() -> Vec<u8> {
+    (0..SEG_SIZE).map(|i| (i % 251) as u8).collect()
+}
+
+#[derive(Clone)]
+struct SegState {
+    flaky_failed: Arc<AtomicBool>,
+    ranges: Arc<Mutex<Vec<u64>>>,
+}
+
 pub async fn start_server() -> String {
+    start_server_with_ranges().await.0
+}
+
+pub async fn start_server_with_ranges() -> (String, Arc<Mutex<Vec<u64>>>) {
+    let ranges = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .route("/range", get(range))
         .route("/plain", get(plain))
@@ -31,14 +52,23 @@ pub async fn start_server() -> String {
         .route("/partial-unknown", get(partial_unknown))
         .route("/partial-full", get(partial_full))
         .route("/short", get(short))
-        .route("/long", get(long));
+        .route("/long", get(long))
+        .route("/seg", get(seg))
+        .route("/seg-ignore", get(seg_ignore))
+        .route("/seg-bad-range", get(seg_bad_range))
+        .route("/seg-flaky", get(seg_flaky))
+        .route("/seg-always-500", get(seg_always_500))
+        .with_state(SegState {
+            flaky_failed: Arc::new(AtomicBool::new(false)),
+            ranges: Arc::clone(&ranges),
+        });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), ranges)
 }
 
 fn response(
@@ -228,4 +258,109 @@ async fn long() -> Response {
     let mut data = payload();
     data.push(0);
     response(StatusCode::OK, chunked(data), &[])
+}
+
+fn response_strings(
+    status: StatusCode,
+    body: Body,
+    headers: &[(header::HeaderName, String)],
+) -> Response {
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    for (name, value) in headers {
+        response.headers_mut().insert(
+            name.clone(),
+            HeaderValue::from_str(value).expect("valid response header"),
+        );
+    }
+    response
+}
+
+fn parse_range(headers: &HeaderMap) -> Option<(usize, usize)> {
+    let value = headers.get(header::RANGE)?.to_str().ok()?;
+    let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
+}
+
+fn seg_full() -> Response {
+    response(
+        StatusCode::OK,
+        Body::from(seg_payload()),
+        &[
+            (header::CONTENT_LENGTH, "4194304"),
+            (header::ETAG, "\"seg-v1\""),
+        ],
+    )
+}
+
+fn seg_range(headers: &HeaderMap, start: usize, end: usize) -> Response {
+    if let Some(value) = headers.get(header::IF_RANGE)
+        && value.to_str().ok() != Some("\"seg-v1\"")
+    {
+        return seg_full();
+    }
+    let body = seg_payload()[start..=end].to_vec();
+    response_strings(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from(body),
+        &[
+            (
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{SEG_SIZE}"),
+            ),
+            (header::CONTENT_LENGTH, (end - start + 1).to_string()),
+            (header::ETAG, "\"seg-v1\"".to_string()),
+        ],
+    )
+}
+
+async fn seg(State(state): State<SegState>, headers: HeaderMap) -> Response {
+    match parse_range(&headers) {
+        Some((start, end)) => {
+            state.ranges.lock().unwrap().push(start as u64);
+            seg_range(&headers, start, end)
+        }
+        None => seg_full(),
+    }
+}
+
+async fn seg_ignore() -> Response {
+    seg_full()
+}
+
+async fn seg_bad_range(headers: HeaderMap) -> Response {
+    let Some((start, end)) = parse_range(&headers) else {
+        return seg_full();
+    };
+    let shifted_start = start + 1;
+    let body = if shifted_start <= end {
+        seg_payload()[shifted_start..=end].to_vec()
+    } else {
+        Vec::new()
+    };
+    response_strings(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from(body),
+        &[
+            (
+                header::CONTENT_RANGE,
+                format!("bytes {shifted_start}-{end}/{SEG_SIZE}"),
+            ),
+            (header::CONTENT_LENGTH, (end - start).to_string()),
+        ],
+    )
+}
+
+async fn seg_flaky(State(state): State<SegState>, headers: HeaderMap) -> Response {
+    let Some((start, end)) = parse_range(&headers) else {
+        return seg_full();
+    };
+    if start == SEG_SIZE / 4 && !state.flaky_failed.swap(true, Ordering::SeqCst) {
+        return response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty(), &[]);
+    }
+    seg_range(&headers, start, end)
+}
+
+async fn seg_always_500() -> Response {
+    response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty(), &[])
 }
