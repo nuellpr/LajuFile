@@ -1,14 +1,187 @@
-pub struct LajuFileApp;
+use std::time::{Duration, Instant};
+
+use lajufile_core::paths;
+use lajufile_core::settings::{Settings, Theme};
+
+use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
+use crate::ui::{self, Action, Filter};
+
+pub struct LajuFileApp {
+    pub(crate) engine: Option<EngineHandle>,
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) selected: Option<i64>,
+    pub(crate) filter: Filter,
+    pub(crate) show_add: bool,
+    pub(crate) show_settings: bool,
+    #[allow(dead_code)] // Task 5 reads the drafts.
+    pub(crate) add_draft: AddRequest,
+    #[allow(dead_code)] // Task 5 reads the drafts.
+    pub(crate) settings_draft: Settings,
+    pub(crate) toast: Option<(String, Instant)>,
+    pub(crate) last_message: Option<String>,
+    pub(crate) theme: Theme,
+}
 
 impl LajuFileApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
-        Self
+        let data_dir = paths::data_dir();
+        let settings = Settings::load_or_create(&data_dir).unwrap_or_default();
+        let theme = settings.theme.clone();
+        apply_theme(&cc.egui_ctx, &theme);
+
+        let add_draft = AddRequest {
+            url: String::new(),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+        };
+        let settings_draft = settings.clone();
+        let engine = EngineHandle::start(EngineConfig {
+            data_dir: data_dir.clone(),
+            db_path: paths::db_path(&data_dir),
+            settings,
+        })
+        .ok();
+        let toast = engine
+            .is_none()
+            .then(|| ("Engine failed to start".to_string(), Instant::now()));
+
+        Self {
+            engine,
+            snapshot: None,
+            selected: None,
+            filter: Filter::All,
+            show_add: false,
+            show_settings: false,
+            add_draft,
+            settings_draft,
+            toast,
+            last_message: None,
+            theme,
+        }
+    }
+
+    fn poll_engine(&mut self, ctx: &egui::Context) {
+        let Some(engine) = &self.engine else {
+            return;
+        };
+        let Some(snapshot) = engine.latest_snapshot() else {
+            return;
+        };
+
+        if let Some(message) = snapshot.message.as_ref()
+            && self.last_message.as_deref() != Some(message.as_str())
+        {
+            self.toast = Some((message.clone(), Instant::now()));
+            self.last_message = Some(message.clone());
+        }
+
+        if snapshot.settings.theme != self.theme {
+            self.theme = snapshot.settings.theme.clone();
+            apply_theme(ctx, &self.theme);
+        }
+        self.snapshot = Some(snapshot);
+    }
+
+    fn handle_actions(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
+        for action in actions {
+            match action {
+                Action::Select(id) => self.selected = Some(id),
+                Action::Pause(id) => self.send(Command::Pause(id)),
+                Action::Resume(id) => self.send(Command::Resume(id)),
+                Action::Remove(id) => {
+                    self.send(Command::Remove(id));
+                    if self.selected == Some(id) {
+                        self.selected = None;
+                    }
+                }
+                Action::PauseAll => self.send(Command::PauseAll),
+                Action::ResumeAll => self.send(Command::ResumeAll),
+                Action::Open(id) => {
+                    if let Some(path) = self.path_for(id) {
+                        let _ = std::process::Command::new("explorer").arg(path).spawn();
+                    }
+                }
+                Action::OpenFolder(id) => {
+                    if let Some(path) = self.path_for(id) {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(format!("/select,{}", path.display()))
+                            .spawn();
+                    }
+                }
+                Action::CopyUrl(url) => ctx.copy_text(url),
+                Action::OpenAdd => self.show_add = true,
+                Action::OpenSettings => self.show_settings = true,
+                Action::SetTheme(theme) => {
+                    self.theme = theme.clone();
+                    apply_theme(ctx, &theme);
+                    if let Some(snapshot) = &self.snapshot {
+                        let mut settings = snapshot.settings.clone();
+                        settings.theme = theme;
+                        self.send(Command::UpdateSettings(settings));
+                    }
+                }
+            }
+        }
+    }
+
+    fn send(&self, command: Command) {
+        if let Some(engine) = &self.engine {
+            let _ = engine.send(command);
+        }
+    }
+
+    fn path_for(&self, id: i64) -> Option<std::path::PathBuf> {
+        self.snapshot
+            .as_ref()?
+            .downloads
+            .iter()
+            .find(|download| download.id == id)
+            .map(|download| download.save_path.clone())
     }
 }
 
 impl eframe::App for LajuFileApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.heading("LajuFile");
+        let ctx = ui.ctx().clone();
+        self.poll_engine(&ctx);
+        let actions = egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| ui::main_window::draw(self, ui))
+            .inner;
+        self.handle_actions(&ctx, actions);
+        ctx.request_repaint_after(Duration::from_millis(250));
     }
+}
+
+impl Drop for LajuFileApp {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            engine.shutdown();
+        }
+    }
+}
+
+fn apply_theme(ctx: &egui::Context, theme: &Theme) {
+    let mut visuals = match theme {
+        Theme::Light => egui::Visuals::light(),
+        Theme::Dark => egui::Visuals::dark(),
+    };
+    let (window, bar, text) = match theme {
+        Theme::Light => (
+            egui::Color32::from_rgb(0xF7, 0xF8, 0xFA),
+            egui::Color32::WHITE,
+            egui::Color32::from_rgb(0x18, 0x21, 0x2B),
+        ),
+        Theme::Dark => (
+            egui::Color32::from_rgb(0x0E, 0x13, 0x19),
+            egui::Color32::from_rgb(0x14, 0x1A, 0x21),
+            egui::Color32::from_rgb(0xE7, 0xED, 0xF5),
+        ),
+    };
+    visuals.panel_fill = window;
+    visuals.window_fill = bar;
+    visuals.extreme_bg_color = window;
+    visuals.override_text_color = Some(text);
+    ctx.set_visuals(visuals);
 }
