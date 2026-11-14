@@ -127,3 +127,16 @@ async fn probe_rejects_unsupported_scheme() {
         ProbeError::UnsupportedScheme(scheme) if scheme == "file"
     ));
 }
+
+#[tokio::test]
+async fn probe_rejects_multiple_content_encodings() {
+    let base = support::start_server().await;
+    let req = request(&base, "/encoded-multi", Duration::from_secs(2));
+
+    let error = probe(&client(), &req).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProbeError::UnsupportedEncoding(value) if value == "gzip"
+    ));
+}

@@ -178,3 +178,141 @@ async fn retry_truncates_stale_temp() {
     assert_eq!(std::fs::read(&final_path).unwrap(), support::payload());
     assert!(!temp_path.exists());
 }
+
+#[tokio::test]
+async fn rejects_multiple_content_encodings() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("encoded.txt");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/encoded-multi")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: None,
+        options: RequestOptions::default(),
+    };
+
+    let err = download_single(&client(), &spec, |_| {}).await.unwrap_err();
+
+    assert!(matches!(err, DownloadError::UnsupportedEncoding(ref e) if e == "gzip"));
+    assert!(!final_path.exists());
+    assert!(temp_path.exists());
+}
+
+#[tokio::test]
+async fn rejects_partial_response_with_partial_range() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("partial.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/partial")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: None,
+        options: RequestOptions::default(),
+    };
+
+    let err = download_single(&client(), &spec, |_| {}).await.unwrap_err();
+
+    assert!(matches!(err, DownloadError::ContentRange(ref raw) if raw.contains("0-0/1048576")));
+    assert!(!final_path.exists());
+    assert!(temp_path.exists());
+}
+
+#[tokio::test]
+async fn rejects_partial_response_with_unknown_total() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("partial.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/partial-unknown")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: None,
+        options: RequestOptions::default(),
+    };
+
+    let err = download_single(&client(), &spec, |_| {}).await.unwrap_err();
+
+    assert!(matches!(err, DownloadError::ContentRange(ref raw) if raw.contains("0-0/*")));
+    assert!(!final_path.exists());
+    assert!(temp_path.exists());
+}
+
+#[tokio::test]
+async fn accepts_full_range_partial_response() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("full.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/partial-full")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: Some(support::SIZE as u64),
+        options: RequestOptions::default(),
+    };
+
+    let out = download_single(&client(), &spec, |_| {}).await.unwrap();
+
+    assert_eq!(out.bytes, support::SIZE as u64);
+    assert_eq!(std::fs::read(&final_path).unwrap(), support::payload());
+    assert!(!temp_path.exists());
+}
+
+#[tokio::test]
+async fn short_stream_is_size_mismatch() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("short.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/short")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: Some(support::SIZE as u64),
+        options: RequestOptions::default(),
+    };
+
+    let err = download_single(&client(), &spec, |_| {}).await.unwrap_err();
+
+    match err {
+        DownloadError::SizeMismatch { expected, actual } => {
+            assert_eq!(expected, support::SIZE as u64);
+            assert_eq!(actual, (support::SIZE / 2) as u64);
+        }
+        other => panic!("expected SizeMismatch, got {other:?}"),
+    }
+    assert!(temp_path.exists());
+    assert!(!final_path.exists());
+}
+
+#[tokio::test]
+async fn long_stream_is_size_mismatch() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("long.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/long")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: Some(support::SIZE as u64),
+        options: RequestOptions::default(),
+    };
+
+    let err = download_single(&client(), &spec, |_| {}).await.unwrap_err();
+
+    match err {
+        DownloadError::SizeMismatch { expected, actual } => {
+            assert_eq!(expected, support::SIZE as u64);
+            assert_eq!(actual, support::SIZE as u64 + 1);
+        }
+        other => panic!("expected SizeMismatch, got {other:?}"),
+    }
+    assert!(temp_path.exists());
+    assert!(!final_path.exists());
+}

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, ACCEPT_ENCODING, COOKIE, REFERER, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, COOKIE, HeaderMap, REFERER, USER_AGENT,
+};
 
 pub const DEFAULT_USER_AGENT: &str = "LajuFile/0.1";
 
@@ -41,6 +43,22 @@ pub fn apply_headers(
         builder = builder.header(COOKIE, cookie);
     }
     builder
+}
+
+pub fn ensure_identity_encoding(headers: &HeaderMap) -> Result<(), String> {
+    for value in headers.get_all(CONTENT_ENCODING).iter() {
+        let value = value.to_str().map_err(|_| "<invalid>".to_string())?;
+        for token in value.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err("<empty>".to_string());
+            }
+            if !token.eq_ignore_ascii_case("identity") {
+                return Err(token.to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,5 +169,39 @@ mod tests {
         assert_eq!(parse_content_range("bytes 5-4/100"), None);
         assert_eq!(parse_content_range("nonsense"), None);
         assert_eq!(parse_content_range("bytes 0-0/abc"), None);
+    }
+
+    #[test]
+    fn identity_encoding_accepts_absent_and_identity() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(ensure_identity_encoding(&headers), Ok(()));
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("Identity"),
+        );
+        assert_eq!(ensure_identity_encoding(&headers), Ok(()));
+    }
+
+    #[test]
+    fn identity_encoding_rejects_any_other_token() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("identity, gzip"),
+        );
+        assert_eq!(ensure_identity_encoding(&headers), Err("gzip".to_string()));
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("identity"),
+        );
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("gzip"),
+        );
+        assert_eq!(ensure_identity_encoding(&headers), Err("gzip".to_string()));
     }
 }

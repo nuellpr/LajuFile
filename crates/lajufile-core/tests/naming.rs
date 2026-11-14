@@ -87,3 +87,13 @@ fn temp_path_appends_suffix() {
         std::path::PathBuf::from(r"D:\Downloads\file.zip.lajufile")
     );
 }
+
+#[test]
+fn reserved_windows_device_names_are_prefixed() {
+    assert_eq!(sanitize_file_name("CON"), "_CON");
+    assert_eq!(sanitize_file_name("con.txt"), "_con.txt");
+    assert_eq!(sanitize_file_name("AUX"), "_AUX");
+    assert_eq!(sanitize_file_name("COM1"), "_COM1");
+    assert_eq!(sanitize_file_name("COM0"), "COM0");
+    assert_eq!(sanitize_file_name("LPT10"), "LPT10");
+}

@@ -30,7 +30,12 @@ pub fn sanitize_file_name(name: &str) -> String {
         trimmed
     };
 
-    truncate_file_name(&out, MAX_FILE_NAME_CHARS)
+    let mut out = truncate_file_name(&out, MAX_FILE_NAME_CHARS);
+    if is_reserved_device_name(&out) {
+        out.insert(0, '_');
+        out = truncate_file_name(&out, MAX_FILE_NAME_CHARS);
+    }
+    out
 }
 
 pub fn truncate_file_name(name: &str, max_chars: usize) -> String {
@@ -62,6 +67,20 @@ pub fn truncate_file_name(name: &str, max_chars: usize) -> String {
     }
     truncated.push_str(ext);
     truncated
+}
+
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 pub fn resolve_file_name(

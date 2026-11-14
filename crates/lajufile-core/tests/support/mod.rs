@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
@@ -23,9 +23,15 @@ pub async fn start_server() -> String {
         .route("/missing", get(missing))
         .route("/redirect", get(redirect))
         .route("/encoded", get(encoded))
+        .route("/encoded-multi", get(encoded_multi))
         .route("/slow", get(slow))
         .route("/range-nolen", get(range_nolen))
-        .route("/empty-probe", get(empty_probe));
+        .route("/empty-probe", get(empty_probe))
+        .route("/partial", get(partial))
+        .route("/partial-unknown", get(partial_unknown))
+        .route("/partial-full", get(partial_full))
+        .route("/short", get(short))
+        .route("/long", get(long));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -48,6 +54,12 @@ fn response(
             .insert(name.clone(), HeaderValue::from_static(value));
     }
     response
+}
+
+fn chunked(data: Vec<u8>) -> Body {
+    Body::from_stream(tokio_stream::iter(vec![Ok::<Bytes, std::io::Error>(
+        Bytes::from(data),
+    )]))
 }
 
 async fn range(headers: HeaderMap) -> Response {
@@ -131,6 +143,22 @@ async fn encoded() -> Response {
     )
 }
 
+async fn encoded_multi() -> Response {
+    let mut response = response(
+        StatusCode::OK,
+        Body::from("fake"),
+        &[(header::CONTENT_LENGTH, "4")],
+    );
+    response.headers_mut().append(
+        header::CONTENT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
+    response
+        .headers_mut()
+        .append(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    response
+}
+
 async fn slow() -> Response {
     tokio::time::sleep(Duration::from_millis(200)).await;
     response(
@@ -157,4 +185,47 @@ async fn empty_probe() -> Response {
         Body::empty(),
         &[(header::CONTENT_RANGE, "bytes */0")],
     )
+}
+
+async fn partial() -> Response {
+    response(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from(payload()[..1].to_vec()),
+        &[
+            (header::CONTENT_RANGE, "bytes 0-0/1048576"),
+            (header::CONTENT_LENGTH, "1"),
+        ],
+    )
+}
+
+async fn partial_unknown() -> Response {
+    response(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from(payload()[..1].to_vec()),
+        &[
+            (header::CONTENT_RANGE, "bytes 0-0/*"),
+            (header::CONTENT_LENGTH, "1"),
+        ],
+    )
+}
+
+async fn partial_full() -> Response {
+    response(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from(payload()),
+        &[
+            (header::CONTENT_RANGE, "bytes 0-1048575/1048576"),
+            (header::CONTENT_LENGTH, "1048576"),
+        ],
+    )
+}
+
+async fn short() -> Response {
+    response(StatusCode::OK, chunked(payload()[..SIZE / 2].to_vec()), &[])
+}
+
+async fn long() -> Response {
+    let mut data = payload();
+    data.push(0);
+    response(StatusCode::OK, chunked(data), &[])
 }

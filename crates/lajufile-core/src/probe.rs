@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use reqwest::header::{
-    CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-    HeaderMap, HeaderName, LAST_MODIFIED, RANGE,
+    CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, HeaderName,
+    LAST_MODIFIED, RANGE,
 };
 use url::Url;
 
-use crate::http::{RequestOptions, apply_headers, parse_content_range};
+use crate::http::{RequestOptions, apply_headers, ensure_identity_encoding, parse_content_range};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResult {
@@ -63,10 +63,8 @@ pub async fn probe(
     let content_type = header_string(headers, CONTENT_TYPE);
     let content_disposition = header_string(headers, CONTENT_DISPOSITION);
 
-    if let Some(encoding) = header_string(headers, CONTENT_ENCODING) {
-        if !encoding.eq_ignore_ascii_case("identity") {
-            return Err(ProbeError::UnsupportedEncoding(encoding));
-        }
+    if let Err(encoding) = ensure_identity_encoding(headers) {
+        return Err(ProbeError::UnsupportedEncoding(encoding));
     }
 
     match status.as_u16() {

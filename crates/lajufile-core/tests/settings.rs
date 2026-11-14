@@ -1,4 +1,4 @@
-use lajufile_core::settings::{generate_token, Settings, Theme};
+use lajufile_core::settings::{Settings, Theme, generate_token};
 
 #[test]
 fn defaults_match_spec() {
@@ -72,4 +72,49 @@ fn generated_tokens_differ_and_are_hex() {
     assert_ne!(a, b);
     assert_eq!(a.len(), 64);
     assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn non_hex_token_is_repaired_and_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Settings {
+        bridge_token: "zz".into(),
+        ..Settings::default()
+    };
+    s.save(dir.path()).unwrap();
+
+    let loaded = Settings::load_or_create(dir.path()).unwrap();
+    assert_eq!(loaded.bridge_token.len(), 64);
+    assert!(loaded.bridge_token.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let raw = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        json["bridge_token"].as_str(),
+        Some(loaded.bridge_token.as_str())
+    );
+
+    let again = Settings::load_or_create(dir.path()).unwrap();
+    assert_eq!(again.bridge_token, loaded.bridge_token);
+}
+
+#[test]
+fn short_token_is_repaired_and_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Settings {
+        bridge_token: "a".repeat(63),
+        ..Settings::default()
+    };
+    s.save(dir.path()).unwrap();
+
+    let loaded = Settings::load_or_create(dir.path()).unwrap();
+    assert_eq!(loaded.bridge_token.len(), 64);
+    assert!(loaded.bridge_token.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let raw = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        json["bridge_token"].as_str(),
+        Some(loaded.bridge_token.as_str())
+    );
 }

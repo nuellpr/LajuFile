@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 pub fn data_dir() -> PathBuf {
     BaseDirs::new()
         .map(|b| b.data_dir().join("LajuFile"))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".lajufile"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(".lajufile")
+        })
 }
 
 /// The user's Downloads folder plus `LajuFile`, or a data-dir fallback.

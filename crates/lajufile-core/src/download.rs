@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use reqwest::header::{CONTENT_ENCODING, CONTENT_RANGE};
+use reqwest::header::CONTENT_RANGE;
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-use crate::http::{RequestOptions, apply_headers, parse_content_range};
+use crate::http::{RequestOptions, apply_headers, ensure_identity_encoding, parse_content_range};
 
 #[derive(Debug, Clone)]
 pub struct DownloadSpec {
@@ -71,11 +71,8 @@ where
         return Err(DownloadError::Status(status.as_u16()));
     }
 
-    if let Some(value) = response.headers().get(CONTENT_ENCODING) {
-        let encoding = value.to_str().unwrap_or("<invalid>");
-        if encoding != "identity" {
-            return Err(DownloadError::UnsupportedEncoding(encoding.to_string()));
-        }
+    if let Err(encoding) = ensure_identity_encoding(response.headers()) {
+        return Err(DownloadError::UnsupportedEncoding(encoding));
     }
 
     let mut expected = spec.expected_size;
@@ -87,20 +84,21 @@ where
             .ok_or_else(|| DownloadError::ContentRange("<missing>".to_string()))?;
         let range =
             parse_content_range(raw).ok_or_else(|| DownloadError::ContentRange(raw.to_string()))?;
-        if range.start != 0 {
+        let total = range
+            .total
+            .ok_or_else(|| DownloadError::ContentRange(raw.to_string()))?;
+        if range.start != 0 || range.end.checked_add(1) != Some(total) {
             return Err(DownloadError::ContentRange(raw.to_string()));
         }
-        if let Some(total) = range.total {
-            if let Some(known) = expected {
-                if known != total {
-                    return Err(DownloadError::SizeMismatch {
-                        expected: known,
-                        actual: total,
-                    });
-                }
+        if let Some(known) = expected {
+            if known != total {
+                return Err(DownloadError::SizeMismatch {
+                    expected: known,
+                    actual: total,
+                });
             }
-            expected = Some(total);
         }
+        expected = Some(total);
     } else if let Some(length) = response.content_length() {
         if let Some(known) = expected {
             if known != length {
@@ -146,16 +144,61 @@ where
     if spec.final_path.exists() {
         return Err(DownloadError::DestinationExists(spec.final_path.clone()));
     }
-    match std::fs::rename(&spec.temp_path, &spec.final_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(DownloadError::DestinationExists(spec.final_path.clone()));
-        }
-        Err(error) => return Err(error.into()),
-    }
+    finalize_temp(&spec.temp_path, &spec.final_path)?;
 
     Ok(DownloadOutcome {
         final_path: spec.final_path.clone(),
         bytes: downloaded,
     })
+}
+
+fn finalize_temp(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {
+    // shortcut: hard links need NTFS-like support; exFAT/FAT32 destinations fail
+    // with Io instead of overwriting. Upgrade to MoveFileExW without REPLACE_EXISTING.
+    match std::fs::hard_link(temp, final_path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temp);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(DownloadError::DestinationExists(final_path.to_path_buf()))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalize_refuses_existing_destination_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("file.bin.lajufile");
+        let final_path = dir.path().join("file.bin");
+        std::fs::write(&temp, b"new").unwrap();
+        std::fs::write(&final_path, b"keep").unwrap();
+
+        let error = finalize_temp(&temp, &final_path).unwrap_err();
+
+        assert!(matches!(
+            error,
+            DownloadError::DestinationExists(ref path) if path == &final_path
+        ));
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"new");
+    }
+
+    #[test]
+    fn finalize_moves_temp_when_destination_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("file.bin.lajufile");
+        let final_path = dir.path().join("file.bin");
+        std::fs::write(&temp, b"new").unwrap();
+
+        finalize_temp(&temp, &final_path).unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
+        assert!(!temp.exists());
+    }
 }
