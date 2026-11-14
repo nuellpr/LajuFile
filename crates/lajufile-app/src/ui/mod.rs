@@ -3,6 +3,7 @@
 pub mod dialogs;
 pub mod format;
 pub mod main_window;
+pub mod theme;
 
 use lajufile_core::settings::{Settings, Theme};
 use lajufile_core::store::{Category, Download, DownloadStatus};
@@ -61,6 +62,7 @@ pub enum Action {
     SetTheme(Theme),
     PauseAll,
     ResumeAll,
+    Exit,
 }
 
 #[cfg(test)]

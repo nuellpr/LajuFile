@@ -2,9 +2,12 @@ use std::time::{Duration, Instant};
 
 use lajufile_core::paths;
 use lajufile_core::settings::{Settings, Theme};
+use lajufile_core::store::DownloadStatus;
 
 use crate::engine::{Command, EngineConfig, EngineHandle, Snapshot};
+use crate::tray::{self, Tray, TrayEvent};
 use crate::ui::dialogs::AddDraft;
+use crate::ui::theme::apply_theme;
 use crate::ui::{self, Action, Filter};
 
 pub struct LajuFileApp {
@@ -20,6 +23,9 @@ pub struct LajuFileApp {
     pub(crate) toast: Option<(String, Instant)>,
     pub(crate) last_message: Option<String>,
     pub(crate) theme: Theme,
+    pub(crate) tray: Option<Tray>,
+    pub(crate) allow_exit: bool,
+    pub(crate) tray_tooltip: String,
 }
 
 impl LajuFileApp {
@@ -28,6 +34,13 @@ impl LajuFileApp {
         let settings = Settings::load_or_create(&data_dir).unwrap_or_default();
         let theme = settings.theme.clone();
         apply_theme(&cc.egui_ctx, &theme);
+
+        let icon =
+            eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/icon-32.png"))
+                .ok();
+        let tray = icon
+            .as_ref()
+            .and_then(|icon| tray::create(icon, &cc.egui_ctx));
 
         let add_draft = AddDraft::default();
         let settings_draft = settings.clone();
@@ -54,6 +67,9 @@ impl LajuFileApp {
             toast,
             last_message: None,
             theme,
+            tray,
+            allow_exit: false,
+            tray_tooltip: String::new(),
         }
     }
 
@@ -79,6 +95,55 @@ impl LajuFileApp {
         self.snapshot = Some(snapshot);
     }
 
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        let events = self.tray.as_ref().map(Tray::poll).unwrap_or_default();
+        for event in events {
+            match event {
+                TrayEvent::Show => self.show_window(ctx),
+                TrayEvent::Add => {
+                    self.show_window(ctx);
+                    self.add_draft = AddDraft::default();
+                    self.add_focus = true;
+                    self.show_add = true;
+                }
+                TrayEvent::PauseAll => self.send(Command::PauseAll),
+                TrayEvent::ResumeAll => self.send(Command::ResumeAll),
+                TrayEvent::Exit => {
+                    self.allow_exit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn show_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn update_tray_tooltip(&mut self) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let active = snapshot
+            .downloads
+            .iter()
+            .filter(|download| {
+                matches!(
+                    download.status,
+                    DownloadStatus::Queued | DownloadStatus::Downloading
+                )
+            })
+            .count();
+        let tooltip = format!("LajuFile — {active} active");
+        if tooltip != self.tray_tooltip {
+            if let Some(tray) = &self.tray {
+                tray.set_tooltip(&tooltip);
+            }
+            self.tray_tooltip = tooltip;
+        }
+    }
+
     fn handle_actions(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
         for action in actions {
             match action {
@@ -93,6 +158,10 @@ impl LajuFileApp {
                 }
                 Action::PauseAll => self.send(Command::PauseAll),
                 Action::ResumeAll => self.send(Command::ResumeAll),
+                Action::Exit => {
+                    self.allow_exit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 Action::Open(id) => {
                     if let Some(path) = self.path_for(id) {
                         let _ = std::process::Command::new("explorer").arg(path).spawn();
@@ -157,7 +226,24 @@ impl LajuFileApp {
 impl eframe::App for LajuFileApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_tray(&ctx);
+
+        let close_to_tray = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.settings.close_to_tray)
+            .unwrap_or(true);
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.allow_exit
+            && tray::should_hide_on_close(close_to_tray, self.tray.is_some())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        }
+
         self.poll_engine(&ctx);
+        self.update_tray_tooltip();
         let actions = egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ui, |ui| ui::main_window::draw(self, ui))
@@ -194,30 +280,6 @@ impl Drop for LajuFileApp {
             engine.shutdown();
         }
     }
-}
-
-fn apply_theme(ctx: &egui::Context, theme: &Theme) {
-    let mut visuals = match theme {
-        Theme::Light => egui::Visuals::light(),
-        Theme::Dark => egui::Visuals::dark(),
-    };
-    let (window, bar, text) = match theme {
-        Theme::Light => (
-            egui::Color32::from_rgb(0xF7, 0xF8, 0xFA),
-            egui::Color32::WHITE,
-            egui::Color32::from_rgb(0x18, 0x21, 0x2B),
-        ),
-        Theme::Dark => (
-            egui::Color32::from_rgb(0x0E, 0x13, 0x19),
-            egui::Color32::from_rgb(0x14, 0x1A, 0x21),
-            egui::Color32::from_rgb(0xE7, 0xED, 0xF5),
-        ),
-    };
-    visuals.panel_fill = window;
-    visuals.window_fill = bar;
-    visuals.extreme_bg_color = window;
-    visuals.override_text_color = Some(text);
-    ctx.set_visuals(visuals);
 }
 
 fn normalize_settings(settings: &mut Settings) {

@@ -173,7 +173,7 @@ fn draw_menu_bar(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<Action>
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        actions.push(Action::Exit);
                         ui.close();
                     }
                 });
