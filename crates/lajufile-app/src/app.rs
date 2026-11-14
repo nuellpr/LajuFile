@@ -42,7 +42,7 @@ impl LajuFileApp {
             .as_ref()
             .and_then(|icon| tray::create(icon, &cc.egui_ctx));
 
-        let add_draft = AddDraft::default();
+        let add_draft = AddDraft::for_settings(&settings);
         let settings_draft = settings.clone();
         let engine = EngineHandle::start(EngineConfig {
             data_dir: data_dir.clone(),
@@ -71,6 +71,13 @@ impl LajuFileApp {
             allow_exit: false,
             tray_tooltip: String::new(),
         }
+    }
+
+    fn fresh_add_draft(&self) -> AddDraft {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| AddDraft::for_settings(&snapshot.settings))
+            .unwrap_or_default()
     }
 
     fn poll_engine(&mut self, ctx: &egui::Context) {
@@ -102,7 +109,7 @@ impl LajuFileApp {
                 TrayEvent::Show => self.show_window(ctx),
                 TrayEvent::Add => {
                     self.show_window(ctx);
-                    self.add_draft = AddDraft::default();
+                    self.add_draft = self.fresh_add_draft();
                     self.add_focus = true;
                     self.show_add = true;
                 }
@@ -177,7 +184,7 @@ impl LajuFileApp {
                 }
                 Action::CopyUrl(url) => ctx.copy_text(url),
                 Action::OpenAdd => {
-                    self.add_draft = AddDraft::default();
+                    self.add_draft = self.fresh_add_draft();
                     self.add_focus = true;
                     self.show_add = true;
                 }
@@ -292,6 +299,7 @@ fn normalize_settings(settings: &mut Settings) {
     }
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
+    settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
 }
 
 #[cfg(test)]
@@ -306,6 +314,7 @@ mod tests {
             file_name: "  ".into(),
             folder: " ".into(),
             start_now: true,
+            connections: 8,
         };
         let request = draft.into_request();
         assert_eq!(request.url, "https://example.com/a.bin");
@@ -318,10 +327,22 @@ mod tests {
         let mut settings = Settings {
             max_concurrent: 0,
             max_connections: 99,
+            global_speed_limit_kbps: 2_000_000,
             ..Settings::default()
         };
         normalize_settings(&mut settings);
         assert_eq!(settings.max_concurrent, 1);
         assert_eq!(settings.max_connections, 32);
+        assert_eq!(settings.global_speed_limit_kbps, 1_000_000);
+    }
+
+    #[test]
+    fn normalize_settings_raises_zero_connections() {
+        let mut settings = Settings {
+            max_connections: 0,
+            ..Settings::default()
+        };
+        normalize_settings(&mut settings);
+        assert_eq!(settings.max_connections, 1);
     }
 }

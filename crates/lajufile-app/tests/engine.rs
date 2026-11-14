@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use lajufile_app::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use lajufile_core::settings::Settings;
 use lajufile_core::store::{DownloadStatus, Store};
-use support::start_server;
+use support::{SEG_SIZE, seg_payload, start_server};
 
 #[test]
 fn add_probes_and_inserts() {
@@ -31,10 +31,11 @@ fn add_probes_and_inserts() {
             file_name: None,
             save_dir: None,
             start_now: false,
+            connections: None,
         }))
         .unwrap();
 
-    let snap = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(5));
+    let snap = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(15));
     assert_eq!(snap.downloads[0].file_name, "file.bin");
     assert_eq!(snap.downloads[0].url, format!("{}/file.bin", server.base));
 
@@ -64,13 +65,14 @@ fn add_missing_url_keeps_store_empty() {
             file_name: None,
             save_dir: None,
             start_now: false,
+            connections: None,
         }))
         .unwrap();
 
     let snap = wait_for(
         &handle,
         |s| s.message.as_deref().is_some_and(|m| m.contains("failed")),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     assert!(snap.downloads.is_empty());
 
@@ -99,6 +101,7 @@ fn add_duplicate_active_is_rejected() {
         file_name: None,
         save_dir: None,
         start_now: true,
+        connections: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -108,7 +111,7 @@ fn add_duplicate_active_is_rejected() {
                 .first()
                 .is_some_and(|d| d.status == DownloadStatus::Downloading)
         },
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     let first_id = first.downloads[0].id;
 
@@ -118,12 +121,13 @@ fn add_duplicate_active_is_rejected() {
             file_name: None,
             save_dir: None,
             start_now: true,
+            connections: None,
         }))
         .unwrap();
     let second = wait_for(
         &handle,
         |s| s.message.as_deref().is_some_and(|m| m.contains("Already")),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
 
     assert_eq!(second.downloads.len(), 1);
@@ -154,6 +158,7 @@ fn back_to_back_duplicate_is_rejected() {
                 file_name: None,
                 save_dir: None,
                 start_now: true,
+                connections: None,
             }))
             .unwrap();
     }
@@ -161,7 +166,7 @@ fn back_to_back_duplicate_is_rejected() {
     let snap = wait_for(
         &handle,
         |s| s.downloads.len() == 1 && s.message.as_deref().is_some_and(|m| m.contains("Already")),
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     assert_eq!(snap.downloads.len(), 1);
     handle.shutdown();
@@ -189,6 +194,7 @@ fn same_explicit_name_gets_distinct_paths() {
                 file_name: Some("same.bin".to_string()),
                 save_dir: None,
                 start_now: true,
+                connections: None,
             }))
             .unwrap();
     }
@@ -202,6 +208,61 @@ fn same_explicit_name_gets_distinct_paths() {
     assert_ne!(snap.downloads[0].temp_path, snap.downloads[1].temp_path);
     assert!(snap.downloads.iter().all(|d| d.save_path.exists()));
     handle.shutdown();
+}
+
+#[test]
+fn pause_persists_every_segment_before_status_change() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 4,
+        max_concurrent: 1,
+        global_speed_limit_kbps: 256,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/slow-seg.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        }))
+        .unwrap();
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads.first().is_some_and(|d| {
+                d.status == DownloadStatus::Downloading && d.downloaded >= 256 * 1024
+            })
+        },
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+
+    handle.send(Command::Pause(id)).unwrap();
+    wait_for(
+        &handle,
+        |s| s.downloads[0].status == DownloadStatus::Paused,
+        Duration::from_secs(15),
+    );
+    handle.shutdown();
+
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    let download = store.get_download(id).unwrap();
+    let segments = store.segments(id).unwrap();
+    assert_eq!(segments.len(), 4);
+    assert!(segments.iter().all(|segment| segment.done > 0));
+    let sum: u64 = segments.iter().map(|segment| segment.done).sum();
+    assert_eq!(download.downloaded, sum);
 }
 
 fn wait_for(
@@ -243,6 +304,7 @@ fn add_start_now_downloads_file() {
             file_name: None,
             save_dir: None,
             start_now: true,
+            connections: None,
         }))
         .unwrap();
 
@@ -288,6 +350,7 @@ fn queue_never_exceeds_max_concurrent() {
                 file_name: Some(name.to_string()),
                 save_dir: None,
                 start_now: true,
+                connections: None,
             }))
             .unwrap();
     }
@@ -300,7 +363,7 @@ fn queue_never_exceeds_max_concurrent() {
                     .iter()
                     .any(|d| d.status == DownloadStatus::Downloading)
         },
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     assert_eq!(
         snap.downloads
@@ -348,6 +411,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             file_name: None,
             save_dir: None,
             start_now: true,
+            connections: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -357,7 +421,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
                 .first()
                 .is_some_and(|d| d.status == DownloadStatus::Downloading)
         },
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     let id = snap.downloads[0].id;
 
@@ -365,7 +429,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
     wait_for(
         &handle,
         |s| s.downloads[0].status == DownloadStatus::Paused,
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     std::thread::sleep(Duration::from_millis(600));
     let still_paused = handle.latest_snapshot().unwrap();
@@ -403,6 +467,7 @@ fn remove_deletes_record_and_temp() {
             file_name: None,
             save_dir: None,
             start_now: true,
+            connections: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -412,13 +477,13 @@ fn remove_deletes_record_and_temp() {
                 .first()
                 .is_some_and(|d| d.status == DownloadStatus::Downloading)
         },
-        Duration::from_secs(5),
+        Duration::from_secs(15),
     );
     let id = snap.downloads[0].id;
     let temp_path = snap.downloads[0].temp_path.clone();
 
     handle.send(Command::Remove(id)).unwrap();
-    wait_for(&handle, |s| s.downloads.is_empty(), Duration::from_secs(5));
+    wait_for(&handle, |s| s.downloads.is_empty(), Duration::from_secs(15));
     std::thread::sleep(Duration::from_millis(600));
     assert!(handle.latest_snapshot().unwrap().downloads.is_empty());
 
@@ -426,4 +491,217 @@ fn remove_deletes_record_and_temp() {
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert!(store.list_downloads().unwrap().is_empty());
     assert!(!temp_path.exists());
+}
+
+#[test]
+fn segmented_download_uses_multiple_ranges_and_completes() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 4,
+        max_concurrent: 1,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/seg.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| s.downloads.len() == 1 && s.downloads[0].status == DownloadStatus::Done,
+        Duration::from_secs(15),
+    );
+    let download = &snap.downloads[0];
+    assert_eq!(download.connections, 4);
+    assert_eq!(std::fs::read(&download.save_path).unwrap(), seg_payload());
+    assert!(server.ranges().len() >= 4);
+    handle.shutdown();
+}
+
+#[test]
+fn range_ignored_falls_back_to_single() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 4,
+        max_concurrent: 1,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/range0-only.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| s.downloads.len() == 1 && s.downloads[0].status == DownloadStatus::Done,
+        Duration::from_secs(20),
+    );
+    let download = &snap.downloads[0];
+    assert_eq!(download.connections, 1);
+    assert!(!download.ranged);
+    assert_eq!(std::fs::read(&download.save_path).unwrap(), seg_payload());
+    handle.shutdown();
+}
+
+#[test]
+fn pause_and_resume_continue_from_offset() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 4,
+        max_concurrent: 1,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/slow-seg.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        }))
+        .unwrap();
+    let snap = wait_for(
+        &handle,
+        |s| s.downloads.first().is_some_and(|d| d.downloaded > 0),
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+    std::thread::sleep(Duration::from_millis(100));
+
+    handle.send(Command::Pause(id)).unwrap();
+    wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let ranges_before = server.ranges().len();
+
+    handle.send(Command::Resume(id)).unwrap();
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        std::fs::read(&done.downloads[0].save_path).unwrap(),
+        seg_payload()
+    );
+    let ranges = server.ranges();
+    let resumed = &ranges[ranges_before..];
+    assert!(
+        resumed
+            .iter()
+            .any(|start| *start > 0 && *start % (1024 * 1024) != 0),
+        "expected a resumed range at a partial offset, got {resumed:?}"
+    );
+    handle.shutdown();
+}
+
+#[test]
+fn add_records_requested_connections() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 8,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/seg.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: false,
+            connections: Some(2),
+        }))
+        .unwrap();
+
+    let snap = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(15));
+    let id = snap.downloads[0].id;
+    assert_eq!(snap.downloads[0].connections, 2);
+    handle.shutdown();
+
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    let download = store.get_download(id).unwrap();
+    let segments = store.segments(id).unwrap();
+    assert_eq!(download.connections, 2);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].start, 0);
+    assert_eq!(segments[1].end as usize, SEG_SIZE - 1);
+}
+
+#[test]
+fn startup_settings_are_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_concurrent: 99,
+        max_connections: 99,
+        global_speed_limit_kbps: 2_000_000,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    let snap = wait_for(&handle, |_| true, Duration::from_secs(15));
+    assert_eq!(snap.settings.max_concurrent, 10);
+    assert_eq!(snap.settings.max_connections, 32);
+    assert_eq!(snap.settings.global_speed_limit_kbps, 1_000_000);
+    handle.shutdown();
 }

@@ -192,15 +192,8 @@ impl Store {
         id: i64,
         segment_idx: u32,
         done: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<u64, StoreError> {
         let tx = self.conn.transaction()?;
-        let changed = tx.execute(
-            "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
-            params![done as i64, id],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::NotFound(id));
-        }
         let changed = tx.execute(
             "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = ?3",
             params![done as i64, id, segment_idx as i64],
@@ -208,8 +201,97 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
+        let total: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(done), 0) FROM segments WHERE download_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let changed = tx.execute(
+            "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
+            params![total, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
         tx.commit()?;
-        Ok(())
+        Ok(total as u64)
+    }
+
+    pub fn update_progress_batch(
+        &mut self,
+        id: i64,
+        updates: &[(u32, u64)],
+    ) -> Result<u64, StoreError> {
+        let tx = self.conn.transaction()?;
+        for (segment_idx, done) in updates {
+            let changed = tx.execute(
+                "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = ?3",
+                params![*done as i64, id, *segment_idx as i64],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::NotFound(id));
+            }
+        }
+        let total: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(done), 0) FROM segments WHERE download_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let changed = tx.execute(
+            "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
+            params![total, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.commit()?;
+        Ok(total as u64)
+    }
+
+    pub fn replace_segments(
+        &mut self,
+        id: i64,
+        segments: &[Segment],
+        connections: u32,
+        ranged: bool,
+    ) -> Result<u64, StoreError> {
+        let tx = self.conn.transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.execute("DELETE FROM segments WHERE download_id = ?1", [id])?;
+        let mut total = 0u64;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO segments (download_id, idx, start, end, done)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for segment in segments {
+                insert.execute(params![
+                    id,
+                    segment.idx as i64,
+                    segment.start as i64,
+                    segment.end as i64,
+                    segment.done as i64
+                ])?;
+                total = total.saturating_add(segment.done);
+            }
+        }
+        let changed = tx.execute(
+            "UPDATE downloads SET connections = ?1, ranged = ?2, downloaded = ?3
+             WHERE id = ?4",
+            params![connections as i64, ranged as i64, total as i64, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.commit()?;
+        Ok(total)
     }
 
     pub fn mark_done(&mut self, id: i64, completed_at: i64) -> Result<(), StoreError> {

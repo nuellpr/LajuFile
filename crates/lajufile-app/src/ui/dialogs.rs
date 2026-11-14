@@ -15,6 +15,7 @@ pub struct AddDraft {
     pub file_name: String,
     pub folder: String,
     pub start_now: bool,
+    pub connections: u32,
 }
 
 impl Default for AddDraft {
@@ -24,17 +25,26 @@ impl Default for AddDraft {
             file_name: String::new(),
             folder: String::new(),
             start_now: true,
+            connections: 8,
         }
     }
 }
 
 impl AddDraft {
+    pub fn for_settings(settings: &Settings) -> Self {
+        Self {
+            connections: settings.max_connections.clamp(1, 32),
+            ..Self::default()
+        }
+    }
+
     pub fn into_request(self) -> AddRequest {
         AddRequest {
             url: self.url.trim().to_string(),
             file_name: non_empty(self.file_name),
             save_dir: non_empty(self.folder).map(PathBuf::from),
             start_now: self.start_now,
+            connections: Some(self.connections.clamp(1, 32)),
         }
     }
 }
@@ -50,7 +60,7 @@ pub fn add_dialog(
         .collapsible(false)
         .resizable(false)
         .default_width(600.0)
-        .default_height(0.0)
+        .min_height(360.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_width(560.0);
@@ -81,8 +91,9 @@ pub fn add_dialog(
 
             ui.add_space(12.0);
             ui.checkbox(&mut draft.start_now, "Start downloading now");
+            ui.add(egui::Slider::new(&mut draft.connections, 1..=32).text("Connections"));
             ui.label(
-                RichText::new("Connections: 1 (segmented downloads arrive in M3)")
+                RichText::new("Parallel ranges are used when the server supports them.")
                     .size(11.0)
                     .color(ui.visuals().weak_text_color()),
             );
@@ -146,25 +157,24 @@ pub fn settings_dialog(
                         egui::Slider::new(&mut settings.max_concurrent, 1..=10)
                             .text("Simultaneous downloads"),
                     );
-                    ui.add_enabled(
-                        false,
+                    ui.add(
                         egui::Slider::new(&mut settings.max_connections, 1..=32)
                             .text("Connections per download"),
                     );
                     ui.label(
-                        RichText::new("Segmented downloads arrive in M3")
+                        RichText::new("Parallel ranges are used when the server supports them.")
                             .size(11.0)
                             .color(ui.visuals().weak_text_color()),
                     );
-                    ui.add_enabled(
-                        false,
+                    ui.add(
                         egui::DragValue::new(&mut settings.global_speed_limit_kbps)
+                            .range(0..=1_000_000)
                             .speed(64)
                             .suffix(" KB/s")
                             .prefix("Speed limit "),
                     );
                     ui.label(
-                        RichText::new("Speed limit arrives in M3")
+                        RichText::new("0 KB/s means unlimited.")
                             .size(11.0)
                             .color(ui.visuals().weak_text_color()),
                     );
@@ -240,12 +250,34 @@ mod tests {
             file_name: " a.bin ".into(),
             folder: " D:\\Downloads ".into(),
             start_now: false,
+            connections: 8,
         }
         .into_request();
         assert_eq!(request.url, "https://example.com/a.bin");
         assert_eq!(request.file_name.as_deref(), Some("a.bin"));
         assert_eq!(request.save_dir, Some(PathBuf::from("D:\\Downloads")));
         assert!(!request.start_now);
+        assert_eq!(request.connections, Some(8));
+    }
+
+    #[test]
+    fn add_draft_uses_settings_connections() {
+        let settings = Settings {
+            max_connections: 3,
+            ..Settings::default()
+        };
+        let request = AddDraft::for_settings(&settings).into_request();
+        assert_eq!(request.connections, Some(3));
+    }
+
+    #[test]
+    fn add_draft_clamps_connections() {
+        let request = AddDraft {
+            connections: 99,
+            ..AddDraft::default()
+        }
+        .into_request();
+        assert_eq!(request.connections, Some(32));
     }
 
     #[test]
