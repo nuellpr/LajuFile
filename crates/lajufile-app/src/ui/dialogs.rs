@@ -35,6 +35,7 @@ impl AddDraft {
             file_name: non_empty(self.file_name),
             save_dir: non_empty(self.folder).map(PathBuf::from),
             start_now: self.start_now,
+            connections: None,
         }
     }
 }
