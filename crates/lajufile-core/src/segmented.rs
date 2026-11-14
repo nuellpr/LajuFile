@@ -1,12 +1,12 @@
 //! Concurrent ranged downloads over a preallocated temporary file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_RANGE, IF_RANGE, RANGE};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use url::Url;
 
@@ -39,6 +39,73 @@ pub enum SegmentedError {
     InvalidSegments(String),
 }
 
+/// Compare a local temp prefix with the first 64 KiB of the remote file.
+/// Any request, status, range, encoding, or I/O problem counts as no match.
+pub async fn prefix_matches(
+    client: &reqwest::Client,
+    url: &Url,
+    temp: &Path,
+    size: u64,
+    options: &RequestOptions,
+) -> bool {
+    let length = size.min(64 * 1024);
+    if length == 0 {
+        return false;
+    }
+
+    let mut file = match tokio::fs::File::open(temp).await {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut prefix = vec![0_u8; length as usize];
+    if file.read_exact(&mut prefix).await.is_err() {
+        return false;
+    }
+
+    let request = client
+        .get(url.clone())
+        .header(RANGE, format!("bytes=0-{}", length - 1));
+    let response = match apply_headers(request, options).send().await {
+        Ok(response) => response,
+        Err(_) => return false,
+    };
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return false;
+    }
+    if ensure_identity_encoding(response.headers()).is_err() {
+        return false;
+    }
+    let Some(raw) = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(range) = parse_content_range(raw) else {
+        return false;
+    };
+    if range.start != 0 || range.end.checked_add(1) != Some(length) || range.total != Some(size) {
+        return false;
+    }
+
+    let mut body = Vec::with_capacity(length as usize);
+    let mut response = response;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > length as usize {
+                    return false;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return false,
+        }
+    }
+    body == prefix
+}
+
 pub async fn download_segmented<F>(
     client: &reqwest::Client,
     spec: &SegmentedSpec,
@@ -60,7 +127,10 @@ where
 
     validate_segments(spec.size, &spec.segments)?;
 
-    if spec.segments.iter().any(|segment| segment.done > 0) && spec.if_range.is_none() {
+    if spec.segments.iter().any(|segment| segment.done > 0)
+        && spec.if_range.is_none()
+        && !prefix_matches(client, &spec.url, &spec.temp_path, spec.size, &spec.options).await
+    {
         return Err(SegmentedError::RestartRequired);
     }
 
@@ -293,9 +363,7 @@ where
     let mut request = client
         .get(url.clone())
         .header(RANGE, format!("bytes={expected_start}-{}", segment.end));
-    if *done > 0
-        && let Some(value) = if_range
-    {
+    if let Some(value) = if_range {
         request = request.header(IF_RANGE, value);
     }
     let response = apply_headers(request, options)
