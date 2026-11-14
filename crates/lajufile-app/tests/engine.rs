@@ -210,6 +210,61 @@ fn same_explicit_name_gets_distinct_paths() {
     handle.shutdown();
 }
 
+#[test]
+fn pause_persists_every_segment_before_status_change() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 4,
+        max_concurrent: 1,
+        global_speed_limit_kbps: 256,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/slow-seg.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        }))
+        .unwrap();
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads.first().is_some_and(|d| {
+                d.status == DownloadStatus::Downloading && d.downloaded >= 256 * 1024
+            })
+        },
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+
+    handle.send(Command::Pause(id)).unwrap();
+    wait_for(
+        &handle,
+        |s| s.downloads[0].status == DownloadStatus::Paused,
+        Duration::from_secs(15),
+    );
+    handle.shutdown();
+
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    let download = store.get_download(id).unwrap();
+    let segments = store.segments(id).unwrap();
+    assert_eq!(segments.len(), 4);
+    assert!(segments.iter().all(|segment| segment.done > 0));
+    let sum: u64 = segments.iter().map(|segment| segment.done).sum();
+    assert_eq!(download.downloaded, sum);
+}
+
 fn wait_for(
     handle: &EngineHandle,
     predicate: impl Fn(&Snapshot) -> bool,

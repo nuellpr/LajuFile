@@ -11,7 +11,7 @@ use url::Url;
 
 mod support;
 
-use support::{SEG_SIZE, seg_payload, start_server};
+use support::{SEG_SIZE, seg_payload, start_server, start_server_with_ranges};
 
 fn spec(
     base: &str,
@@ -201,7 +201,7 @@ async fn refuses_existing_final() {
 
 #[tokio::test]
 async fn resume_uses_done_offsets() {
-    let base = start_server().await;
+    let (base, ranges) = start_server_with_ranges().await;
     let dir = tempfile::tempdir().unwrap();
     let temp = dir.path().join("file.bin.lajufile");
     let final_path = dir.path().join("file.bin");
@@ -223,6 +223,44 @@ async fn resume_uses_done_offsets() {
         .unwrap();
 
     assert_eq!(std::fs::read(&final_path).unwrap(), seg_payload());
+    let starts = ranges.lock().unwrap().clone();
+    for expected in [524_288, 1_048_576, 2_097_152, 3_145_728] {
+        assert!(
+            starts.contains(&expected),
+            "missing resumed range start {expected}: {starts:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn if_range_match_resumes_from_done_offset() {
+    let (base, ranges) = start_server_with_ranges().await;
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join("file.bin.lajufile");
+    let final_path = dir.path().join("file.bin");
+    std::fs::write(&temp, &seg_payload()[..512 * 1024]).unwrap();
+    let mut segments = segments();
+    segments[0].done = 512 * 1024;
+    let spec = spec(
+        &base,
+        "/seg",
+        temp,
+        final_path.clone(),
+        segments,
+        Vec::new(),
+        Some("\"seg-v1\"".to_string()),
+    );
+
+    download_segmented(&client(), &spec, |_, _, _| {})
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), seg_payload());
+    let starts = ranges.lock().unwrap().clone();
+    assert!(
+        starts.contains(&524_288),
+        "resume did not request the saved offset: {starts:?}"
+    );
 }
 
 #[tokio::test]

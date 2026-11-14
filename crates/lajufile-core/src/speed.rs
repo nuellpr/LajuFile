@@ -35,29 +35,35 @@ impl RateLimiter {
         self.kbps.load(Ordering::Relaxed)
     }
 
-    pub async fn throttle(&self, bytes: u64) {
-        if bytes == 0 {
-            return;
-        }
-        loop {
+    pub async fn throttle(&self, mut bytes: u64) {
+        while bytes > 0 {
             let kbps = self.kbps();
             if kbps == 0 {
                 return;
             }
             let rate = kbps as f64 * 1024.0;
+            // Consume at most one second of tokens per pass so a chunk larger
+            // than the bucket capacity can never wait forever.
+            let slice = bytes.min(rate as u64).max(1);
             let wait = {
                 let mut bucket = self.bucket.lock().unwrap();
                 let now = Instant::now();
                 let elapsed = now.duration_since(bucket.last).as_secs_f64();
                 bucket.tokens = (bucket.tokens + elapsed * rate).min(rate);
                 bucket.last = now;
-                if bucket.tokens >= bytes as f64 {
-                    bucket.tokens -= bytes as f64;
-                    return;
+                if bucket.tokens >= slice as f64 {
+                    bucket.tokens -= slice as f64;
+                    None
+                } else {
+                    Some(Duration::from_secs_f64(
+                        (slice as f64 - bucket.tokens) / rate,
+                    ))
                 }
-                Duration::from_secs_f64((bytes as f64 - bucket.tokens) / rate)
             };
-            tokio::time::sleep(wait).await;
+            match wait {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => bytes -= slice,
+            }
         }
     }
 }
@@ -90,5 +96,28 @@ mod tests {
         assert_eq!(limiter.kbps(), 64);
         limiter.set_kbps(0);
         assert_eq!(limiter.kbps(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttle_larger_than_one_second_of_limit_completes() {
+        let limiter = RateLimiter::new(1); // 1 KB/s
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(10), limiter.throttle(2048))
+            .await
+            .expect("throttle must not hang when bytes exceed the bucket capacity");
+        assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lowering_limit_mid_throttle_completes() {
+        let limiter = std::sync::Arc::new(RateLimiter::new(256));
+        let worker = std::sync::Arc::clone(&limiter);
+        let task = tokio::spawn(async move { worker.throttle(512 * 1024).await });
+        tokio::task::yield_now().await;
+        limiter.set_kbps(64);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("lowering the limit must not hang an in-flight throttle")
+            .unwrap();
     }
 }

@@ -159,6 +159,7 @@ struct EngineState {
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
+    pending_segments: HashMap<(i64, u32), u64>,
     last_persist: HashMap<i64, Instant>,
     message: Option<String>,
 }
@@ -207,6 +208,7 @@ fn engine_loop(
         generation: 0,
         speeds: HashMap::new(),
         progress: HashMap::new(),
+        pending_segments: HashMap::new(),
         last_persist: HashMap::new(),
         message: None,
     };
@@ -422,12 +424,13 @@ impl EngineState {
                     return;
                 }
                 self.record_speed(id, done);
+                self.pending_segments.insert((id, 0), done);
                 let should_persist = self
                     .last_persist
                     .get(&id)
                     .is_none_or(|at| at.elapsed() >= Duration::from_secs(1));
                 if should_persist {
-                    let _ = self.store.update_progress(id, 0, done);
+                    self.flush_segment_progress(id);
                     self.last_persist.insert(id, Instant::now());
                 }
             }
@@ -442,12 +445,13 @@ impl EngineState {
                     return;
                 }
                 self.record_speed(id, total);
+                self.pending_segments.insert((id, idx), segment_done);
                 let should_persist = self
                     .last_persist
                     .get(&id)
                     .is_none_or(|at| at.elapsed() >= Duration::from_secs(1));
                 if should_persist {
-                    let _ = self.store.update_progress(id, idx, segment_done);
+                    self.flush_segment_progress(id);
                     self.last_persist.insert(id, Instant::now());
                 }
             }
@@ -460,6 +464,7 @@ impl EngineState {
                     return;
                 }
                 self.active.remove(&id);
+                self.clear_pending(id);
                 self.reset_to_single(id, &reason);
                 self.speeds.remove(&id);
                 self.progress.remove(&id);
@@ -478,6 +483,7 @@ impl EngineState {
                     return;
                 }
                 self.active.remove(&id);
+                self.flush_segment_progress(id);
                 match result {
                     Ok(_) => {
                         let _ = self.store.mark_done(id, now_millis());
@@ -490,6 +496,7 @@ impl EngineState {
                         );
                     }
                 }
+                self.clear_pending(id);
                 self.speeds.remove(&id);
                 self.progress.remove(&id);
                 self.last_persist.remove(&id);
@@ -510,6 +517,28 @@ impl EngineState {
         self.progress.insert(id, (done, now));
     }
 
+    fn flush_segment_progress(&mut self, id: i64) {
+        let updates: Vec<(u32, u64)> = self
+            .pending_segments
+            .iter()
+            .filter(|((download_id, _), _)| *download_id == id)
+            .map(|((_, idx), done)| (*idx, *done))
+            .collect();
+        if updates.is_empty() {
+            return;
+        }
+        if self.store.update_progress_batch(id, &updates).is_ok() {
+            for (idx, _) in updates {
+                self.pending_segments.remove(&(id, idx));
+            }
+        }
+    }
+
+    fn clear_pending(&mut self, id: i64) {
+        self.pending_segments
+            .retain(|(download_id, _), _| *download_id != id);
+    }
+
     fn start_download(&mut self, download: &Download) -> bool {
         if self.active.contains_key(&download.id) {
             return false;
@@ -528,6 +557,7 @@ impl EngineState {
 
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        self.clear_pending(download.id);
         if self
             .store
             .update_status(download.id, DownloadStatus::Downloading, None)
@@ -681,12 +711,14 @@ impl EngineState {
     }
 
     fn pause_with_pump(&mut self, id: i64, pump: bool) {
+        self.flush_segment_progress(id);
         if let Some(active) = self.active.remove(&id) {
             active.handle.abort();
             self.speeds.remove(&id);
             self.progress.remove(&id);
             self.last_persist.remove(&id);
         }
+        self.clear_pending(id);
         if let Ok(download) = self.store.get_download(id) {
             if matches!(
                 download.status,
@@ -730,6 +762,7 @@ impl EngineState {
         self.speeds.remove(&id);
         self.progress.remove(&id);
         self.last_persist.remove(&id);
+        self.clear_pending(id);
         self.pump_queue();
     }
 
@@ -787,10 +820,12 @@ impl EngineState {
     fn shutdown(&mut self) {
         let active: Vec<i64> = self.active.keys().copied().collect();
         for id in active {
+            self.flush_segment_progress(id);
             if let Some(download) = self.active.remove(&id) {
                 download.handle.abort();
                 let _ = self.store.update_status(id, DownloadStatus::Paused, None);
             }
+            self.clear_pending(id);
         }
     }
 

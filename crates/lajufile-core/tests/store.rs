@@ -264,6 +264,48 @@ fn update_progress_aggregates_segments() {
 }
 
 #[test]
+fn update_progress_batch_rolls_back_on_unknown_segment() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .insert_download(&sample_with_segments(
+            200,
+            vec![
+                Segment {
+                    idx: 0,
+                    start: 0,
+                    end: 99,
+                    done: 0,
+                },
+                Segment {
+                    idx: 1,
+                    start: 100,
+                    end: 199,
+                    done: 0,
+                },
+            ],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store
+            .update_progress_batch(id, &[(0, 100), (1, 50)])
+            .unwrap(),
+        150
+    );
+    assert_eq!(store.get_download(id).unwrap().downloaded, 150);
+    let segments = store.segments(id).unwrap();
+    assert_eq!(segments[0].done, 100);
+    assert_eq!(segments[1].done, 50);
+
+    assert!(matches!(
+        store.update_progress_batch(id, &[(0, 10), (7, 10)]),
+        Err(StoreError::NotFound(_))
+    ));
+    assert_eq!(store.get_download(id).unwrap().downloaded, 150);
+    assert_eq!(store.segments(id).unwrap()[0].done, 100);
+}
+
+#[test]
 fn replace_segments_resets_progress_and_metadata() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store

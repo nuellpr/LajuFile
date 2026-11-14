@@ -42,7 +42,7 @@ impl LajuFileApp {
             .as_ref()
             .and_then(|icon| tray::create(icon, &cc.egui_ctx));
 
-        let add_draft = AddDraft::default();
+        let add_draft = AddDraft::for_settings(&settings);
         let settings_draft = settings.clone();
         let engine = EngineHandle::start(EngineConfig {
             data_dir: data_dir.clone(),
@@ -71,6 +71,13 @@ impl LajuFileApp {
             allow_exit: false,
             tray_tooltip: String::new(),
         }
+    }
+
+    fn fresh_add_draft(&self) -> AddDraft {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| AddDraft::for_settings(&snapshot.settings))
+            .unwrap_or_default()
     }
 
     fn poll_engine(&mut self, ctx: &egui::Context) {
@@ -102,7 +109,7 @@ impl LajuFileApp {
                 TrayEvent::Show => self.show_window(ctx),
                 TrayEvent::Add => {
                     self.show_window(ctx);
-                    self.add_draft = AddDraft::default();
+                    self.add_draft = self.fresh_add_draft();
                     self.add_focus = true;
                     self.show_add = true;
                 }
@@ -177,7 +184,7 @@ impl LajuFileApp {
                 }
                 Action::CopyUrl(url) => ctx.copy_text(url),
                 Action::OpenAdd => {
-                    self.add_draft = AddDraft::default();
+                    self.add_draft = self.fresh_add_draft();
                     self.add_focus = true;
                     self.show_add = true;
                 }

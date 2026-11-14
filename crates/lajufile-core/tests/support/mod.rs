@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -28,9 +28,15 @@ pub fn seg_payload() -> Vec<u8> {
 #[derive(Clone)]
 struct SegState {
     flaky_failed: Arc<AtomicBool>,
+    ranges: Arc<Mutex<Vec<u64>>>,
 }
 
 pub async fn start_server() -> String {
+    start_server_with_ranges().await.0
+}
+
+pub async fn start_server_with_ranges() -> (String, Arc<Mutex<Vec<u64>>>) {
+    let ranges = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
         .route("/range", get(range))
         .route("/plain", get(plain))
@@ -54,6 +60,7 @@ pub async fn start_server() -> String {
         .route("/seg-always-500", get(seg_always_500))
         .with_state(SegState {
             flaky_failed: Arc::new(AtomicBool::new(false)),
+            ranges: Arc::clone(&ranges),
         });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -61,7 +68,7 @@ pub async fn start_server() -> String {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), ranges)
 }
 
 fn response(
@@ -307,9 +314,12 @@ fn seg_range(headers: &HeaderMap, start: usize, end: usize) -> Response {
     )
 }
 
-async fn seg(headers: HeaderMap) -> Response {
+async fn seg(State(state): State<SegState>, headers: HeaderMap) -> Response {
     match parse_range(&headers) {
-        Some((start, end)) => seg_range(&headers, start, end),
+        Some((start, end)) => {
+            state.ranges.lock().unwrap().push(start as u64);
+            seg_range(&headers, start, end)
+        }
         None => seg_full(),
     }
 }

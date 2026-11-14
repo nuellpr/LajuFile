@@ -31,6 +31,13 @@ impl Default for AddDraft {
 }
 
 impl AddDraft {
+    pub fn for_settings(settings: &Settings) -> Self {
+        Self {
+            connections: settings.max_connections.clamp(1, 32),
+            ..Self::default()
+        }
+    }
+
     pub fn into_request(self) -> AddRequest {
         AddRequest {
             url: self.url.trim().to_string(),
@@ -251,6 +258,16 @@ mod tests {
         assert_eq!(request.save_dir, Some(PathBuf::from("D:\\Downloads")));
         assert!(!request.start_now);
         assert_eq!(request.connections, Some(8));
+    }
+
+    #[test]
+    fn add_draft_uses_settings_connections() {
+        let settings = Settings {
+            max_connections: 3,
+            ..Settings::default()
+        };
+        let request = AddDraft::for_settings(&settings).into_request();
+        assert_eq!(request.connections, Some(3));
     }
 
     #[test]

@@ -217,6 +217,37 @@ impl Store {
         Ok(total as u64)
     }
 
+    pub fn update_progress_batch(
+        &mut self,
+        id: i64,
+        updates: &[(u32, u64)],
+    ) -> Result<u64, StoreError> {
+        let tx = self.conn.transaction()?;
+        for (segment_idx, done) in updates {
+            let changed = tx.execute(
+                "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = ?3",
+                params![*done as i64, id, *segment_idx as i64],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::NotFound(id));
+            }
+        }
+        let total: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(done), 0) FROM segments WHERE download_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let changed = tx.execute(
+            "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
+            params![total, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.commit()?;
+        Ok(total as u64)
+    }
+
     pub fn replace_segments(
         &mut self,
         id: i64,
