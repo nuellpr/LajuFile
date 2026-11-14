@@ -227,3 +227,83 @@ fn category_mapping_is_case_insensitive() {
     assert_eq!(Category::from_file_name("ubuntu.iso"), Category::Other);
     assert_eq!(Category::from_file_name("README"), Category::Other);
 }
+
+fn sample_with_segments(size: u64, segments: Vec<Segment>) -> NewDownload {
+    let mut download = sample("https://example.com/segments.bin", size);
+    download.segments = segments;
+    download
+}
+
+#[test]
+fn update_progress_aggregates_segments() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .insert_download(&sample_with_segments(
+            200,
+            vec![
+                Segment {
+                    idx: 0,
+                    start: 0,
+                    end: 99,
+                    done: 0,
+                },
+                Segment {
+                    idx: 1,
+                    start: 100,
+                    end: 199,
+                    done: 0,
+                },
+            ],
+        ))
+        .unwrap();
+
+    assert_eq!(store.update_progress(id, 0, 100).unwrap(), 100);
+    assert_eq!(store.update_progress(id, 1, 50).unwrap(), 150);
+    assert_eq!(store.get_download(id).unwrap().downloaded, 150);
+    assert_eq!(store.segments(id).unwrap()[1].done, 50);
+}
+
+#[test]
+fn replace_segments_resets_progress_and_metadata() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .insert_download(&sample_with_segments(
+            100,
+            vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 99,
+                done: 40,
+            }],
+        ))
+        .unwrap();
+
+    let total = store
+        .replace_segments(
+            id,
+            &[
+                Segment {
+                    idx: 0,
+                    start: 0,
+                    end: 49,
+                    done: 10,
+                },
+                Segment {
+                    idx: 1,
+                    start: 50,
+                    end: 99,
+                    done: 5,
+                },
+            ],
+            2,
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(total, 15);
+    let download = store.get_download(id).unwrap();
+    assert_eq!(download.connections, 2);
+    assert!(download.ranged);
+    assert_eq!(download.downloaded, 15);
+    assert_eq!(store.segments(id).unwrap().len(), 2);
+}
