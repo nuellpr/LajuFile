@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -24,7 +25,7 @@ pub struct EngineConfig {
 
 pub struct EngineHandle {
     commands: Sender<Command>,
-    snapshots: Receiver<Snapshot>,
+    snapshots: Arc<Mutex<Option<Snapshot>>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -32,15 +33,16 @@ impl EngineHandle {
     pub fn start(config: EngineConfig) -> Result<Self, EngineError> {
         let store = Store::open(&config.db_path)?;
         let (command_tx, command_rx) = mpsc::channel();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let snapshots = Arc::new(Mutex::new(None));
+        let engine_snapshots = Arc::clone(&snapshots);
 
         let join = thread::Builder::new()
             .name("lajufile-engine".to_string())
-            .spawn(move || engine_loop(store, config, command_rx, snapshot_tx))?;
+            .spawn(move || engine_loop(store, config, command_rx, engine_snapshots))?;
 
         Ok(Self {
             commands: command_tx,
-            snapshots: snapshot_rx,
+            snapshots,
             join: Some(join),
         })
     }
@@ -52,11 +54,10 @@ impl EngineHandle {
     }
 
     pub fn latest_snapshot(&self) -> Option<Snapshot> {
-        let mut latest = None;
-        while let Ok(snapshot) = self.snapshots.try_recv() {
-            latest = Some(snapshot);
-        }
-        latest
+        self.snapshots
+            .lock()
+            .ok()
+            .and_then(|mut snapshot| snapshot.take())
     }
 
     pub fn shutdown(mut self) {
@@ -134,7 +135,7 @@ struct EngineState {
     client: reqwest::Client,
     runtime: Runtime,
     events: Sender<Event>,
-    snapshots: Sender<Snapshot>,
+    snapshots: Arc<Mutex<Option<Snapshot>>>,
     active: HashMap<i64, ActiveDownload>,
     cancelled: HashSet<(i64, u64)>,
     generation: u64,
@@ -148,7 +149,7 @@ fn engine_loop(
     store: Store,
     config: EngineConfig,
     commands: Receiver<Command>,
-    snapshots: Sender<Snapshot>,
+    snapshots: Arc<Mutex<Option<Snapshot>>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -157,12 +158,14 @@ fn engine_loop(
     let client = match build_client(Duration::from_secs(10), Duration::from_secs(30)) {
         Ok(client) => client,
         Err(error) => {
-            let _ = snapshots.send(Snapshot {
-                downloads: store.list_downloads().unwrap_or_default(),
-                settings: config.settings,
-                speeds: HashMap::new(),
-                message: Some(format!("Engine failed: {error}")),
-            });
+            if let Ok(mut slot) = snapshots.lock() {
+                *slot = Some(Snapshot {
+                    downloads: store.list_downloads().unwrap_or_default(),
+                    settings: config.settings,
+                    speeds: HashMap::new(),
+                    message: Some(format!("Engine failed: {error}")),
+                });
+            }
             return;
         }
     };
@@ -254,8 +257,9 @@ impl EngineState {
             Ok(url) => url,
             Err(error) => return Some(format!("Add failed: {error}")),
         };
+        let normalized_url = url.to_string();
 
-        match self.store.active_by_url(url.as_str()) {
+        match self.store.active_by_url(&normalized_url) {
             Ok(Some(existing)) => {
                 return Some(format!("Already in LajuFile: {}", existing.file_name));
             }
@@ -276,7 +280,10 @@ impl EngineState {
         self.runtime.spawn(async move {
             let result = probe(&client, &probe_request).await;
             let _ = events.send(Event::Probe {
-                request,
+                request: AddRequest {
+                    url: normalized_url,
+                    ..request
+                },
                 result: Box::new(result),
             });
         });
@@ -293,6 +300,14 @@ impl EngineState {
             Err(error) => return format!("Add failed: {error}"),
         };
 
+        match self.store.active_by_url(&request.url) {
+            Ok(Some(existing)) => {
+                return format!("Already in LajuFile: {}", existing.file_name);
+            }
+            Ok(None) => {}
+            Err(error) => return format!("Add failed: {error}"),
+        }
+
         let dir = request
             .save_dir
             .clone()
@@ -301,20 +316,38 @@ impl EngineState {
             return format!("Add failed: {error}");
         }
 
-        let file_name = resolve_file_name(
+        let base_name = resolve_file_name(
             request.file_name.as_deref(),
             result.content_disposition.as_deref(),
             &result.final_url,
         );
-        let final_path = dedupe_path(&dir, &file_name);
+        let mut final_path = dedupe_path(&dir, &base_name);
+        let temp_path = loop {
+            let candidate = temp_path_for(&final_path);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(_) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    final_path = dedupe_path(&dir, &base_name);
+                }
+                Err(error) => return format!("Add failed: {error}"),
+            }
+        };
+        let reserved_temp = temp_path.clone();
         let file_name = final_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or(file_name);
-        let temp_path = temp_path_for(&final_path);
+            .unwrap_or(base_name);
         let end = result.size.unwrap_or(1).saturating_sub(1);
-        let start_now = request.start_now;
+        let _start_now = request.start_now;
 
+        let queue_order = match self.store.next_queue_order() {
+            Ok(order) => order,
+            Err(error) => return format!("Add failed: {error}"),
+        };
         let new = NewDownload {
             url: request.url,
             final_url: Some(result.final_url.to_string()),
@@ -331,10 +364,7 @@ impl EngineState {
             cookie_enc: None,
             referrer: None,
             user_agent: Some(DEFAULT_USER_AGENT.to_string()),
-            queue_order: match self.store.next_queue_order() {
-                Ok(order) => order,
-                Err(error) => return format!("Add failed: {error}"),
-            },
+            queue_order,
             created_at: now_millis(),
             segments: vec![Segment {
                 idx: 0,
@@ -346,12 +376,13 @@ impl EngineState {
 
         match self.store.insert_download(&new) {
             Ok(_) => {
-                if start_now {
-                    self.pump_queue();
-                }
+                self.pump_queue();
                 format!("Added {file_name}")
             }
-            Err(error) => format!("Add failed: {error}"),
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                format!("Add failed: {error}")
+            }
         }
     }
 
@@ -627,11 +658,14 @@ impl EngineState {
         let Ok(downloads) = self.store.list_downloads() else {
             return;
         };
-        let _ = self.snapshots.send(Snapshot {
+        let snapshot = Snapshot {
             downloads,
             settings: self.settings.clone(),
             speeds: self.speeds.clone(),
-            message: self.message.take(),
-        });
+            message: self.message.clone(),
+        };
+        if let Ok(mut slot) = self.snapshots.lock() {
+            *slot = Some(snapshot);
+        }
     }
 }

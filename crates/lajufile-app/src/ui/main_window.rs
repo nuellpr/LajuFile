@@ -707,16 +707,7 @@ fn name_cell(ui: &mut egui::Ui, download: &Download, selected: bool, palette: &P
 fn file_icon(ui: &mut egui::Ui, download: &Download, palette: &Palette) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
     ui.painter().rect_filled(rect, 8.0, palette.surface_alt);
-    let extension = Path::new(&download.file_name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("FILE")
-        .to_ascii_uppercase();
-    let label = if extension.len() > 4 {
-        &extension[..4]
-    } else {
-        &extension
-    };
+    let label = extension_label(&download.file_name);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -724,6 +715,15 @@ fn file_icon(ui: &mut egui::Ui, download: &Download, palette: &Palette) {
         FontId::proportional(9.0),
         category_color(download.category, palette),
     );
+}
+
+fn extension_label(file_name: &str) -> String {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("FILE")
+        .to_ascii_uppercase();
+    extension.chars().take(4).collect()
 }
 
 fn category_color(category: Category, palette: &Palette) -> Color32 {
@@ -822,4 +822,15 @@ fn draw_status_bar(
                 .color(palette.muted),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extension_label;
+
+    #[test]
+    fn extension_label_handles_unicode() {
+        assert_eq!(extension_label("report.文档"), "文档");
+        assert_eq!(extension_label("archive.backup"), "BACK");
+    }
 }

@@ -61,11 +61,17 @@ fn app() -> Router {
     Router::new()
         .route("/file.bin", get(file))
         .route("/slow.bin", get(slow))
+        .route("/slow-headers.bin", get(slow_headers))
         .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
 }
 
 async fn slow() -> impl axum::response::IntoResponse {
     tokio::time::sleep(Duration::from_millis(400)).await;
+    file().await
+}
+
+async fn slow_headers() -> impl axum::response::IntoResponse {
+    tokio::time::sleep(Duration::from_millis(300)).await;
     file().await
 }
 

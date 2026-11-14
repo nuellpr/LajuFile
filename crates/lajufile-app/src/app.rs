@@ -117,6 +117,7 @@ impl LajuFileApp {
     }
 
     fn show_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
@@ -224,9 +225,15 @@ impl LajuFileApp {
 }
 
 impl eframe::App for LajuFileApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_tray(ctx);
+        self.poll_engine(ctx);
+        self.update_tray_tooltip();
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_tray(&ctx);
 
         let close_to_tray = self
             .snapshot
@@ -239,11 +246,10 @@ impl eframe::App for LajuFileApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint_after(Duration::from_millis(250));
             return;
         }
 
-        self.poll_engine(&ctx);
-        self.update_tray_tooltip();
         let actions = egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show(ui, |ui| ui::main_window::draw(self, ui))
@@ -269,8 +275,6 @@ impl eframe::App for LajuFileApp {
         {
             self.handle_actions(&ctx, vec![action]);
         }
-
-        ctx.request_repaint_after(Duration::from_millis(250));
     }
 }
 

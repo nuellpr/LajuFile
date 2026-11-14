@@ -24,7 +24,10 @@ fn add_probes_and_inserts() {
 
     handle
         .send(Command::Add(AddRequest {
-            url: format!("{}/file.bin", server.base),
+            url: format!(
+                "HTTP://{}/file.bin",
+                server.base.trim_start_matches("http://")
+            ),
             file_name: None,
             save_dir: None,
             start_now: false,
@@ -33,7 +36,7 @@ fn add_probes_and_inserts() {
 
     let snap = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(5));
     assert_eq!(snap.downloads[0].file_name, "file.bin");
-    assert_eq!(snap.downloads[0].status, DownloadStatus::Queued);
+    assert_eq!(snap.downloads[0].url, format!("{}/file.bin", server.base));
 
     handle.shutdown();
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
@@ -92,21 +95,29 @@ fn add_duplicate_active_is_rejected() {
     .unwrap();
 
     let request = AddRequest {
-        url: format!("{}/file.bin", server.base),
+        url: format!("{}/slow.bin", server.base),
         file_name: None,
         save_dir: None,
-        start_now: false,
+        start_now: true,
     };
     handle.send(Command::Add(request)).unwrap();
-    let first = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(5));
+    let first = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Downloading)
+        },
+        Duration::from_secs(5),
+    );
     let first_id = first.downloads[0].id;
 
     handle
         .send(Command::Add(AddRequest {
-            url: format!("{}/file.bin", server.base),
+            url: format!("{}/slow.bin", server.base),
             file_name: None,
             save_dir: None,
-            start_now: false,
+            start_now: true,
         }))
         .unwrap();
     let second = wait_for(
@@ -117,6 +128,80 @@ fn add_duplicate_active_is_rejected() {
 
     assert_eq!(second.downloads.len(), 1);
     assert_eq!(second.downloads[0].id, first_id);
+    handle.shutdown();
+}
+
+#[test]
+fn back_to_back_duplicate_is_rejected() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    let url = format!("{}/slow-headers.bin", server.base);
+    for _ in 0..2 {
+        handle
+            .send(Command::Add(AddRequest {
+                url: url.clone(),
+                file_name: None,
+                save_dir: None,
+                start_now: true,
+            }))
+            .unwrap();
+    }
+
+    let snap = wait_for(
+        &handle,
+        |s| s.downloads.len() == 1 && s.message.as_deref().is_some_and(|m| m.contains("Already")),
+        Duration::from_secs(5),
+    );
+    assert_eq!(snap.downloads.len(), 1);
+    handle.shutdown();
+}
+
+#[test]
+fn same_explicit_name_gets_distinct_paths() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    for query in ["a", "b"] {
+        handle
+            .send(Command::Add(AddRequest {
+                url: format!("{}/slow-headers.bin?{query}", server.base),
+                file_name: Some("same.bin".to_string()),
+                save_dir: None,
+                start_now: true,
+            }))
+            .unwrap();
+    }
+
+    let snap = wait_for(
+        &handle,
+        |s| s.downloads.len() == 2 && s.downloads.iter().all(|d| d.status == DownloadStatus::Done),
+        Duration::from_secs(10),
+    );
+    assert_ne!(snap.downloads[0].save_path, snap.downloads[1].save_path);
+    assert_ne!(snap.downloads[0].temp_path, snap.downloads[1].temp_path);
+    assert!(snap.downloads.iter().all(|d| d.save_path.exists()));
+    handle.shutdown();
 }
 
 fn wait_for(
@@ -210,9 +295,10 @@ fn queue_never_exceeds_max_concurrent() {
     let snap = wait_for(
         &handle,
         |s| {
-            s.downloads
-                .iter()
-                .any(|d| d.status == DownloadStatus::Downloading)
+            s.downloads.len() == 2
+                && s.downloads
+                    .iter()
+                    .any(|d| d.status == DownloadStatus::Downloading)
         },
         Duration::from_secs(5),
     );
@@ -237,6 +323,7 @@ fn queue_never_exceeds_max_concurrent() {
         Duration::from_secs(10),
     );
     assert!(done.downloads.iter().all(|d| d.save_path.exists()));
+    handle.shutdown();
 }
 
 #[test]
@@ -291,6 +378,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
         Duration::from_secs(10),
     );
     assert!(done.downloads[0].save_path.exists());
+    handle.shutdown();
 }
 
 #[test]
