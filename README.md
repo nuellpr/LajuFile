@@ -8,9 +8,9 @@
   A fast, native download manager for Windows — built in Rust.
 </p>
 
-> **Status:** Milestone 2 (desktop preview) is complete: a runnable Windows GUI
-> with tray support, settings, and single-stream downloads. Segmented downloads,
-> true resume, the browser bridge, and the Edge extension are next.
+> **Status:** Milestone 3 (engine) is complete: the Windows GUI now supports
+> segmented downloads, true resume, and a global speed limit. Browser capture
+> and the Edge extension are next.
 
 ## Why LajuFile
 
@@ -23,10 +23,12 @@ Internet Download Manager, but the code and design are original.
 
 - Native egui desktop window with download table, filters, and context menu
 - Add URL with metadata probe, safe file naming, and duplicate active-URL check
-- Single-stream downloads with a queue limited by `max_concurrent`
-- Pause, restart (from zero in M2), remove, pause all, and resume all
+- Segmented downloads with up to 32 parallel range requests
+- True resume using `If-Range` or a 64 KiB prefix check when no validator exists
+- Queue limited by `max_concurrent`; global speed limit with 0 = unlimited
+- Pause, resume, remove, pause all, and resume all
 - System tray: show, add URL, pause all, resume all, exit; close-to-tray
-- Settings for save folder, concurrency, theme, and close-to-tray
+- Settings for save folder, concurrency, connections, speed, theme, and close-to-tray
 - Light and dark themes
 - Persistent settings in `%APPDATA%\LajuFile`
 - SQLite download store (WAL, versioned schema, segments)
@@ -34,7 +36,7 @@ Internet Download Manager, but the code and design are original.
 - Download to a `.lajufile` temp file, verified before the final file is exposed
 - Safe finalization that never overwrites an existing file
 - Windows-safe file names, deduplication, and reserved-device handling
-- End-to-end tests: probe → naming → store → download → mark done
+- End-to-end tests: probe → naming → store → segments → download → mark done
 
 ## Roadmap
 
@@ -42,9 +44,12 @@ Internet Download Manager, but the code and design are original.
       single-stream download, E2E tests
 - [x] **M2 — Desktop preview:** egui GUI, tray, settings, light/dark themes,
       queue, pause/restart, single-stream downloads
-- [ ] **M3 — Engine:** segmented downloads, true resume, speed limit
+- [x] **M3 — Engine:** segmented downloads, true resume, global speed limit
 - [ ] **M4 — Capture:** local bridge + Edge MV3 extension
 - [ ] **M5 — Release:** hardening, docs, packaging
+
+Remaining limits: no browser bridge or Edge extension yet, no autostart, no
+installer, and pause progress is persisted about once per second.
 
 ## Build
 
@@ -57,10 +62,11 @@ Requirements:
 ```powershell
 cargo test
 cargo run -p lajufile-app
+cargo build --release -p lajufile-app
 ```
 
-The debug build opens a console window for logs. Release builds use the Windows
-GUI subsystem and do not show a console.
+The debug build opens a console window; release builds use the Windows GUI
+subsystem and do not show a console.
 
 ## Design
 
@@ -68,6 +74,7 @@ GUI subsystem and do not show a console.
 - Product design: [`docs/superpowers/specs/2026-11-14-lajufile-design.md`](docs/superpowers/specs/2026-11-14-lajufile-design.md)
 - Milestone 1 plan: [`docs/superpowers/plans/2026-11-14-lajufile-milestone-1-foundation.md`](docs/superpowers/plans/2026-11-14-lajufile-milestone-1-foundation.md)
 - Milestone 2 plan: [`docs/superpowers/plans/2026-11-14-lajufile-milestone-2-gui-tray.md`](docs/superpowers/plans/2026-11-14-lajufile-milestone-2-gui-tray.md)
+- Milestone 3 plan: [`docs/superpowers/plans/2026-11-15-lajufile-milestone-3-engine.md`](docs/superpowers/plans/2026-11-15-lajufile-milestone-3-engine.md)
 
 ## License
 
