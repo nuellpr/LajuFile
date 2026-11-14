@@ -1,10 +1,13 @@
 //! UI state shared by the main window and dialogs.
 
+pub mod dialogs;
 pub mod format;
 pub mod main_window;
 
-use lajufile_core::settings::Theme;
+use lajufile_core::settings::{Settings, Theme};
 use lajufile_core::store::{Category, Download, DownloadStatus};
+
+use crate::engine::AddRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
@@ -53,6 +56,8 @@ pub enum Action {
     CopyUrl(String),
     OpenAdd,
     OpenSettings,
+    Add(AddRequest),
+    SaveSettings(Settings),
     SetTheme(Theme),
     PauseAll,
     ResumeAll,

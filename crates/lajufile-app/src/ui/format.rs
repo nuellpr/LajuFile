@@ -38,6 +38,14 @@ pub fn format_speed(bytes_per_second: Option<u64>) -> String {
     }
 }
 
+/// Estimates remaining seconds; `None` when size or speed is unknown/zero.
+pub fn eta_seconds(size: Option<u64>, downloaded: u64, speed: u64) -> Option<u64> {
+    if speed == 0 {
+        return None;
+    }
+    size.map(|size| size.saturating_sub(downloaded) / speed)
+}
+
 /// Formats a creation timestamp relative to `now_ms`.
 pub fn format_relative_time(now_ms: i64, then_ms: i64) -> String {
     let seconds = (now_ms - then_ms).max(0) / 1_000;
@@ -65,6 +73,13 @@ mod tests {
         assert_eq!(format_eta(None), "—");
         assert_eq!(format_eta(Some(0)), "—");
         assert_eq!(format_eta(Some(125)), "2m 5s");
+    }
+
+    #[test]
+    fn eta_is_none_without_size_or_speed() {
+        assert_eq!(eta_seconds(None, 0, 100), None);
+        assert_eq!(eta_seconds(Some(1_000), 0, 0), None);
+        assert_eq!(eta_seconds(Some(1_000), 400, 100), Some(6));
     }
 
     #[test]

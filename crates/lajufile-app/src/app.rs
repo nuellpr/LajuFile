@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use lajufile_core::paths;
 use lajufile_core::settings::{Settings, Theme};
 
-use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
+use crate::engine::{Command, EngineConfig, EngineHandle, Snapshot};
+use crate::ui::dialogs::AddDraft;
 use crate::ui::{self, Action, Filter};
 
 pub struct LajuFileApp {
@@ -13,9 +14,8 @@ pub struct LajuFileApp {
     pub(crate) filter: Filter,
     pub(crate) show_add: bool,
     pub(crate) show_settings: bool,
-    #[allow(dead_code)] // Task 5 reads the drafts.
-    pub(crate) add_draft: AddRequest,
-    #[allow(dead_code)] // Task 5 reads the drafts.
+    pub(crate) add_draft: AddDraft,
+    pub(crate) add_focus: bool,
     pub(crate) settings_draft: Settings,
     pub(crate) toast: Option<(String, Instant)>,
     pub(crate) last_message: Option<String>,
@@ -29,12 +29,7 @@ impl LajuFileApp {
         let theme = settings.theme.clone();
         apply_theme(&cc.egui_ctx, &theme);
 
-        let add_draft = AddRequest {
-            url: String::new(),
-            file_name: None,
-            save_dir: None,
-            start_now: true,
-        };
+        let add_draft = AddDraft::default();
         let settings_draft = settings.clone();
         let engine = EngineHandle::start(EngineConfig {
             data_dir: data_dir.clone(),
@@ -54,6 +49,7 @@ impl LajuFileApp {
             show_add: false,
             show_settings: false,
             add_draft,
+            add_focus: false,
             settings_draft,
             toast,
             last_message: None,
@@ -110,8 +106,25 @@ impl LajuFileApp {
                     }
                 }
                 Action::CopyUrl(url) => ctx.copy_text(url),
-                Action::OpenAdd => self.show_add = true,
-                Action::OpenSettings => self.show_settings = true,
+                Action::OpenAdd => {
+                    self.add_draft = AddDraft::default();
+                    self.add_focus = true;
+                    self.show_add = true;
+                }
+                Action::OpenSettings => {
+                    if let Some(snapshot) = &self.snapshot {
+                        self.settings_draft = snapshot.settings.clone();
+                    }
+                    self.show_settings = true;
+                }
+                Action::Add(request) => self.send(Command::Add(request)),
+                Action::SaveSettings(mut settings) => {
+                    normalize_settings(&mut settings);
+                    self.settings_draft = settings.clone();
+                    self.theme = settings.theme.clone();
+                    apply_theme(ctx, &self.theme);
+                    self.send(Command::UpdateSettings(settings));
+                }
                 Action::SetTheme(theme) => {
                     self.theme = theme.clone();
                     apply_theme(ctx, &theme);
@@ -150,6 +163,27 @@ impl eframe::App for LajuFileApp {
             .show(ui, |ui| ui::main_window::draw(self, ui))
             .inner;
         self.handle_actions(&ctx, actions);
+
+        if self.show_add
+            && let Some(action) = ui::dialogs::add_dialog(
+                &ctx,
+                &mut self.show_add,
+                &mut self.add_draft,
+                &mut self.add_focus,
+            )
+        {
+            self.handle_actions(&ctx, vec![action]);
+        }
+        if self.show_settings
+            && let Some(action) = ui::dialogs::settings_dialog(
+                &ctx,
+                &mut self.show_settings,
+                &mut self.settings_draft,
+            )
+        {
+            self.handle_actions(&ctx, vec![action]);
+        }
+
         ctx.request_repaint_after(Duration::from_millis(250));
     }
 }
@@ -184,4 +218,44 @@ fn apply_theme(ctx: &egui::Context, theme: &Theme) {
     visuals.extreme_bg_color = window;
     visuals.override_text_color = Some(text);
     ctx.set_visuals(visuals);
+}
+
+fn normalize_settings(settings: &mut Settings) {
+    if settings.download_dir.as_os_str().is_empty() {
+        settings.download_dir = paths::default_download_dir();
+    }
+    settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
+    settings.max_connections = settings.max_connections.clamp(1, 32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::dialogs::AddDraft;
+
+    #[test]
+    fn add_draft_trims_empty_values() {
+        let draft = AddDraft {
+            url: " https://example.com/a.bin ".into(),
+            file_name: "  ".into(),
+            folder: " ".into(),
+            start_now: true,
+        };
+        let request = draft.into_request();
+        assert_eq!(request.url, "https://example.com/a.bin");
+        assert_eq!(request.file_name, None);
+        assert_eq!(request.save_dir, None);
+    }
+
+    #[test]
+    fn normalize_settings_clamps_limits() {
+        let mut settings = Settings {
+            max_concurrent: 0,
+            max_connections: 99,
+            ..Settings::default()
+        };
+        normalize_settings(&mut settings);
+        assert_eq!(settings.max_concurrent, 1);
+        assert_eq!(settings.max_connections, 32);
+    }
 }

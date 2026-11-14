@@ -101,8 +101,20 @@ pub fn draw(app: &mut LajuFileApp, ui: &mut egui::Ui) -> Vec<Action> {
     draw_menu_bar(ui, &palette, &mut actions);
     draw_toolbar(ui, &palette, app.selected, &downloads, &mut actions);
 
-    let body_height = (ui.available_height() - 32.0).max(100.0);
-    ui.horizontal(|ui| {
+    egui::Panel::bottom("lajufile_status")
+        .exact_size(32.0)
+        .frame(
+            egui::Frame::new()
+                .fill(palette.bar)
+                .stroke(Stroke::new(1.0, palette.border))
+                .inner_margin(Margin::symmetric(12, 0)),
+        )
+        .show(ui, |ui| {
+            draw_status_bar(ui, &downloads, &speeds, &palette);
+        });
+
+    let body_height = ui.available_height().max(100.0);
+    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
         ui.allocate_ui_with_layout(
             Vec2::new(232.0, body_height),
             Layout::top_down(Align::Min),
@@ -120,8 +132,6 @@ pub fn draw(app: &mut LajuFileApp, ui: &mut egui::Ui) -> Vec<Action> {
             },
         );
     });
-
-    draw_status_bar(ui, &downloads, &speeds, &palette);
 
     if let Some((text, at)) = &app.toast {
         if at.elapsed() < Duration::from_secs(4) {
@@ -546,6 +556,7 @@ fn draw_table(
         .column(Column::exact(76.0))
         .column(Column::exact(64.0))
         .column(Column::exact(86.0))
+        .auto_shrink([false, false])
         .max_scroll_height(table_height)
         .header(34.0, |mut header| {
             header.col(|ui| header_cell(ui, "NAME", false, palette));
@@ -581,10 +592,11 @@ fn draw_table(
                     );
                 });
                 row.col(|ui| {
-                    let eta = download.size.and_then(|size| {
-                        let speed = speeds.get(&download.id).copied().unwrap_or(0);
-                        (speed > 0).then_some(size.saturating_sub(download.downloaded) / speed)
-                    });
+                    let eta = eta_seconds(
+                        download.size,
+                        download.downloaded,
+                        speeds.get(&download.id).copied().unwrap_or(0),
+                    );
                     right_label(ui, format_eta(eta), palette.muted);
                 });
                 row.col(|ui| {
@@ -750,12 +762,19 @@ fn progress_cell(ui: &mut egui::Ui, download: &Download, palette: &Palette) {
         (Some(size), _) if size > 0 => (download.downloaded as f32 / size as f32).clamp(0.0, 1.0),
         _ => 0.0,
     };
-    ui.add(
-        egui::ProgressBar::new(fraction)
-            .desired_width(140.0)
-            .fill(palette.accent)
-            .text(RichText::new(format!("{:.0}%", fraction * 100.0)).size(9.0)),
-    );
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::ProgressBar::new(fraction)
+                .desired_width(120.0)
+                .fill(palette.accent)
+                .text(""),
+        );
+        ui.label(
+            RichText::new(format!("{:.0}%", fraction * 100.0))
+                .size(9.0)
+                .color(palette.muted),
+        );
+    });
 }
 
 fn right_label(ui: &mut egui::Ui, text: String, color: Color32) {
@@ -794,27 +813,13 @@ fn draw_status_bar(
         "0 B/s".to_string()
     };
 
-    egui::Frame::new()
-        .fill(palette.bar)
-        .stroke(Stroke::new(1.0, palette.border))
-        .inner_margin(Margin::symmetric(12, 0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.set_height(32.0);
-            ui.horizontal_centered(|ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new(format!("{active} active · {queued} queued · {speed_text}"))
-                        .size(10.0)
-                        .color(palette.muted),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new("M2 preview · single-stream")
-                            .size(10.0)
-                            .color(palette.faint),
-                    );
-                });
-            });
-        });
+    ui.set_width(ui.available_width());
+    ui.set_height(ui.available_height());
+    ui.horizontal_centered(|ui| {
+        ui.label(
+            RichText::new(format!("{active} active · {queued} queued · {speed_text}"))
+                .size(10.0)
+                .color(palette.muted),
+        );
+    });
 }
