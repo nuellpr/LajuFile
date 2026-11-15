@@ -775,16 +775,204 @@ fn name_cell(ui: &mut egui::Ui, download: &Download, selected: bool, palette: &P
     });
 }
 
+#[derive(Clone, Copy)]
+enum FileGlyph {
+    Video,
+    Music,
+    Document,
+    Image,
+    Program,
+    Archive,
+    Disc,
+    Binary,
+}
+
+fn classify_glyph(download: &Download, ext: &str, palette: &Palette) -> (FileGlyph, Color32) {
+    match ext {
+        "JPG" | "JPEG" | "PNG" | "GIF" | "WEBP" | "BMP" | "SVG" | "ICO" => {
+            return (FileGlyph::Image, Color32::from_rgb(168, 85, 247));
+        }
+        "PDF" => {
+            return (FileGlyph::Document, Color32::from_rgb(244, 63, 94));
+        }
+        "ISO" | "IMG" => {
+            return (FileGlyph::Disc, Color32::from_rgb(56, 189, 248));
+        }
+        _ => {}
+    }
+    if download.kind == "video" {
+        return (FileGlyph::Video, palette.accent);
+    }
+    match download.category {
+        Category::Video => (FileGlyph::Video, palette.accent),
+        Category::Music => (FileGlyph::Music, palette.green),
+        Category::Documents => (FileGlyph::Document, palette.amber),
+        Category::Programs => (FileGlyph::Program, palette.red),
+        Category::Compressed => (FileGlyph::Archive, Color32::from_rgb(14, 165, 233)),
+        Category::Other => (FileGlyph::Binary, Color32::from_rgb(129, 140, 248)),
+    }
+}
+
 fn file_icon(ui: &mut egui::Ui, download: &Download, palette: &Palette) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-    ui.painter().rect_filled(rect, 8.0, palette.surface_alt);
-    let label = extension_label(&download.file_name);
-    ui.painter().text(
-        rect.center(),
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(38.0), Sense::hover());
+    let mut label = extension_label(&download.file_name);
+    if label == "FILE" && download.kind == "video" {
+        label = "MP4".to_string();
+    }
+    let (glyph, color) = classify_glyph(download, &label, palette);
+    let painter = ui.painter();
+
+    let tint = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28);
+    let border = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 95);
+    painter.rect_filled(rect, 8.0, palette.surface_alt);
+    painter.rect_filled(rect, 8.0, tint);
+    painter.rect_stroke(
+        rect,
+        8.0,
+        Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+
+    let center = egui::pos2(rect.center().x, rect.top() + 14.0);
+    let stroke = Stroke::new(1.5, color);
+
+    match glyph {
+        FileGlyph::Video => {
+            let screen = Rect::from_center_size(center, Vec2::new(20.0, 14.0));
+            painter.rect_filled(screen, 3.0, color);
+            let play = vec![
+                egui::pos2(center.x - 2.5, center.y - 4.0),
+                egui::pos2(center.x + 4.5, center.y),
+                egui::pos2(center.x - 2.5, center.y + 4.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                play,
+                Color32::WHITE,
+                Stroke::NONE,
+            ));
+        }
+        FileGlyph::Music => {
+            let left_note = egui::pos2(center.x - 4.5, center.y + 3.5);
+            let right_note = egui::pos2(center.x + 3.5, center.y + 2.0);
+            painter.circle_filled(left_note, 2.8, color);
+            painter.circle_filled(right_note, 2.8, color);
+            painter.line_segment(
+                [
+                    egui::pos2(left_note.x + 2.0, left_note.y),
+                    egui::pos2(left_note.x + 2.0, center.y - 5.5),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(right_note.x + 2.0, right_note.y),
+                    egui::pos2(right_note.x + 2.0, center.y - 7.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(left_note.x + 2.0, center.y - 5.0),
+                    egui::pos2(right_note.x + 2.0, center.y - 6.5),
+                ],
+                Stroke::new(2.4, color),
+            );
+        }
+        FileGlyph::Document => {
+            let page = Rect::from_center_size(center, Vec2::new(15.0, 16.0));
+            painter.rect_stroke(page, 2.0, stroke, egui::StrokeKind::Inside);
+            for dy in [-3.0, 0.5, 4.0] {
+                painter.line_segment(
+                    [
+                        egui::pos2(page.left() + 3.5, center.y + dy),
+                        egui::pos2(page.right() - 3.5, center.y + dy),
+                    ],
+                    Stroke::new(1.3, color),
+                );
+            }
+        }
+        FileGlyph::Image => {
+            let frame = Rect::from_center_size(center, Vec2::new(19.0, 14.0));
+            painter.rect_stroke(frame, 2.5, stroke, egui::StrokeKind::Inside);
+            painter.circle_filled(
+                egui::pos2(frame.left() + 5.0, frame.top() + 4.5),
+                1.8,
+                color,
+            );
+            let mountain = vec![
+                egui::pos2(frame.left() + 2.5, frame.bottom() - 2.0),
+                egui::pos2(center.x - 1.5, center.y - 0.5),
+                egui::pos2(center.x + 2.0, center.y + 2.5),
+                egui::pos2(frame.right() - 4.5, center.y - 2.0),
+                egui::pos2(frame.right() - 2.0, frame.bottom() - 2.0),
+            ];
+            painter.add(egui::Shape::line(mountain, Stroke::new(1.4, color)));
+        }
+        FileGlyph::Program => {
+            let win = Rect::from_center_size(center, Vec2::new(19.0, 14.0));
+            painter.rect_stroke(win, 2.5, stroke, egui::StrokeKind::Inside);
+            let bar = Rect::from_min_max(win.min, egui::pos2(win.right(), win.top() + 4.5));
+            painter.rect_filled(bar, 2.0, color);
+            painter.line_segment(
+                [
+                    egui::pos2(win.left() + 4.5, center.y + 0.5),
+                    egui::pos2(win.left() + 7.5, center.y + 2.5),
+                ],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(win.left() + 7.5, center.y + 2.5),
+                    egui::pos2(win.left() + 4.5, center.y + 4.5),
+                ],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(win.left() + 9.5, center.y + 4.5),
+                    egui::pos2(win.left() + 13.5, center.y + 4.5),
+                ],
+                Stroke::new(1.4, color),
+            );
+        }
+        FileGlyph::Archive => {
+            let box_rect = Rect::from_center_size(center, Vec2::new(17.0, 14.0));
+            painter.rect_stroke(box_rect, 2.5, stroke, egui::StrokeKind::Inside);
+            for step in 0..4 {
+                let y = box_rect.top() + 2.5 + step as f32 * 2.6;
+                let x_off = if step % 2 == 0 { -1.2 } else { 1.2 };
+                painter.rect_filled(
+                    Rect::from_center_size(egui::pos2(center.x + x_off, y), Vec2::new(2.6, 1.8)),
+                    0.5,
+                    color,
+                );
+            }
+        }
+        FileGlyph::Disc => {
+            painter.circle_stroke(center, 7.0, stroke);
+            painter.circle_filled(center, 2.0, color);
+        }
+        FileGlyph::Binary => {
+            let page = Rect::from_center_size(center, Vec2::new(15.0, 15.0));
+            painter.rect_stroke(page, 2.5, stroke, egui::StrokeKind::Inside);
+            painter.circle_filled(egui::pos2(center.x - 2.8, center.y - 2.2), 1.5, color);
+            painter.circle_filled(egui::pos2(center.x + 2.8, center.y - 2.2), 1.5, color);
+            painter.circle_filled(egui::pos2(center.x - 2.8, center.y + 2.2), 1.5, color);
+            painter.circle_filled(egui::pos2(center.x + 2.8, center.y + 2.2), 1.5, color);
+        }
+    }
+
+    let pill = Rect::from_min_max(
+        egui::pos2(rect.left() + 3.0, rect.bottom() - 12.0),
+        egui::pos2(rect.right() - 3.0, rect.bottom() - 2.5),
+    );
+    painter.rect_filled(pill, 3.0, color);
+    painter.text(
+        pill.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(9.0),
-        category_color(download.category, palette),
+        FontId::proportional(7.5),
+        Color32::WHITE,
     );
 }
 
@@ -795,17 +983,6 @@ fn extension_label(file_name: &str) -> String {
         .unwrap_or("FILE")
         .to_ascii_uppercase();
     extension.chars().take(4).collect()
-}
-
-fn category_color(category: Category, palette: &Palette) -> Color32 {
-    match category {
-        Category::Video => palette.accent,
-        Category::Music => palette.green,
-        Category::Documents => palette.amber,
-        Category::Programs => palette.red,
-        Category::Compressed => palette.accent,
-        Category::Other => palette.muted,
-    }
 }
 
 fn status_cell(ui: &mut egui::Ui, status: DownloadStatus, palette: &Palette) {

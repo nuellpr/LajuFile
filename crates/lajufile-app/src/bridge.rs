@@ -233,7 +233,13 @@ async fn video_formats(
             let formats: Vec<Value> = listing
                 .choices
                 .iter()
-                .map(|choice| json!({ "selector": choice.selector, "label": choice.label }))
+                .map(|choice| {
+                    json!({
+                        "selector": choice.selector,
+                        "label": choice.label,
+                        "fps": choice.fps,
+                    })
+                })
                 .collect();
             Ok(Json(json!({ "title": listing.title, "formats": formats })))
         }

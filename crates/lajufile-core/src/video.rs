@@ -7,6 +7,7 @@ pub struct VideoFormat {
     pub id: String,
     pub ext: String,
     pub height: Option<u32>,
+    pub fps: Option<u32>,
     pub has_video: bool,
     pub has_audio: bool,
     pub filesize: Option<u64>,
@@ -16,6 +17,7 @@ pub struct VideoFormat {
 pub struct QualityChoice {
     pub label: String,
     pub selector: String,
+    pub fps: Option<u32>,
 }
 
 /// Selector used when no quality is picked: best video plus best audio.
@@ -59,6 +61,12 @@ pub fn parse_formats(json: &Value) -> Vec<VideoFormat> {
                     .get("height")
                     .and_then(Value::as_u64)
                     .and_then(|height| u32::try_from(height).ok()),
+                fps: format.get("fps").and_then(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|fps| u32::try_from(fps).ok())
+                        .or_else(|| value.as_f64().map(|fps| fps.round() as u32))
+                }),
                 has_video: format
                     .get("vcodec")
                     .and_then(Value::as_str)
@@ -89,15 +97,22 @@ pub fn quality_choices(formats: &[VideoFormat]) -> Vec<QualityChoice> {
 
     let mut choices = Vec::new();
     for height in heights {
+        let fps = formats
+            .iter()
+            .filter(|format| format.has_video && format.height == Some(height))
+            .filter_map(|format| format.fps)
+            .max();
         choices.push(QualityChoice {
             label: format!("{height}p"),
             selector: selector_for_height(height),
+            fps,
         });
     }
     if formats.iter().any(|format| format.has_audio) {
         choices.push(QualityChoice {
             label: "Audio only (m4a)".to_string(),
             selector: "ba[ext=m4a]/ba".to_string(),
+            fps: None,
         });
     }
     choices
@@ -117,7 +132,7 @@ mod tests {
         json!({
             "formats": [
                 {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "filesize": 100},
-                {"format_id": "137", "ext": "mp4", "height": 1080, "vcodec": "avc1", "acodec": "none"},
+                {"format_id": "137", "ext": "mp4", "height": 1080, "fps": 60, "vcodec": "avc1", "acodec": "none"},
                 {"format_id": "248", "ext": "webm", "height": 1080, "vcodec": "vp9", "acodec": "none"},
                 {"format_id": "136", "ext": "mp4", "height": 720, "vcodec": "avc1", "acodec": "none"},
                 {"format_id": "18", "ext": "mp4", "height": 360, "vcodec": "avc1", "acodec": "mp4a"}
@@ -143,6 +158,7 @@ mod tests {
             choices[0].selector,
             "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba"
         );
+        assert_eq!(choices[0].fps, Some(60));
         assert_eq!(choices[3].selector, "ba[ext=m4a]/ba");
     }
 

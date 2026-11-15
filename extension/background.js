@@ -218,8 +218,49 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+function isYouTubeVideoUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "youtu.be") {
+      return parsed.pathname.length > 1;
+    }
+    if (host === "youtube.com" || host === "www.youtube.com" || host === "m.youtube.com") {
+      return parsed.pathname === "/watch" && parsed.searchParams.has("v");
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "lajufile-download" || !info.linkUrl) return;
+  if (isYouTubeVideoUrl(info.linkUrl)) {
+    try {
+      const result = await post("video", {
+        url: info.linkUrl,
+        video_format: "bv*+ba/b",
+      });
+      if (result.status === 201) {
+        notify("LajuFile", "Video added to LajuFile.");
+      } else if (result.status === 409) {
+        notify("LajuFile", "Already in LajuFile.");
+      } else if (result.status === 401) {
+        notify("LajuFile", "Pair the LajuFile extension in its options.");
+      } else {
+        notify(
+          "LajuFile",
+          result.body && result.body.error
+            ? result.body.error
+            : "Could not queue video download.",
+        );
+      }
+    } catch {
+      notify("LajuFile", "Could not reach LajuFile. Is it running?");
+    }
+    return;
+  }
   const result = await capture(
     { url: info.linkUrl, referrer: tab && tab.url ? tab.url : undefined },
     false,
