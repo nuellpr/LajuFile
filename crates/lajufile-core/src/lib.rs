@@ -11,3 +11,4 @@ pub mod segmented;
 pub mod settings;
 pub mod speed;
 pub mod store;
+pub mod video;
