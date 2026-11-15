@@ -97,9 +97,16 @@ pub enum Command {
         key: u64,
         path: Option<PathBuf>,
     },
+    CaptureDecision {
+        key: u64,
+        folder: PathBuf,
+        file_name: Option<String>,
+        start_now: bool,
+    },
     Pause(i64),
     Resume(i64),
     Remove(i64),
+    RemoveCompleted,
     PauseAll,
     ResumeAll,
     UpdateSettings(Settings),
@@ -130,11 +137,14 @@ pub struct AddRequest {
 pub struct CapturePrompt {
     pub key: u64,
     pub url: String,
+    pub file_name: String,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub downloads: Vec<Download>,
+    pub segments: HashMap<i64, Vec<Segment>>,
     pub settings: Settings,
     pub speeds: HashMap<i64, u64>,
     pub message: Option<String>,
@@ -164,6 +174,10 @@ enum Event {
     BridgeProbe {
         request: AddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+        result: Box<Result<ProbeResult, ProbeError>>,
+    },
+    CaptureProbe {
+        key: u64,
         result: Box<Result<ProbeResult, ProbeError>>,
     },
     Progress {
@@ -249,6 +263,9 @@ struct EngineState {
 struct PendingCapture {
     request: BridgeAddRequest,
     reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    file_name: String,
+    size: Option<u64>,
+    probe: Option<ProbeResult>,
 }
 
 fn engine_loop(
@@ -268,6 +285,7 @@ fn engine_loop(
             if let Ok(mut slot) = snapshots.lock() {
                 *slot = Some(Snapshot {
                     downloads: store.list_downloads().unwrap_or_default(),
+                    segments: HashMap::new(),
                     settings: config.settings.clone(),
                     speeds: HashMap::new(),
                     message: Some(format!("Engine failed: {error}")),
@@ -378,9 +396,18 @@ impl EngineState {
             Command::CaptureFolderDecision { key, path } => {
                 self.capture_folder_decision(key, path);
             }
+            Command::CaptureDecision {
+                key,
+                folder,
+                file_name,
+                start_now,
+            } => {
+                self.capture_decision(key, folder, file_name, start_now);
+            }
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
             Command::Remove(id) => self.remove(id),
+            Command::RemoveCompleted => self.remove_completed(),
             Command::PauseAll => self.pause_all(),
             Command::ResumeAll => self.resume_all(),
             Command::UpdateSettings(settings) => self.update_settings(settings),
@@ -499,9 +526,48 @@ impl EngineState {
         if self.settings.ask_where_to_save {
             let key = self.next_capture_key;
             self.next_capture_key = self.next_capture_key.wrapping_add(1);
-            self.pending_captures
-                .insert(key, PendingCapture { request, reply });
+            let file_name = if request.video_format.is_some() {
+                request
+                    .filename
+                    .clone()
+                    .unwrap_or_else(|| video_file_name(&add.url))
+            } else {
+                resolve_file_name(request.filename.as_deref(), None, &url)
+            };
+            self.pending_captures.insert(
+                key,
+                PendingCapture {
+                    request,
+                    reply,
+                    file_name,
+                    size: None,
+                    probe: None,
+                },
+            );
             self.message = Some("Waiting for a save folder".to_string());
+            if add.video_format.is_none() {
+                let probe_request = ProbeRequest {
+                    url,
+                    options: RequestOptions {
+                        user_agent: add
+                            .user_agent
+                            .clone()
+                            .or_else(|| Some(DEFAULT_USER_AGENT.to_string())),
+                        referrer: add.referrer.clone(),
+                        cookie: add.cookie.clone(),
+                    },
+                    timeout: Duration::from_secs(3),
+                };
+                let client = self.client.clone();
+                let events = self.events.clone();
+                self.runtime.spawn(async move {
+                    let result = probe(&client, &probe_request).await;
+                    let _ = events.send(Event::CaptureProbe {
+                        key,
+                        result: Box::new(result),
+                    });
+                });
+            }
             return;
         }
         if add.video_format.is_some() {
@@ -566,38 +632,67 @@ impl EngineState {
     }
 
     fn capture_folder_decision(&mut self, key: u64, path: Option<PathBuf>) {
+        match path {
+            Some(folder) => self.capture_decision(key, folder, None, true),
+            None => {
+                if let Some(pending) = self.pending_captures.remove(&key) {
+                    let _ = pending.reply.send(BridgeAddOutcome::Canceled);
+                }
+            }
+        }
+    }
+
+    fn capture_decision(
+        &mut self,
+        key: u64,
+        folder: PathBuf,
+        file_name: Option<String>,
+        start_now: bool,
+    ) {
         let Some(pending) = self.pending_captures.remove(&key) else {
             return;
         };
-        match path {
-            Some(path) => {
-                let Ok(url) = Url::parse(&pending.request.url) else {
-                    let _ = pending
-                        .reply
-                        .send(BridgeAddOutcome::Invalid("invalid URL".to_string()));
-                    return;
-                };
-                let add = AddRequest {
-                    url: pending.request.url.clone(),
-                    file_name: pending.request.filename.clone(),
-                    save_dir: Some(path),
-                    start_now: true,
-                    connections: None,
-                    referrer: pending.request.referrer.clone(),
-                    user_agent: pending.request.user_agent.clone(),
-                    cookie: pending.request.cookie.clone(),
-                    video_format: pending.request.video_format.clone(),
-                };
-                if add.video_format.is_some() {
-                    self.finish_video_add(add, pending.reply);
-                    return;
-                }
-                self.spawn_bridge_probe(url, add, pending.reply);
-            }
-            None => {
-                let _ = pending.reply.send(BridgeAddOutcome::Canceled);
-            }
+        let Ok(url) = Url::parse(&pending.request.url) else {
+            let _ = pending
+                .reply
+                .send(BridgeAddOutcome::Invalid("invalid URL".to_string()));
+            return;
+        };
+        let chosen_name = file_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .or(pending.request.filename);
+        let add = AddRequest {
+            url: pending.request.url,
+            file_name: chosen_name,
+            save_dir: Some(folder),
+            start_now,
+            connections: None,
+            referrer: pending.request.referrer,
+            user_agent: pending.request.user_agent,
+            cookie: pending.request.cookie,
+            video_format: pending.request.video_format,
+        };
+        if add.video_format.is_some() {
+            self.finish_video_add(add, pending.reply);
+            return;
         }
+        if let Some(probe_result) = pending.probe {
+            let outcome = match self.insert_from_probe(add, probe_result) {
+                Ok(inserted) => BridgeAddOutcome::Created {
+                    id: inserted.id,
+                    filename: inserted.file_name,
+                    size: inserted.size,
+                },
+                Err(InsertError::Duplicate(existing)) => {
+                    BridgeAddOutcome::Conflict { id: existing.id }
+                }
+                Err(InsertError::Failed(error)) => BridgeAddOutcome::Internal(error),
+            };
+            let _ = pending.reply.send(outcome);
+            return;
+        }
+        self.spawn_bridge_probe(url, add, pending.reply);
     }
 
     fn handle_probe(
@@ -697,6 +792,11 @@ impl EngineState {
                 return Err(InsertError::Failed(error.to_string()));
             }
         };
+        let status = if request.start_now {
+            DownloadStatus::Queued
+        } else {
+            DownloadStatus::Paused
+        };
         let new = NewDownload {
             url: request.url,
             final_url: Some(result.final_url.to_string()),
@@ -704,7 +804,7 @@ impl EngineState {
             save_path: final_path,
             temp_path,
             size,
-            status: DownloadStatus::Queued,
+            status,
             category: Category::from_file_name(&file_name),
             kind: "http".to_string(),
             video_format: None,
@@ -784,6 +884,11 @@ impl EngineState {
             Ok(order) => order,
             Err(error) => return Err(InsertError::Failed(error.to_string())),
         };
+        let status = if request.start_now {
+            DownloadStatus::Queued
+        } else {
+            DownloadStatus::Paused
+        };
         let new = NewDownload {
             url: request.url.clone(),
             final_url: Some(request.url),
@@ -791,7 +896,7 @@ impl EngineState {
             temp_path,
             save_path,
             size: None,
-            status: DownloadStatus::Queued,
+            status,
             category: Category::Video,
             kind: "video".to_string(),
             video_format: request.video_format,
@@ -896,6 +1001,19 @@ impl EngineState {
                     },
                 };
                 let _ = reply.send(outcome);
+            }
+            Event::CaptureProbe { key, result } => {
+                if let Ok(result) = *result
+                    && let Some(pending) = self.pending_captures.get_mut(&key)
+                {
+                    pending.file_name = resolve_file_name(
+                        pending.request.filename.as_deref(),
+                        result.content_disposition.as_deref(),
+                        &result.final_url,
+                    );
+                    pending.size = result.size;
+                    pending.probe = Some(result);
+                }
             }
             Event::Progress {
                 id,
@@ -1431,6 +1549,20 @@ impl EngineState {
         self.pump_queue();
     }
 
+    fn remove_completed(&mut self) {
+        let completed: Vec<i64> = self
+            .store
+            .list_downloads()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|download| download.status == DownloadStatus::Done)
+            .map(|download| download.id)
+            .collect();
+        for id in completed {
+            let _ = self.store.delete_download(id);
+        }
+    }
+
     fn pause_all(&mut self) {
         let ids: Vec<i64> = self.active.keys().copied().collect();
         let queued: Vec<i64> = self
@@ -1514,8 +1646,20 @@ impl EngineState {
         let Ok(downloads) = self.store.list_downloads() else {
             return;
         };
+        let mut segments = HashMap::new();
+        for download in &downloads {
+            if let Ok(mut list) = self.store.segments(download.id) {
+                for segment in &mut list {
+                    if let Some(done) = self.pending_segments.get(&(download.id, segment.idx)) {
+                        segment.done = *done;
+                    }
+                }
+                segments.insert(download.id, list);
+            }
+        }
         let snapshot = Snapshot {
             downloads,
+            segments,
             settings: self.settings.clone(),
             speeds: self.speeds.clone(),
             message: self.message.clone(),
@@ -1524,6 +1668,8 @@ impl EngineState {
                 CapturePrompt {
                     key: *key,
                     url: pending.request.url.clone(),
+                    file_name: pending.file_name.clone(),
+                    size: pending.size,
                 }
             }),
         };

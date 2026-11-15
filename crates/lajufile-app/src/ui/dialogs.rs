@@ -4,11 +4,13 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout, RichText, Ui};
 use lajufile_core::settings::{Settings, Theme};
+use lajufile_core::store::{Download, DownloadStatus, Segment};
 use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice};
 
 use crate::engine::AddRequest;
 
 use super::Action;
+use super::format::{eta_seconds, format_eta, format_size, format_speed};
 
 #[derive(Debug, Clone)]
 pub struct AddDraft {
@@ -344,6 +346,235 @@ fn mask_token(token: &str) -> String {
     } else {
         "…".to_string()
     }
+}
+
+pub fn progress_dialog(
+    ctx: &egui::Context,
+    download: &Download,
+    segments: &[Segment],
+    speed: Option<u64>,
+    show_details: &mut bool,
+) -> (bool, Option<Action>) {
+    let mut keep_open = true;
+    let mut action = None;
+    let fraction = match (download.size, download.status) {
+        (_, DownloadStatus::Done) => 1.0,
+        (Some(size), _) if size > 0 => (download.downloaded as f32 / size as f32).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
+    let title = format!("{:.0}% — {}", fraction * 100.0, download.file_name);
+
+    egui::Window::new(title)
+        .id(egui::Id::unique("lajufile_progress_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(580.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_width(540.0);
+            ui.label(
+                RichText::new(&download.url)
+                    .size(11.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(6.0);
+
+            let status_text = match download.status {
+                DownloadStatus::Downloading => "Receiving data...",
+                DownloadStatus::Queued => "Queued",
+                DownloadStatus::Paused => "Paused",
+                DownloadStatus::Done => "Completed",
+                DownloadStatus::Error => download.error.as_deref().unwrap_or("Error"),
+            };
+            let eta = eta_seconds(download.size, download.downloaded, speed.unwrap_or(0));
+
+            egui::Grid::new("lajufile_progress_meta")
+                .num_columns(2)
+                .spacing([24.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Status:").strong());
+                    ui.label(status_text);
+                    ui.end_row();
+
+                    ui.label(RichText::new("File size:").strong());
+                    ui.label(
+                        download
+                            .size
+                            .map(format_size)
+                            .unwrap_or_else(|| "(unknown)".to_string()),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Downloaded:").strong());
+                    ui.label(format!(
+                        "{} ({:.0}%)",
+                        format_size(download.downloaded),
+                        fraction * 100.0
+                    ));
+                    ui.end_row();
+
+                    ui.label(RichText::new("Transfer rate:").strong());
+                    ui.label(format_speed(speed));
+                    ui.end_row();
+
+                    ui.label(RichText::new("Time left:").strong());
+                    ui.label(format_eta(eta));
+                    ui.end_row();
+
+                    ui.label(RichText::new("Resume capability:").strong());
+                    ui.label(if download.ranged { "Yes" } else { "No" });
+                    ui.end_row();
+                });
+
+            ui.add_space(8.0);
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_width(ui.available_width())
+                    .show_percentage(),
+            );
+
+            if *show_details && !segments.is_empty() {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(
+                    RichText::new("Start positions and download progress by connections")
+                        .size(11.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lajufile_segment_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("N.").size(11.0).strong());
+                                ui.label(RichText::new("Downloaded").size(11.0).strong());
+                                ui.label(RichText::new("Progress").size(11.0).strong());
+                                ui.label(RichText::new("Info").size(11.0).strong());
+                                ui.end_row();
+
+                                for segment in segments {
+                                    let span =
+                                        segment.end.saturating_sub(segment.start).saturating_add(1);
+                                    let seg_frac = if download.status == DownloadStatus::Done {
+                                        1.0
+                                    } else if span > 0 {
+                                        (segment.done as f32 / span as f32).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    let info = if download.status == DownloadStatus::Done
+                                        || (span > 0 && segment.done >= span)
+                                    {
+                                        "Completed"
+                                    } else if download.status == DownloadStatus::Downloading {
+                                        "Receiving data..."
+                                    } else if download.status == DownloadStatus::Paused {
+                                        "Paused"
+                                    } else {
+                                        "Waiting"
+                                    };
+                                    ui.label(format!("{}", segment.idx + 1));
+                                    ui.label(format_size(segment.done));
+                                    ui.add(
+                                        egui::ProgressBar::new(seg_frac)
+                                            .desired_width(180.0)
+                                            .text(format!("{:.0}%", seg_frac * 100.0)),
+                                    );
+                                    ui.label(info);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let toggle_label = if *show_details {
+                    "<< Hide details"
+                } else {
+                    "Show details >>"
+                };
+                if ui.button(toggle_label).clicked() {
+                    *show_details = !*show_details;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        keep_open = false;
+                    }
+                    match download.status {
+                        DownloadStatus::Downloading | DownloadStatus::Queued => {
+                            if ui.button("Pause").clicked() {
+                                action = Some(Action::Pause(download.id));
+                            }
+                        }
+                        DownloadStatus::Paused | DownloadStatus::Error => {
+                            if ui.button("Start").clicked() {
+                                action = Some(Action::Resume(download.id));
+                            }
+                        }
+                        DownloadStatus::Done => {
+                            if ui.button("Open").clicked() {
+                                action = Some(Action::Open(download.id));
+                                keep_open = false;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
+    (keep_open, action)
+}
+
+pub fn complete_dialog(ctx: &egui::Context, download: &Download) -> (bool, Option<Action>) {
+    let mut keep_open = true;
+    let mut action = None;
+    egui::Window::new("Download complete")
+        .id(egui::Id::unique("lajufile_complete_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new(&download.file_name).size(14.0).strong());
+            if let Some(size) = download.size {
+                ui.label(
+                    RichText::new(format!("Size: {}", format_size(size)))
+                        .size(11.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Saved as").strong());
+            let mut saved = download.save_path.display().to_string();
+            ui.add_sized(
+                [ui.available_width(), 26.0],
+                egui::TextEdit::singleline(&mut saved).interactive(false),
+            );
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    keep_open = false;
+                }
+                if ui.button("Open folder").clicked() {
+                    action = Some(Action::OpenFolder(download.id));
+                    keep_open = false;
+                }
+                if ui.button("Open").clicked() {
+                    action = Some(Action::Open(download.id));
+                    keep_open = false;
+                }
+            });
+        });
+    (keep_open, action)
 }
 
 #[cfg(test)]

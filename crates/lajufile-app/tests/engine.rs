@@ -1055,3 +1055,82 @@ fn startup_resumes_a_crashed_download() {
     );
     handle.shutdown();
 }
+
+#[test]
+fn remove_completed_clears_done_rows_and_keeps_files() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_concurrent: 1,
+        ..test_settings(dir.path())
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("done.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+        }))
+        .unwrap();
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/slow-seg.bin", server.base),
+            file_name: Some("later.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: Some(2),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads.len() == 2
+                && s.downloads
+                    .iter()
+                    .any(|d| d.file_name == "done.bin" && d.status == DownloadStatus::Done)
+                && s.downloads
+                    .iter()
+                    .any(|d| d.file_name == "later.bin" && d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let done_path = snap
+        .downloads
+        .iter()
+        .find(|d| d.file_name == "done.bin")
+        .unwrap()
+        .save_path
+        .clone();
+    let later_id = snap
+        .downloads
+        .iter()
+        .find(|d| d.file_name == "later.bin")
+        .unwrap()
+        .id;
+    assert_eq!(snap.segments.get(&later_id).map(Vec::len), Some(2));
+
+    handle.send(Command::RemoveCompleted).unwrap();
+    let after = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(5));
+    assert_eq!(after.downloads[0].file_name, "later.bin");
+    assert_eq!(after.downloads[0].status, DownloadStatus::Paused);
+    assert!(done_path.exists());
+    handle.shutdown();
+}

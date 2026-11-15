@@ -6,9 +6,13 @@ use std::path::PathBuf;
 use egui::{Align, Layout, RichText};
 use lajufile_core::store::Category;
 
+use super::format::format_size;
+
 #[derive(Debug, Clone)]
 pub struct DownloadInfoDraft {
     pub url: String,
+    pub file_name: String,
+    pub size: Option<u64>,
     pub category: Category,
     pub folder: String,
     pub remember: bool,
@@ -16,7 +20,12 @@ pub struct DownloadInfoDraft {
 
 #[derive(Debug, Clone)]
 pub enum DownloadInfoChoice {
-    Start { folder: PathBuf, remember: bool },
+    Start {
+        folder: PathBuf,
+        file_name: String,
+        remember: bool,
+        start_now: bool,
+    },
     Browse,
     Cancel,
 }
@@ -57,7 +66,28 @@ pub fn download_info_dialog(
                 ui.label(RichText::new("Category").strong());
                 ui.add_space(8.0);
                 ui.label(category_label(draft.category));
+                ui.add_space(24.0);
+                ui.label(RichText::new("Size").strong());
+                ui.add_space(8.0);
+                ui.label(
+                    draft
+                        .size
+                        .map(format_size)
+                        .unwrap_or_else(|| "(unknown)".to_string()),
+                );
             });
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("File name").strong());
+            if ui
+                .add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::TextEdit::singleline(&mut draft.file_name),
+                )
+                .changed()
+            {
+                draft.category = Category::from_file_name(draft.file_name.trim());
+            }
 
             ui.add_space(6.0);
             ui.label(RichText::new("Save As").strong());
@@ -84,10 +114,19 @@ pub fn download_info_dialog(
             ui.separator();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Start download").clicked() {
-                    let folder = PathBuf::from(draft.folder.trim());
                     choice = Some(DownloadInfoChoice::Start {
-                        folder,
+                        folder: PathBuf::from(draft.folder.trim()),
+                        file_name: draft.file_name.trim().to_string(),
                         remember: draft.remember,
+                        start_now: true,
+                    });
+                }
+                if ui.button("Download later").clicked() {
+                    choice = Some(DownloadInfoChoice::Start {
+                        folder: PathBuf::from(draft.folder.trim()),
+                        file_name: draft.file_name.trim().to_string(),
+                        remember: draft.remember,
+                        start_now: false,
                     });
                 }
                 if ui.button("Cancel").clicked() {

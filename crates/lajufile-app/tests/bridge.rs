@@ -581,3 +581,52 @@ async fn capture_prompt_cancel_returns_204_without_record() {
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert!(store.list_downloads().unwrap().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_decision_supports_custom_name_and_download_later() {
+    let server = start_server();
+    let (handle, dir) = start_engine_prompt(0);
+    let port = bound_port(&handle);
+    let chosen = dir.path().join("chosen");
+    let body = format!(r#"{{"url":"{}/file.bin"}}"#, server.base);
+    let request = tokio::spawn(async move { post_download(port, body).await });
+
+    let snapshot = wait_for(
+        &handle,
+        |snapshot| {
+            snapshot
+                .pending_capture
+                .as_ref()
+                .is_some_and(|prompt| prompt.size == Some(1_048_576))
+        },
+        Duration::from_secs(5),
+    );
+    let prompt = snapshot.pending_capture.as_ref().unwrap();
+    assert_eq!(prompt.file_name, "file.bin");
+    let key = prompt.key;
+
+    handle
+        .send(Command::CaptureDecision {
+            key,
+            folder: chosen.clone(),
+            file_name: Some("custom.bin".to_string()),
+            start_now: false,
+        })
+        .unwrap();
+
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let json: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(json["filename"], "custom.bin");
+    assert_eq!(json["size"], 1_048_576);
+
+    let snapshot = wait_for(
+        &handle,
+        |snapshot| snapshot.downloads.len() == 1,
+        Duration::from_secs(5),
+    );
+    assert_eq!(snapshot.downloads[0].file_name, "custom.bin");
+    assert_eq!(snapshot.downloads[0].status, DownloadStatus::Paused);
+    assert_eq!(snapshot.downloads[0].save_path, chosen.join("custom.bin"));
+    handle.shutdown();
+}
