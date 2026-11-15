@@ -1,14 +1,17 @@
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use lajufile_core::paths;
 use lajufile_core::settings::{Settings, Theme, generate_token};
-use lajufile_core::store::DownloadStatus;
+use lajufile_core::store::{Category, DownloadStatus};
 
 use crate::bridge;
-use crate::engine::{Command, EngineConfig, EngineHandle, Snapshot};
+use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use crate::tray::{self, Tray, TrayEvent};
 use crate::ui::dialogs::AddDraft;
+use crate::ui::download_info::{DownloadInfoChoice, DownloadInfoDraft, category_label};
+use crate::ui::folder_picker::{FolderChoice, FolderPicker};
 use crate::ui::theme::apply_theme;
 use crate::ui::{self, Action, Filter};
 
@@ -29,6 +32,10 @@ pub struct LajuFileApp {
     pub(crate) allow_exit: bool,
     pub(crate) tray_tooltip: String,
     pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
+    pub(crate) folder_picker: Option<FolderPicker>,
+    pub(crate) pending_add: Option<AddRequest>,
+    pub(crate) capture_info: Option<(u64, DownloadInfoDraft)>,
+    pub(crate) dismissed_capture: Option<u64>,
 }
 
 impl LajuFileApp {
@@ -74,6 +81,10 @@ impl LajuFileApp {
             allow_exit: false,
             tray_tooltip: String::new(),
             bridge_test: None,
+            folder_picker: None,
+            pending_add: None,
+            capture_info: None,
+            dismissed_capture: None,
         }
     }
 
@@ -103,7 +114,43 @@ impl LajuFileApp {
             self.theme = snapshot.settings.theme.clone();
             apply_theme(ctx, &self.theme);
         }
+        let pending = snapshot
+            .pending_capture
+            .as_ref()
+            .map(|prompt| (prompt.key, prompt.url.clone()));
         self.snapshot = Some(snapshot);
+        match pending {
+            Some((key, url)) if self.dismissed_capture != Some(key) => {
+                if self.capture_info.is_none() {
+                    let file_name = url
+                        .parse::<url::Url>()
+                        .ok()
+                        .and_then(|url| {
+                            url.path_segments()
+                                .and_then(|mut segments| segments.next_back().map(str::to_string))
+                        })
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| "download".to_string());
+                    let category = Category::from_file_name(&file_name);
+                    let folder = self.default_folder_for(category);
+                    self.capture_info = Some((
+                        key,
+                        crate::ui::download_info::DownloadInfoDraft {
+                            url,
+                            category,
+                            folder: folder.display().to_string(),
+                            remember: false,
+                        },
+                    ));
+                }
+            }
+            Some(_) => {}
+            None => {
+                if self.capture_info.is_none() {
+                    self.dismissed_capture = None;
+                }
+            }
+        }
     }
 
     fn poll_bridge_test(&mut self) {
@@ -172,6 +219,102 @@ impl LajuFileApp {
         }
     }
 
+    fn default_save_dir(&self) -> PathBuf {
+        if !self.add_draft.folder.trim().is_empty() {
+            return PathBuf::from(self.add_draft.folder.trim());
+        }
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.settings.download_dir.clone())
+            .unwrap_or_else(paths::default_download_dir)
+    }
+
+    fn default_folder_for(&self, category: Category) -> PathBuf {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .settings
+                    .category_dirs
+                    .get(crate::ui::download_info::category_label(category))
+                    .cloned()
+                    .unwrap_or_else(|| snapshot.settings.download_dir.clone())
+            })
+            .unwrap_or_else(paths::default_download_dir)
+    }
+
+    fn open_folder_picker(&mut self) {
+        self.pending_add = None;
+        self.folder_picker = Some(FolderPicker::new(self.default_save_dir()));
+    }
+
+    fn handle_add(&mut self, request: AddRequest) {
+        let prompt = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| should_prompt_for_folder(&snapshot.settings, true))
+            .unwrap_or(false);
+        if prompt && request.save_dir.is_none() {
+            self.pending_add = Some(request);
+            self.folder_picker = Some(FolderPicker::new(self.default_save_dir()));
+            return;
+        }
+        self.send(Command::Add(request));
+    }
+
+    fn poll_folder_picker(&mut self, ctx: &egui::Context) {
+        let Some(mut picker) = self.folder_picker.take() else {
+            return;
+        };
+        match picker.show(ctx) {
+            Some(FolderChoice::Select(path)) => {
+                if let Some((_, draft)) = &mut self.capture_info {
+                    draft.folder = path.display().to_string();
+                } else {
+                    self.add_draft.folder = path.display().to_string();
+                    if let Some(mut request) = self.pending_add.take() {
+                        request.save_dir = Some(path);
+                        self.send(Command::Add(request));
+                        self.show_add = false;
+                    }
+                }
+            }
+            Some(FolderChoice::Cancel) => self.pending_add = None,
+            None => self.folder_picker = Some(picker),
+        }
+    }
+
+    fn poll_capture_info(&mut self, ctx: &egui::Context) {
+        let Some((key, mut draft)) = self.capture_info.take() else {
+            return;
+        };
+        match crate::ui::download_info::download_info_dialog(ctx, &mut draft) {
+            Some(DownloadInfoChoice::Browse) => {
+                self.folder_picker = Some(FolderPicker::new(PathBuf::from(draft.folder.trim())));
+                self.capture_info = Some((key, draft));
+            }
+            Some(DownloadInfoChoice::Start { folder, remember }) => {
+                self.dismissed_capture = Some(key);
+                self.send(Command::CaptureFolderDecision {
+                    key,
+                    path: Some(folder.clone()),
+                });
+                if remember && let Some(snapshot) = &self.snapshot {
+                    let mut settings = snapshot.settings.clone();
+                    settings
+                        .category_dirs
+                        .insert(category_label(draft.category).to_string(), folder);
+                    self.send(Command::UpdateSettings(settings));
+                }
+            }
+            Some(DownloadInfoChoice::Cancel) => {
+                self.dismissed_capture = Some(key);
+                self.send(Command::CaptureFolderDecision { key, path: None });
+            }
+            None => self.capture_info = Some((key, draft)),
+        }
+    }
+
     fn handle_actions(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
         for action in actions {
             match action {
@@ -214,7 +357,8 @@ impl LajuFileApp {
                     }
                     self.show_settings = true;
                 }
-                Action::Add(request) => self.send(Command::Add(request)),
+                Action::Add(request) => self.handle_add(request),
+                Action::OpenFolderPicker => self.open_folder_picker(),
                 Action::SaveSettings(mut settings) => {
                     normalize_settings(&mut settings);
                     self.settings_draft = settings.clone();
@@ -313,6 +457,9 @@ impl eframe::App for LajuFileApp {
         {
             self.handle_actions(&ctx, vec![action]);
         }
+
+        self.poll_capture_info(&ctx);
+        self.poll_folder_picker(&ctx);
     }
 }
 
@@ -322,6 +469,10 @@ impl Drop for LajuFileApp {
             engine.shutdown();
         }
     }
+}
+
+fn should_prompt_for_folder(settings: &Settings, manual: bool) -> bool {
+    manual && settings.ask_where_to_save
 }
 
 fn normalize_settings(settings: &mut Settings) {
@@ -397,5 +548,17 @@ mod tests {
         settings.bridge_port = 65_535;
         normalize_settings(&mut settings);
         assert_eq!(settings.bridge_port, 65_535);
+    }
+
+    #[test]
+    fn ask_prompt_only_when_enabled_and_manual() {
+        let mut settings = Settings {
+            ask_where_to_save: true,
+            ..Settings::default()
+        };
+        assert!(should_prompt_for_folder(&settings, true));
+        assert!(!should_prompt_for_folder(&settings, false));
+        settings.ask_where_to_save = false;
+        assert!(!should_prompt_for_folder(&settings, true));
     }
 }

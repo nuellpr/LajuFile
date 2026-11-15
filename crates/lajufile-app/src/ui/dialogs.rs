@@ -86,11 +86,16 @@ pub fn add_dialog(
 
             ui.add_space(8.0);
             ui.label(RichText::new("Save to folder").strong());
-            ui.add_sized(
-                [ui.available_width(), 30.0],
-                egui::TextEdit::singleline(&mut draft.folder)
-                    .hint_text("Default: Downloads\\LajuFile"),
-            );
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [ui.available_width() - 96.0, 30.0],
+                    egui::TextEdit::singleline(&mut draft.folder)
+                        .hint_text("Default: Downloads\\LajuFile"),
+                );
+                if ui.button("Browse...").clicked() {
+                    action = Some(Action::OpenFolderPicker);
+                }
+            });
 
             ui.add_space(12.0);
             ui.checkbox(&mut draft.start_now, "Start downloading now");
@@ -186,6 +191,10 @@ pub fn settings_dialog(
                     section(ui, "Behavior");
                     ui.checkbox(&mut settings.close_to_tray, "Close to tray");
                     ui.checkbox(&mut settings.auto_resume, "Auto-resume on startup");
+                    ui.checkbox(
+                        &mut settings.ask_where_to_save,
+                        "Ask where to save each download",
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Theme");
                         ui.selectable_value(&mut settings.theme, Theme::Light, "Light");
