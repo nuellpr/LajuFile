@@ -26,8 +26,14 @@ pub struct Settings {
     pub bridge_token: String,
     #[serde(default)]
     pub ask_where_to_save: bool,
+    #[serde(default = "default_true")]
+    pub clipboard_monitor: bool,
     #[serde(default)]
     pub category_dirs: std::collections::BTreeMap<String, PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -44,6 +50,7 @@ impl Default for Settings {
             bridge_port: 53841,
             bridge_token: String::new(),
             ask_where_to_save: false,
+            clipboard_monitor: true,
             category_dirs: std::collections::BTreeMap::new(),
         }
     }

@@ -183,6 +183,10 @@ fn draw_menu_bar(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<Action>
                         actions.push(Action::OpenAdd);
                         ui.close();
                     }
+                    if ui.button("Add batch download...").clicked() {
+                        actions.push(Action::OpenBatch);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Resume all").clicked() {
                         actions.push(Action::ResumeAll);
@@ -260,6 +264,9 @@ fn draw_toolbar(
                 ui.set_width(ui.available_width());
                 if toolbar_button(ui, "Add URL", true, true, palette) {
                     actions.push(Action::OpenAdd);
+                }
+                if toolbar_button(ui, "Batch", true, false, palette) {
+                    actions.push(Action::OpenBatch);
                 }
                 ui.add_space(4.0);
                 ui.separator();

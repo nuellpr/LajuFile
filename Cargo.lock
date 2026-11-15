@@ -1762,6 +1762,7 @@ dependencies = [
 name = "lajufile-app"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "axum",
  "eframe",
  "egui",

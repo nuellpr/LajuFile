@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 lajufile-core = { path = "../lajufile-core" }
+arboard.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true

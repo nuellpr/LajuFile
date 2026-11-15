@@ -11,7 +11,7 @@ use lajufile_core::video::VideoListing;
 use crate::bridge;
 use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use crate::tray::{self, Tray, TrayEvent};
-use crate::ui::dialogs::AddDraft;
+use crate::ui::dialogs::{AddDraft, BatchDraft, clipboard_download_url};
 use crate::ui::download_info::{DownloadInfoChoice, DownloadInfoDraft, category_label};
 use crate::ui::folder_picker::{FolderChoice, FolderPicker};
 use crate::ui::theme::apply_theme;
@@ -23,8 +23,10 @@ pub struct LajuFileApp {
     pub(crate) selected: Option<i64>,
     pub(crate) filter: Filter,
     pub(crate) show_add: bool,
+    pub(crate) show_batch: bool,
     pub(crate) show_settings: bool,
     pub(crate) add_draft: AddDraft,
+    pub(crate) batch_draft: BatchDraft,
     pub(crate) add_focus: bool,
     pub(crate) settings_draft: Settings,
     pub(crate) toast: Option<(String, Instant)>,
@@ -43,12 +45,18 @@ pub struct LajuFileApp {
     pub(crate) progress_details: bool,
     pub(crate) completed_id: Option<i64>,
     pub(crate) seen_done: Option<HashSet<i64>>,
+    pub(crate) last_clipboard: Option<String>,
+    pub(crate) clipboard_initialized: bool,
+    pub(crate) last_clipboard_poll: Instant,
 }
 
 impl LajuFileApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let data_dir = paths::data_dir();
         let settings = Settings::load_or_create(&data_dir).unwrap_or_default();
+        if settings.autostart {
+            sync_autostart(true);
+        }
         let theme = settings.theme.clone();
         apply_theme(&cc.egui_ctx, &theme);
 
@@ -60,6 +68,7 @@ impl LajuFileApp {
             .and_then(|icon| tray::create(icon, &cc.egui_ctx));
 
         let add_draft = AddDraft::for_settings(&settings);
+        let batch_draft = BatchDraft::for_settings(&settings);
         let settings_draft = settings.clone();
         let engine = EngineHandle::start(EngineConfig {
             data_dir: data_dir.clone(),
@@ -77,8 +86,10 @@ impl LajuFileApp {
             selected: None,
             filter: Filter::All,
             show_add: false,
+            show_batch: false,
             show_settings: false,
             add_draft,
+            batch_draft,
             add_focus: false,
             settings_draft,
             toast,
@@ -97,6 +108,9 @@ impl LajuFileApp {
             progress_details: true,
             completed_id: None,
             seen_done: None,
+            last_clipboard: None,
+            clipboard_initialized: false,
+            last_clipboard_poll: Instant::now(),
         }
     }
 
@@ -104,6 +118,13 @@ impl LajuFileApp {
         self.snapshot
             .as_ref()
             .map(|snapshot| AddDraft::for_settings(&snapshot.settings))
+            .unwrap_or_default()
+    }
+
+    fn fresh_batch_draft(&self) -> BatchDraft {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| BatchDraft::for_settings(&snapshot.settings))
             .unwrap_or_default()
     }
 
@@ -316,6 +337,8 @@ impl LajuFileApp {
             Some(FolderChoice::Select(path)) => {
                 if let Some((_, draft)) = &mut self.capture_info {
                     draft.folder = path.display().to_string();
+                } else if self.show_batch {
+                    self.batch_draft.folder = path.display().to_string();
                 } else {
                     self.add_draft.folder = path.display().to_string();
                     if let Some(mut request) = self.pending_add.take() {
@@ -328,6 +351,58 @@ impl LajuFileApp {
             Some(FolderChoice::Cancel) => self.pending_add = None,
             None => self.folder_picker = Some(picker),
         }
+    }
+
+    fn poll_clipboard(&mut self, ctx: &egui::Context) {
+        if self.last_clipboard_poll.elapsed() < Duration::from_millis(800) {
+            return;
+        }
+        self.last_clipboard_poll = Instant::now();
+        let current = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok());
+        if !self.clipboard_initialized {
+            self.clipboard_initialized = true;
+            self.last_clipboard = current;
+            return;
+        }
+        if current == self.last_clipboard {
+            return;
+        }
+        self.last_clipboard = current.clone();
+        let enabled = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.settings.clipboard_monitor)
+            .unwrap_or(true);
+        if !enabled || self.show_add || self.show_batch || self.capture_info.is_some() {
+            return;
+        }
+        let Some(text) = current else {
+            return;
+        };
+        let Some(url) = clipboard_download_url(&text) else {
+            return;
+        };
+        let already_active = self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.downloads.iter().any(|download| {
+                download.url == url
+                    && matches!(
+                        download.status,
+                        DownloadStatus::Queued
+                            | DownloadStatus::Downloading
+                            | DownloadStatus::Paused
+                    )
+            })
+        });
+        if already_active {
+            return;
+        }
+        self.show_window(ctx);
+        self.add_draft = self.fresh_add_draft();
+        self.add_draft.url = url;
+        self.add_focus = true;
+        self.show_add = true;
     }
 
     fn poll_capture_info(&mut self, ctx: &egui::Context) {
@@ -411,11 +486,18 @@ impl LajuFileApp {
                             .spawn();
                     }
                 }
-                Action::CopyUrl(url) => ctx.copy_text(url),
+                Action::CopyUrl(url) => {
+                    self.last_clipboard = Some(url.clone());
+                    ctx.copy_text(url);
+                }
                 Action::OpenAdd => {
                     self.add_draft = self.fresh_add_draft();
                     self.add_focus = true;
                     self.show_add = true;
+                }
+                Action::OpenBatch => {
+                    self.batch_draft = self.fresh_batch_draft();
+                    self.show_batch = true;
                 }
                 Action::OpenSettings => {
                     if let Some(snapshot) = &self.snapshot {
@@ -424,6 +506,16 @@ impl LajuFileApp {
                     self.show_settings = true;
                 }
                 Action::Add(request) => self.handle_add(request),
+                Action::AddBatch(requests) => {
+                    let count = requests.len();
+                    for request in requests {
+                        self.send(Command::Add(request));
+                    }
+                    if count > 0 {
+                        self.toast =
+                            Some((format!("Queued {count} batch downloads"), Instant::now()));
+                    }
+                }
                 Action::LoadFormats(url) => {
                     let (reply, rx) = tokio::sync::oneshot::channel();
                     self.send(Command::VideoFormats { url, reply });
@@ -432,6 +524,7 @@ impl LajuFileApp {
                 Action::OpenFolderPicker => self.open_folder_picker(),
                 Action::SaveSettings(mut settings) => {
                     normalize_settings(&mut settings);
+                    sync_autostart(settings.autostart);
                     self.settings_draft = settings.clone();
                     self.theme = settings.theme.clone();
                     apply_theme(ctx, &self.theme);
@@ -481,6 +574,7 @@ impl eframe::App for LajuFileApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
         self.poll_engine(ctx);
+        self.poll_clipboard(ctx);
         self.poll_bridge_test();
         self.poll_formats();
         self.update_tray_tooltip();
@@ -518,6 +612,18 @@ impl eframe::App for LajuFileApp {
                 &mut self.add_draft,
                 &mut self.add_focus,
             )
+        {
+            self.handle_actions(&ctx, vec![action]);
+        }
+        if self.show_batch
+            && let Some(action) =
+                ui::dialogs::batch_dialog(&ctx, &mut self.show_batch, &mut self.batch_draft)
+        {
+            self.handle_actions(&ctx, vec![action]);
+        }
+        if self.show_batch
+            && let Some(action) =
+                ui::dialogs::batch_dialog(&ctx, &mut self.show_batch, &mut self.batch_draft)
         {
             self.handle_actions(&ctx, vec![action]);
         }
@@ -586,6 +692,24 @@ impl Drop for LajuFileApp {
             engine.shutdown();
         }
     }
+}
+
+fn sync_autostart(enabled: bool) {
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    let mut command = std::process::Command::new("reg.exe");
+    crate::tools::no_window(&mut command);
+    if enabled {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let quoted = format!("\"{}\"", exe.display());
+        command.args([
+            "add", RUN_KEY, "/v", "LajuFile", "/t", "REG_SZ", "/d", &quoted, "/f",
+        ]);
+    } else {
+        command.args(["delete", RUN_KEY, "/v", "LajuFile", "/f"]);
+    }
+    let _ = command.status();
 }
 
 fn should_prompt_for_folder(settings: &Settings, manual: bool) -> bool {

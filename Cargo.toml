@@ -9,6 +9,7 @@ license = "MIT"
 rust-version = "1.85"
 
 [workspace.dependencies]
+arboard = "3"
 content_disposition = "0.4"
 directories = "6"
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
