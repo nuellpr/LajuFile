@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -9,6 +10,7 @@ use axum::{
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     routing::{get, post},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -16,6 +18,28 @@ use crate::engine::Command;
 
 pub const BRIDGE_HEADER: &str = "x-lajufile-token";
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BridgeAddRequest {
+    pub url: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum BridgeAddOutcome {
+    Created {
+        id: i64,
+        filename: String,
+        size: Option<u64>,
+    },
+    Conflict {
+        id: i64,
+    },
+    Invalid(String),
+    ProbeFailed(String),
+    Internal(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeState {
@@ -57,7 +81,6 @@ impl BridgeServer {
 #[derive(Clone)]
 struct BridgeAppState {
     token: Arc<RwLock<String>>,
-    #[allow(dead_code)]
     commands: Sender<Command>,
 }
 
@@ -117,7 +140,7 @@ pub async fn start(
 fn router(state: BridgeAppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/downloads", post(downloads_placeholder))
+        .route("/downloads", post(downloads))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(
             CorsLayer::new()
@@ -132,13 +155,61 @@ async fn health() -> Json<Value> {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
-async fn downloads_placeholder(
+async fn downloads(
     State(state): State<BridgeAppState>,
     headers: HeaderMap,
-    _body: Bytes,
-) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+    body: Bytes,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     authorize(&headers, &state.token)?;
-    Ok(StatusCode::NOT_IMPLEMENTED)
+    let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid request" })),
+        )
+    })?;
+
+    let (reply, response) = tokio::sync::oneshot::channel();
+    if state
+        .commands
+        .send(Command::BridgeAdd { request, reply })
+        .is_err()
+    {
+        return Err(internal("engine stopped"));
+    }
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .map_err(|_| internal("engine timeout"))?
+        .map_err(|_| internal("engine stopped"))?;
+
+    Ok(match outcome {
+        BridgeAddOutcome::Created { id, filename, size } => (
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "filename": filename, "size": size })),
+        ),
+        BridgeAddOutcome::Conflict { id } => (
+            StatusCode::CONFLICT,
+            Json(json!({ "id": id, "error": "already in LajuFile" })),
+        ),
+        BridgeAddOutcome::Invalid(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+        }
+        BridgeAddOutcome::ProbeFailed(message) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": message })),
+        ),
+        BridgeAddOutcome::Internal(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": message })),
+        ),
+    })
+}
+
+fn internal(message: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
 }
 
 fn authorize(

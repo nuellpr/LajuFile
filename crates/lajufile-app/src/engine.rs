@@ -22,6 +22,8 @@ use lajufile_core::store::{
 use tokio::runtime::Runtime;
 use url::Url;
 
+use crate::bridge::{BridgeAddOutcome, BridgeAddRequest};
+
 use crate::bridge::{self, BridgeServer, BridgeStatus};
 
 pub struct EngineConfig {
@@ -81,6 +83,10 @@ impl EngineHandle {
 #[derive(Debug)]
 pub enum Command {
     Add(AddRequest),
+    BridgeAdd {
+        request: BridgeAddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    },
     Pause(i64),
     Resume(i64),
     Remove(i64),
@@ -123,6 +129,11 @@ enum Event {
         request: AddRequest,
         result: Box<Result<ProbeResult, ProbeError>>,
     },
+    BridgeProbe {
+        request: AddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+        result: Box<Result<ProbeResult, ProbeError>>,
+    },
     Progress {
         id: i64,
         generation: u64,
@@ -150,6 +161,17 @@ enum Event {
 struct ActiveDownload {
     generation: u64,
     handle: tokio::task::JoinHandle<()>,
+}
+
+struct Inserted {
+    id: i64,
+    file_name: String,
+    size: Option<u64>,
+}
+
+enum InsertError {
+    Duplicate(Box<Download>),
+    Failed(String),
 }
 
 struct EngineState {
@@ -282,6 +304,7 @@ impl EngineState {
                     self.message = Some(text);
                 }
             }
+            Command::BridgeAdd { request, reply } => self.handle_bridge_add(request, reply),
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
             Command::Remove(id) => self.remove(id),
@@ -334,6 +357,59 @@ impl EngineState {
         None
     }
 
+    fn handle_bridge_add(
+        &mut self,
+        request: BridgeAddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    ) {
+        let url = match Url::parse(&request.url) {
+            Ok(url) => url,
+            Err(error) => {
+                let _ = reply.send(BridgeAddOutcome::Invalid(format!("invalid URL: {error}")));
+                return;
+            }
+        };
+        let normalized_url = url.to_string();
+
+        match self.store.active_by_url(&normalized_url) {
+            Ok(Some(existing)) => {
+                let _ = reply.send(BridgeAddOutcome::Conflict { id: existing.id });
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = reply.send(BridgeAddOutcome::Internal(error.to_string()));
+                return;
+            }
+        }
+
+        let probe_request = ProbeRequest {
+            url,
+            options: RequestOptions {
+                user_agent: Some(DEFAULT_USER_AGENT.to_string()),
+                ..RequestOptions::default()
+            },
+            timeout: Duration::from_secs(3),
+        };
+        let add = AddRequest {
+            url: normalized_url,
+            file_name: request.filename,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+        };
+        let client = self.client.clone();
+        let events = self.events.clone();
+        self.runtime.spawn(async move {
+            let result = probe(&client, &probe_request).await;
+            let _ = events.send(Event::BridgeProbe {
+                request: add,
+                reply,
+                result: Box::new(result),
+            });
+        });
+    }
+
     fn handle_probe(
         &mut self,
         request: AddRequest,
@@ -343,13 +419,24 @@ impl EngineState {
             Ok(result) => result,
             Err(error) => return format!("Add failed: {error}"),
         };
-
-        match self.store.active_by_url(&request.url) {
-            Ok(Some(existing)) => {
-                return format!("Already in LajuFile: {}", existing.file_name);
+        match self.insert_from_probe(request, result) {
+            Ok(inserted) => format!("Added {}", inserted.file_name),
+            Err(InsertError::Duplicate(existing)) => {
+                format!("Already in LajuFile: {}", existing.file_name)
             }
+            Err(InsertError::Failed(error)) => format!("Add failed: {error}"),
+        }
+    }
+
+    fn insert_from_probe(
+        &mut self,
+        request: AddRequest,
+        result: ProbeResult,
+    ) -> Result<Inserted, InsertError> {
+        match self.store.active_by_url(&request.url) {
+            Ok(Some(existing)) => return Err(InsertError::Duplicate(Box::new(existing))),
             Ok(None) => {}
-            Err(error) => return format!("Add failed: {error}"),
+            Err(error) => return Err(InsertError::Failed(error.to_string())),
         }
 
         let dir = request
@@ -357,7 +444,7 @@ impl EngineState {
             .clone()
             .unwrap_or_else(|| self.settings.download_dir.clone());
         if let Err(error) = ensure_dir(&dir) {
-            return format!("Add failed: {error}");
+            return Err(InsertError::Failed(error.to_string()));
         }
 
         let base_name = resolve_file_name(
@@ -377,7 +464,7 @@ impl EngineState {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     final_path = dedupe_path(&dir, &base_name);
                 }
-                Err(error) => return format!("Add failed: {error}"),
+                Err(error) => return Err(InsertError::Failed(error.to_string())),
             }
         };
         let reserved_temp = temp_path.clone();
@@ -390,11 +477,14 @@ impl EngineState {
             .unwrap_or(self.settings.max_connections)
             .clamp(1, 32);
         let segments = plan_segments(result.size.unwrap_or(0), result.ranged, connections);
-        let _start_now = request.start_now;
+        let size = result.size;
 
         let queue_order = match self.store.next_queue_order() {
             Ok(order) => order,
-            Err(error) => return format!("Add failed: {error}"),
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                return Err(InsertError::Failed(error.to_string()));
+            }
         };
         let new = NewDownload {
             url: request.url,
@@ -402,7 +492,7 @@ impl EngineState {
             file_name: file_name.clone(),
             save_path: final_path,
             temp_path,
-            size: result.size,
+            size,
             status: DownloadStatus::Queued,
             category: Category::from_file_name(&file_name),
             connections,
@@ -418,13 +508,17 @@ impl EngineState {
         };
 
         match self.store.insert_download(&new) {
-            Ok(_) => {
+            Ok(id) => {
                 self.pump_queue();
-                format!("Added {file_name}")
+                Ok(Inserted {
+                    id,
+                    file_name,
+                    size,
+                })
             }
             Err(error) => {
                 let _ = std::fs::remove_file(&reserved_temp);
-                format!("Add failed: {error}")
+                Err(InsertError::Failed(error.to_string()))
             }
         }
     }
@@ -433,6 +527,27 @@ impl EngineState {
         match event {
             Event::Probe { request, result } => {
                 self.message = Some(self.handle_probe(request, *result));
+            }
+            Event::BridgeProbe {
+                request,
+                reply,
+                result,
+            } => {
+                let outcome = match *result {
+                    Err(error) => BridgeAddOutcome::ProbeFailed(error.to_string()),
+                    Ok(result) => match self.insert_from_probe(request, result) {
+                        Ok(inserted) => BridgeAddOutcome::Created {
+                            id: inserted.id,
+                            filename: inserted.file_name,
+                            size: inserted.size,
+                        },
+                        Err(InsertError::Duplicate(existing)) => {
+                            BridgeAddOutcome::Conflict { id: existing.id }
+                        }
+                        Err(InsertError::Failed(error)) => BridgeAddOutcome::Internal(error),
+                    },
+                };
+                let _ = reply.send(outcome);
             }
             Event::Progress {
                 id,
