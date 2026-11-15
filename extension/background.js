@@ -122,7 +122,19 @@ async function capture(item, allowBrowserFallback) {
 
 async function cancelAndErase(id) {
   await new Promise((resolve) => chrome.downloads.cancel(id, () => resolve()));
-  await new Promise((resolve) => chrome.downloads.erase({ id }, () => resolve()));
+  // erase only clears history; removeFile deletes the file Edge wrote.
+  await new Promise((resolve) => {
+    chrome.downloads.removeFile(id, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
+  await new Promise((resolve) => {
+    chrome.downloads.erase({ id }, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
 }
 
 // The bridge may wait up to a minute for the user to pick a save folder, so
