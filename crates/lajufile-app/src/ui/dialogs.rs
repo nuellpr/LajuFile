@@ -86,11 +86,16 @@ pub fn add_dialog(
 
             ui.add_space(8.0);
             ui.label(RichText::new("Save to folder").strong());
-            ui.add_sized(
-                [ui.available_width(), 30.0],
-                egui::TextEdit::singleline(&mut draft.folder)
-                    .hint_text("Default: Downloads\\LajuFile"),
-            );
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [ui.available_width() - 96.0, 30.0],
+                    egui::TextEdit::singleline(&mut draft.folder)
+                        .hint_text("Default: Downloads\\LajuFile"),
+                );
+                if ui.button("Browse...").clicked() {
+                    action = Some(Action::OpenFolderPicker);
+                }
+            });
 
             ui.add_space(12.0);
             ui.checkbox(&mut draft.start_now, "Start downloading now");
