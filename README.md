@@ -3,61 +3,115 @@
 </p>
 
 <h1 align="center">LajuFile</h1>
+<p align="center">A fast, native download manager for Windows — built in Rust.</p>
 
-<p align="center">
-  A fast, native download manager for Windows — built in Rust.
-</p>
-
-> **Status:** Milestone 3 (engine) is complete: the Windows GUI now supports
-> segmented downloads, true resume, and a global speed limit. Browser capture
-> and the Edge extension are next.
+> **Status:** Milestone 4 is implemented: a local bridge, DPAPI cookie
+> forwarding, and an Edge MV3 extension are in place alongside segmented
+> downloads, true resume, queues, and a global speed limit. The Edge capture
+> flow still needs a manual end-to-end check before it is called verified.
+> Milestone 5 is release hardening and packaging.
 
 ## Why LajuFile
 
-LajuFile is a personal project that aims to bring the essentials of a classic
-download manager to Windows: segmented downloads, pause/resume, queues, speed
-limits, and one-click capture from the browser. It is inspired by tools such as
-Internet Download Manager, but the code and design are original.
+LajuFile is a personal project: a desktop download manager that keeps the
+essentials of a classic download manager — segmented transfers, pause and
+resume, queues, speed limits, and browser capture — in a small native
+application. It is inspired by Internet Download Manager, but uses original
+code and design.
 
 ## What works today
 
-- Native egui desktop window with download table, filters, and context menu
-- Add URL with metadata probe, safe file naming, and duplicate active-URL check
-- Segmented downloads with up to 32 parallel range requests
-- True resume using `If-Range` or a 64 KiB prefix check when no validator exists
-- Queue limited by `max_concurrent`; global speed limit with 0 = unlimited
-- Pause, resume, remove, pause all, and resume all
-- System tray: show, add URL, pause all, resume all, exit; close-to-tray
-- Settings for save folder, concurrency, connections, speed, theme, and close-to-tray
-- Light and dark themes
-- Persistent settings in `%APPDATA%\LajuFile`
-- SQLite download store (WAL, versioned schema, segments)
-- HTTP metadata probe with `Range: bytes=0-0`
-- Download to a `.lajufile` temp file, verified before the final file is exposed
-- Safe finalization that never overwrites an existing file
-- Windows-safe file names, deduplication, and reserved-device handling
-- End-to-end tests: probe → naming → store → segments → download → mark done
+- Native egui window with a download table, sidebar filters, and a context menu.
+- Add URL with metadata probe, file naming, and active duplicate detection.
+- Choose the save folder per download (Browse in Add), with an optional
+  "Ask where to save each download" prompt.
+- Segmented downloads with up to 32 parallel byte ranges.
+- True resume using `If-Range`; without a validator, a 64 KiB prefix check.
+- Queue with a configurable simultaneous-download limit.
+- Global speed limit in KB/s (`0` means unlimited).
+- Pause, resume, remove, pause all, and resume all.
+- Tray icon: show, add URL, pause all, resume all, exit; close to tray.
+- Settings for save folder, concurrency, connections, speed, theme, and close-to-tray.
+- Light and dark themes.
+- Persistent state in `%APPDATA%\LajuFile`; SQLite in WAL mode with per-segment progress.
+- Probe uses `Range: bytes=0-0`; downloads use `Accept-Encoding: identity`.
+- Downloads write to `<final>.lajufile`, are size-checked, and are finalized without overwriting an existing file.
+- Windows-safe file names, duplicate-name handling, and reserved-device protection.
+- Local bridge at `127.0.0.1:53841` with token authentication, CORS, and a 64 KiB body limit.
+- `GET /health` and `POST /downloads` for browser integrations.
+- Edge capture through `onDeterminingFilename`, with an `onCreated` fallback and a "Download with LajuFile" link menu.
+- Browser cookies are stored with Windows DPAPI, never as plaintext.
+- Capture settings in the app: status, port, token copy/regenerate, and Test connection.
+- YouTube downloads through managed `yt-dlp` + `ffmpeg`, with an IDM-style quality list.
+
+## Browser capture
+
+1. Start LajuFile and open **Settings → Browser capture**. Copy the port and token.
+2. In Edge, open `edge://extensions`, enable **Developer mode**, and choose
+   **Load unpacked**. Select the `extension/` folder in this repository.
+3. Open the LajuFile Capture extension options and paste the port and token.
+4. Click **Test connection**; the popup should show **Connected**.
+
+The extension sends downloads to the local bridge:
+
+- `201 Created` — LajuFile accepted the download and returns its id, filename, and size.
+- `409 Conflict` — the URL is already active in LajuFile; the browser copy is cancelled.
+- `422 Unprocessable Entity` — the probe failed; no LajuFile record is created.
+- `401 Unauthorized` — the token does not match; the browser download continues.
+
+The bridge only listens on localhost. The token is copied from Settings and can
+be regenerated there; the old token stops working immediately. A port change
+applies after restarting LajuFile.
+
+### Capture limitations
+
+- POST and form submissions are not captured.
+- `blob:` URLs, DRM-protected media, and one-time URLs are not supported.
+- Downloads started before LajuFile is running are not captured.
+- Cookies are forwarded only for the original URL; cross-host redirect cookies are not supported.
+- The popup has no "Open LajuFile" action because no protocol handler is registered yet.
+- Edge may briefly show its download shelf before LajuFile cancels the browser copy.
+- Pause persists progress at roughly one-second granularity.
+
+## Video downloads
+
+1. Paste a YouTube link in **Add download**; a **Video quality** row appears.
+2. Click **Load qualities** to list the heights yt-dlp reports for that video,
+   then pick one (or leave **Best available**).
+3. Add the link as usual. The job joins the same queue, so pause, resume, and
+   remove work exactly like an HTTP download.
+
+LajuFile downloads two tools into `%APPDATA%\LajuFile\tools` on first use:
+`yt-dlp.exe` (the release binary from GitHub) and `ffmpeg.exe` (from the
+gyan.dev essentials build). yt-dlp merges the chosen video stream with the best
+audio through ffmpeg, so a merged file needs both. The button on a YouTube watch
+page in the Edge extension does the same through `POST /video` and
+`POST /video/formats`.
+
+A video row is stored with `kind = video` and the yt-dlp selector it will use.
+Cancel and remove kill the child process and delete the partial file.
+
+### Video limitations
+
+- Single videos only: no playlists, no channels, no subtitles.
+- DRM-protected, members-only, and age-restricted videos fail with the yt-dlp
+  error message; browser cookies are not forwarded to yt-dlp.
+- A height the video does not offer falls back to the best lower one.
+- The downloaded file is always `.mp4`, whatever the source container.
 
 ## Roadmap
 
-- [x] **M1 — Foundation:** workspace, settings, store, naming, probe, safe
-      single-stream download, E2E tests
-- [x] **M2 — Desktop preview:** egui GUI, tray, settings, light/dark themes,
-      queue, pause/restart, single-stream downloads
-- [x] **M3 — Engine:** segmented downloads, true resume, global speed limit
-- [ ] **M4 — Capture:** local bridge + Edge MV3 extension
-- [ ] **M5 — Release:** hardening, docs, packaging
-
-Remaining limits: no browser bridge or Edge extension yet, no autostart, no
-installer, and pause progress is persisted about once per second.
+- [x] **M1 — Foundation:** store, probe, naming, single-stream download.
+- [x] **M2 — Desktop app:** GUI, queue, tray, themes.
+- [x] **M3 — Engine:** segmented downloads, true resume, global speed limit.
+- [x] **M4 — Capture:** local bridge and Edge MV3 extension.
+- [ ] **M5 — Release:** hardening, docs, packaging.
+- [x] **M6 — YouTube:** managed yt-dlp + ffmpeg, quality list, video jobs.
 
 ## Build
 
-Requirements:
-
-- Windows 10/11 x64
-- Rust stable with the MSVC toolchain
-- Visual Studio Build Tools with the C++ workload
+Requirements: Windows 10/11 x64, Rust stable with the MSVC toolchain, and
+Visual Studio Build Tools with the C++ workload.
 
 ```powershell
 cargo test
@@ -65,16 +119,17 @@ cargo run -p lajufile-app
 cargo build --release -p lajufile-app
 ```
 
-The debug build opens a console window; release builds use the Windows GUI
-subsystem and do not show a console.
+Debug builds keep a console for diagnostics. Release builds use the Windows
+GUI subsystem and do not open a console window.
 
 ## Design
 
-- Figma: [LajuFile — UI Design](https://www.figma.com/design/PASDzAEqJlF35dkv4L9eIx)
-- Product design: [`docs/superpowers/specs/2026-11-14-lajufile-design.md`](docs/superpowers/specs/2026-11-14-lajufile-design.md)
+- Figma: <https://www.figma.com/design/PASDzAEqJlF35dkv4L9eIx>
+- Spec: [`docs/superpowers/specs/2026-11-14-lajufile-design.md`](docs/superpowers/specs/2026-11-14-lajufile-design.md)
 - Milestone 1 plan: [`docs/superpowers/plans/2026-11-14-lajufile-milestone-1-foundation.md`](docs/superpowers/plans/2026-11-14-lajufile-milestone-1-foundation.md)
 - Milestone 2 plan: [`docs/superpowers/plans/2026-11-14-lajufile-milestone-2-gui-tray.md`](docs/superpowers/plans/2026-11-14-lajufile-milestone-2-gui-tray.md)
 - Milestone 3 plan: [`docs/superpowers/plans/2026-11-15-lajufile-milestone-3-engine.md`](docs/superpowers/plans/2026-11-15-lajufile-milestone-3-engine.md)
+- Milestone 4 plan: [`docs/superpowers/plans/2026-11-15-lajufile-milestone-4-bridge-extension.md`](docs/superpowers/plans/2026-11-15-lajufile-milestone-4-bridge-extension.md)
 
 ## License
 

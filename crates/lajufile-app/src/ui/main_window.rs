@@ -11,6 +11,7 @@ use url::Url;
 
 use super::{Action, Filter, format::*};
 use crate::app::LajuFileApp;
+use crate::bridge::BridgeState;
 
 struct Palette {
     window: Color32,
@@ -290,6 +291,17 @@ fn draw_sidebar(
     downloads: &[Download],
     palette: &Palette,
 ) {
+    let (bridge_state, bridge_port, bridge_message) = app
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (
+                snapshot.bridge.state,
+                snapshot.bridge.port,
+                snapshot.bridge.message.clone(),
+            )
+        })
+        .unwrap_or((BridgeState::Starting, 0, None));
     egui::Frame::new()
         .fill(palette.sidebar)
         .stroke(Stroke::new(1.0, palette.border))
@@ -386,16 +398,33 @@ fn draw_sidebar(
                             .color(palette.faint),
                     );
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Not connected")
-                            .size(12.0)
-                            .color(palette.muted),
-                    );
-                    ui.label(
-                        RichText::new("Bridge arrives in M4")
-                            .size(10.0)
-                            .color(palette.faint),
-                    );
+                    let (status, color, detail) = match bridge_state {
+                        BridgeState::Bound => (
+                            "Connected",
+                            palette.green,
+                            format!("127.0.0.1:{bridge_port}"),
+                        ),
+                        BridgeState::Error => (
+                            "Bridge unavailable",
+                            palette.red,
+                            bridge_message
+                                .clone()
+                                .unwrap_or_else(|| "Check Settings".to_string()),
+                        ),
+                        BridgeState::Starting => (
+                            "Starting bridge",
+                            palette.muted,
+                            format!("Port {bridge_port}"),
+                        ),
+                    };
+                    ui.label(RichText::new(status).size(12.0).color(color));
+                    ui.label(RichText::new(detail).size(10.0).color(palette.faint));
+                    if ui.small_button("Manage").clicked() {
+                        if let Some(snapshot) = &app.snapshot {
+                            app.settings_draft = snapshot.settings.clone();
+                        }
+                        app.show_settings = true;
+                    }
                 });
         });
 }

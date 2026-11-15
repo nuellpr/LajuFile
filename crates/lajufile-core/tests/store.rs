@@ -11,6 +11,8 @@ fn sample(url: &str, size: u64) -> NewDownload {
         size: Some(size),
         status: DownloadStatus::Queued,
         category: Category::Other,
+        kind: "http".to_string(),
+        video_format: None,
         connections: 1,
         ranged: true,
         etag: Some("\"abc\"".to_string()),
@@ -348,4 +350,18 @@ fn replace_segments_resets_progress_and_metadata() {
     assert!(download.ranged);
     assert_eq!(download.downloaded, 15);
     assert_eq!(store.segments(id).unwrap().len(), 2);
+}
+
+#[test]
+fn set_size_only_fills_an_unknown_size() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut new = sample("https://example.com/a.iso", 1000);
+    new.size = None;
+    let id = store.insert_download(&new).unwrap();
+
+    store.set_size(id, 500).unwrap();
+    assert_eq!(store.get_download(id).unwrap().size, Some(500));
+
+    store.set_size(id, 900).unwrap();
+    assert_eq!(store.get_download(id).unwrap().size, Some(500));
 }

@@ -1,6 +1,8 @@
 //! UI state shared by the main window and dialogs.
 
 pub mod dialogs;
+pub mod download_info;
+pub mod folder_picker;
 pub mod format;
 pub mod main_window;
 pub mod theme;
@@ -57,11 +59,16 @@ pub enum Action {
     CopyUrl(String),
     OpenAdd,
     OpenSettings,
+    OpenFolderPicker,
     Add(AddRequest),
+    LoadFormats(String),
     SaveSettings(Settings),
     SetTheme(Theme),
     PauseAll,
     ResumeAll,
+    TestBridge(u16),
+    UpdateTools,
+    RegenerateToken,
     Exit,
 }
 
@@ -83,6 +90,8 @@ mod tests {
             downloaded: 0,
             status,
             category,
+            kind: "http".to_string(),
+            video_format: None,
             connections: 1,
             ranged: true,
             etag: None,
