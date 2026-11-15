@@ -179,6 +179,7 @@ impl LajuFileApp {
                 } else if self.capture_info.is_none() {
                     let category = Category::from_file_name(&prompt.file_name);
                     let folder = self.default_folder_for(category);
+                    self.show_window(ctx);
                     self.capture_info = Some((
                         prompt.key,
                         crate::ui::download_info::DownloadInfoDraft {
@@ -568,22 +569,8 @@ impl LajuFileApp {
             .find(|download| download.id == id)
             .map(|download| download.save_path.clone())
     }
-}
 
-impl eframe::App for LajuFileApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_tray(ctx);
-        self.poll_engine(ctx);
-        self.poll_clipboard(ctx);
-        self.poll_bridge_test();
-        self.poll_formats();
-        self.update_tray_tooltip();
-        ctx.request_repaint_after(Duration::from_millis(250));
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-
+    fn intercept_close(&self, ctx: &egui::Context) -> bool {
         let close_to_tray = self
             .snapshot
             .as_ref()
@@ -596,6 +583,28 @@ impl eframe::App for LajuFileApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             ctx.request_repaint_after(Duration::from_millis(250));
+            return true;
+        }
+        false
+    }
+}
+
+impl eframe::App for LajuFileApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_tray(ctx);
+        self.intercept_close(ctx);
+        self.poll_engine(ctx);
+        self.poll_clipboard(ctx);
+        self.poll_bridge_test();
+        self.poll_formats();
+        self.update_tray_tooltip();
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        if self.intercept_close(&ctx) {
             return;
         }
 
@@ -612,12 +621,6 @@ impl eframe::App for LajuFileApp {
                 &mut self.add_draft,
                 &mut self.add_focus,
             )
-        {
-            self.handle_actions(&ctx, vec![action]);
-        }
-        if self.show_batch
-            && let Some(action) =
-                ui::dialogs::batch_dialog(&ctx, &mut self.show_batch, &mut self.batch_draft)
         {
             self.handle_actions(&ctx, vec![action]);
         }

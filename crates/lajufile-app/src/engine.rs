@@ -1771,6 +1771,11 @@ fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> 
         "--newline".into(),
         "--merge-output-format".into(),
         "mp4".into(),
+        // Prefer H.264 MP4 + AAC M4A and transcode non-AAC audio so Windows players have sound.
+        "-S".into(),
+        "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
+        "--ppa".into(),
+        "Merger+ffmpeg_o1:-c:a aac".into(),
         "--ffmpeg-location".into(),
         tools_dir.as_os_str().to_owned(),
         // Machine-readable progress, one line per update:
@@ -1890,6 +1895,14 @@ mod tests {
                 .unwrap()
                 + 1],
             "mp4"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "-S").unwrap() + 1],
+            "ext:mp4:m4a,vcodec:h264,acodec:aac"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--ppa").unwrap() + 1],
+            "Merger+ffmpeg_o1:-c:a aac"
         );
         assert!(args.iter().any(|arg| arg == "--progress-template"));
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");

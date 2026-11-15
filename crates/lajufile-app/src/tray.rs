@@ -41,16 +41,24 @@ pub fn create(icon: &egui::IconData, ctx: &egui::Context) -> Option<Tray> {
     let queue = events.clone();
     let repaint = ctx.clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
-            && let Ok(mut queue) = queue.lock()
-        {
+        let clicked = matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }
+        );
+        if clicked && let Ok(mut queue) = queue.lock() {
             queue.push(TrayEvent::Show);
+            repaint.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            repaint.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            repaint.send_viewport_cmd(egui::ViewportCommand::Focus);
+            repaint.request_repaint();
         }
-        repaint.request_repaint();
     }));
 
     let queue = events.clone();
@@ -68,8 +76,13 @@ pub fn create(icon: &egui::IconData, ctx: &egui::Context) -> Option<Tray> {
             && let Ok(mut queue) = queue.lock()
         {
             queue.push(action);
+            if matches!(action, TrayEvent::Show | TrayEvent::Add) {
+                repaint.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                repaint.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                repaint.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            repaint.request_repaint();
         }
-        repaint.request_repaint();
     }));
 
     Some(Tray { icon: tray, events })
