@@ -42,6 +42,7 @@ code and design.
 - Edge capture through `onDeterminingFilename`, with an `onCreated` fallback and a "Download with LajuFile" link menu.
 - Browser cookies are stored with Windows DPAPI, never as plaintext.
 - Capture settings in the app: status, port, token copy/regenerate, and Test connection.
+- YouTube downloads through managed `yt-dlp` + `ffmpeg`, with an IDM-style quality list.
 
 ## Browser capture
 
@@ -72,6 +73,32 @@ applies after restarting LajuFile.
 - Edge may briefly show its download shelf before LajuFile cancels the browser copy.
 - Pause persists progress at roughly one-second granularity.
 
+## Video downloads
+
+1. Paste a YouTube link in **Add download**; a **Video quality** row appears.
+2. Click **Load qualities** to list the heights yt-dlp reports for that video,
+   then pick one (or leave **Best available**).
+3. Add the link as usual. The job joins the same queue, so pause, resume, and
+   remove work exactly like an HTTP download.
+
+LajuFile downloads two tools into `%APPDATA%\LajuFile\tools` on first use:
+`yt-dlp.exe` (the release binary from GitHub) and `ffmpeg.exe` (from the
+gyan.dev essentials build). yt-dlp merges the chosen video stream with the best
+audio through ffmpeg, so a merged file needs both. The button on a YouTube watch
+page in the Edge extension does the same through `POST /video` and
+`POST /video/formats`.
+
+A video row is stored with `kind = video` and the yt-dlp selector it will use.
+Cancel and remove kill the child process and delete the partial file.
+
+### Video limitations
+
+- Single videos only: no playlists, no channels, no subtitles.
+- DRM-protected, members-only, and age-restricted videos fail with the yt-dlp
+  error message; browser cookies are not forwarded to yt-dlp.
+- A height the video does not offer falls back to the best lower one.
+- The downloaded file is always `.mp4`, whatever the source container.
+
 ## Roadmap
 
 - [x] **M1 — Foundation:** store, probe, naming, single-stream download.
@@ -79,6 +106,7 @@ applies after restarting LajuFile.
 - [x] **M3 — Engine:** segmented downloads, true resume, global speed limit.
 - [x] **M4 — Capture:** local bridge and Edge MV3 extension.
 - [ ] **M5 — Release:** hardening, docs, packaging.
+- [x] **M6 — YouTube:** managed yt-dlp + ffmpeg, quality list, video jobs.
 
 ## Build
 
