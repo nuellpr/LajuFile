@@ -148,8 +148,10 @@ function createPlayIcon() {
   const badge = document.createElement("span");
   badge.style.cssText =
     "display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:3px;background:linear-gradient(180deg,#5ee649 0%,#1ca814 55%,#127d0c 100%);border:1px solid #0e6309;box-shadow:inset 0 1px 0 rgba(255,255,255,0.65);flex-shrink:0;";
-  badge.innerHTML =
-    '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.2 1.4L8.4 5L2.2 8.6V1.4Z" fill="#ffffff"/></svg>';
+  const tri = document.createElement("span");
+  tri.style.cssText =
+    "display:block;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:7px solid #ffffff;margin-left:2px;";
+  badge.append(tri);
   return badge;
 }
 
@@ -179,7 +181,7 @@ function mount() {
   const wrap = document.createElement("div");
   wrap.id = PANEL_ID;
   wrap.style.cssText =
-    "position:absolute;top:10px;right:12px;z-index:9999;user-select:none;font-family:'Segoe UI',Tahoma,sans-serif;";
+    "position:absolute;top:10px;right:12px;z-index:9999;pointer-events:auto;user-select:none;font-family:'Segoe UI',Tahoma,sans-serif;";
   wrap.addEventListener("click", (event) => event.stopPropagation());
 
   // IDM-style glossy blue-silver bar
