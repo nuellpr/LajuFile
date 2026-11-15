@@ -11,8 +11,11 @@ use std::time::Duration;
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 
 const DOWNLOAD_COLUMNS: &str = "id, url, final_url, file_name, save_path, temp_path, size, \
-downloaded, status, category, connections, ranged, etag, last_modified, cookie_enc, \
-referrer, user_agent, error, queue_order, created_at, completed_at";
+downloaded, status, category, kind, video_format, connections, ranged, etag, last_modified, \
+cookie_enc, referrer, user_agent, error, queue_order, created_at, completed_at";
+
+const SCHEMA_V2: &str = "ALTER TABLE downloads ADD COLUMN kind TEXT NOT NULL DEFAULT 'http';
+ALTER TABLE downloads ADD COLUMN video_format TEXT;";
 
 pub struct Store {
     conn: Connection,
@@ -65,11 +68,19 @@ impl Store {
             0 => {
                 let tx = conn.transaction()?;
                 tx.execute_batch(SCHEMA_V1)?;
-                tx.pragma_update(None, "user_version", 1)?;
+                tx.execute_batch(SCHEMA_V2)?;
+                tx.pragma_update(None, "user_version", 2)?;
                 tx.commit()?;
                 Ok(())
             }
-            1 => Ok(()),
+            1 => {
+                let tx = conn.transaction()?;
+                tx.execute_batch(SCHEMA_V2)?;
+                tx.pragma_update(None, "user_version", 2)?;
+                tx.commit()?;
+                Ok(())
+            }
+            2 => Ok(()),
             other => Err(StoreError::UnsupportedSchema(other)),
         }
     }
@@ -79,9 +90,9 @@ impl Store {
         tx.execute(
             "INSERT INTO downloads (
                 url, final_url, file_name, save_path, temp_path, size, status, category,
-                connections, ranged, etag, last_modified, cookie_enc, referrer, user_agent,
-                queue_order, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                kind, video_format, connections, ranged, etag, last_modified, cookie_enc,
+                referrer, user_agent, queue_order, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 new.url,
                 new.final_url,
@@ -91,6 +102,8 @@ impl Store {
                 new.size.map(|v| v as i64),
                 new.status.as_str(),
                 new.category.as_str(),
+                new.kind,
+                new.video_format,
                 new.connections as i64,
                 new.ranged as i64,
                 new.etag,
@@ -349,16 +362,18 @@ fn row_to_download(row: &Row<'_>) -> Result<Download, StoreError> {
         downloaded: row.get::<_, i64>(7)? as u64,
         status: DownloadStatus::from_db(&row.get::<_, String>(8)?)?,
         category: Category::from_db(&row.get::<_, String>(9)?)?,
-        connections: row.get::<_, i64>(10)? as u32,
-        ranged: row.get::<_, i64>(11)? != 0,
-        etag: row.get(12)?,
-        last_modified: row.get(13)?,
-        cookie_enc: row.get(14)?,
-        referrer: row.get(15)?,
-        user_agent: row.get(16)?,
-        error: row.get(17)?,
-        queue_order: row.get(18)?,
-        created_at: row.get(19)?,
-        completed_at: row.get(20)?,
+        kind: row.get(10)?,
+        video_format: row.get(11)?,
+        connections: row.get::<_, i64>(12)? as u32,
+        ranged: row.get::<_, i64>(13)? != 0,
+        etag: row.get(14)?,
+        last_modified: row.get(15)?,
+        cookie_enc: row.get(16)?,
+        referrer: row.get(17)?,
+        user_agent: row.get(18)?,
+        error: row.get(19)?,
+        queue_order: row.get(20)?,
+        created_at: row.get(21)?,
+        completed_at: row.get(22)?,
     })
 }

@@ -613,6 +613,8 @@ impl EngineState {
             size,
             status: DownloadStatus::Queued,
             category: Category::from_file_name(&file_name),
+            kind: "http".to_string(),
+            video_format: None,
             connections,
             ranged: result.ranged,
             etag: result.etag,

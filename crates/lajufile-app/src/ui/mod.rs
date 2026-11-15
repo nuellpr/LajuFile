@@ -88,6 +88,8 @@ mod tests {
             downloaded: 0,
             status,
             category,
+            kind: "http".to_string(),
+            video_format: None,
             connections: 1,
             ranged: true,
             etag: None,

@@ -11,6 +11,8 @@ fn sample(url: &str, size: u64) -> NewDownload {
         size: Some(size),
         status: DownloadStatus::Queued,
         category: Category::Other,
+        kind: "http".to_string(),
+        video_format: None,
         connections: 1,
         ranged: true,
         etag: Some("\"abc\"".to_string()),

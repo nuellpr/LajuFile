@@ -45,6 +45,8 @@ async fn probe_insert_download_and_finish() {
         size: meta.size,
         status: DownloadStatus::Queued,
         category: Category::from_file_name(&name),
+        kind: "http".to_string(),
+        video_format: None,
         connections: 1,
         ranged: meta.ranged,
         etag: meta.etag.clone(),
