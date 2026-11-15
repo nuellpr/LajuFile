@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LajuFile Capture options</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon-48.png" alt="" width="40" height="40" />
+        <div>
+          <h1>LajuFile Capture</h1>
+          <p>Send downloads from Edge to the LajuFile desktop app.</p>
+        </div>
+      </header>
+
+      <section>
+        <h2>Pairing</h2>
+        <p class="hint">
+          In LajuFile, open <strong>Settings &rarr; Browser capture</strong> and copy
+          the port and token. Port changes apply after restarting LajuFile.
+        </p>
+
+        <label for="port">Bridge port</label>
+        <input id="port" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+
+        <label for="token">Bridge token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+
+        <label class="check">
+          <input id="autoCapture" type="checkbox" />
+          Capture browser downloads automatically
+        </label>
+
+        <div class="actions">
+          <button id="test" type="button" class="secondary">Test connection</button>
+          <button id="save" type="submit" class="primary">Save</button>
+        </div>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <section>
+        <h2>How capture works</h2>
+        <p class="hint">
+          LajuFile captures normal HTTP/HTTPS downloads and link downloads. Forms,
+          browser-protected streams, and downloads started before LajuFile is running
+          stay in the browser. Cookies are sent only for the download URL.
+        </p>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
