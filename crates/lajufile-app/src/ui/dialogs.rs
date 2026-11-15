@@ -186,6 +186,10 @@ pub fn settings_dialog(
                     section(ui, "Behavior");
                     ui.checkbox(&mut settings.close_to_tray, "Close to tray");
                     ui.checkbox(&mut settings.auto_resume, "Auto-resume on startup");
+                    ui.checkbox(
+                        &mut settings.ask_where_to_save,
+                        "Ask where to save each download",
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Theme");
                         ui.selectable_value(&mut settings.theme, Theme::Light, "Light");

@@ -24,6 +24,8 @@ pub struct Settings {
     pub theme: Theme,
     pub bridge_port: u16,
     pub bridge_token: String,
+    #[serde(default)]
+    pub ask_where_to_save: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             theme: Theme::Light,
             bridge_port: 53841,
             bridge_token: String::new(),
+            ask_where_to_save: false,
         }
     }
 }
@@ -124,5 +127,45 @@ impl Settings {
         drop(file);
 
         std::fs::rename(&tmp, &path).map_err(|source| SettingsError::Io { path, source })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ask_where_to_save_defaults_off() {
+        assert!(!Settings::default().ask_where_to_save);
+    }
+
+    #[test]
+    fn old_settings_without_field_still_load() {
+        let json = r#"{
+            "download_dir": "C:/Downloads",
+            "max_connections": 8,
+            "max_concurrent": 3,
+            "global_speed_limit_kbps": 0,
+            "close_to_tray": true,
+            "autostart": false,
+            "auto_resume": false,
+            "theme": "dark",
+            "bridge_port": 53841,
+            "bridge_token": ""
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        assert!(!settings.ask_where_to_save);
+    }
+
+    #[test]
+    fn save_and_load_roundtrips_ask_where_to_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            ask_where_to_save: true,
+            ..Settings::default()
+        };
+        settings.save(dir.path()).unwrap();
+        let loaded = Settings::load_or_create(dir.path()).unwrap();
+        assert!(loaded.ask_where_to_save);
     }
 }
