@@ -178,6 +178,25 @@ fn draw_menu_bar(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<Action>
                         ui.close();
                     }
                 });
+                ui.menu_button("Tasks", |ui| {
+                    if ui.button("Add new download...").clicked() {
+                        actions.push(Action::OpenAdd);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Resume all").clicked() {
+                        actions.push(Action::ResumeAll);
+                        ui.close();
+                    }
+                    if ui.button("Stop all").clicked() {
+                        actions.push(Action::PauseAll);
+                        ui.close();
+                    }
+                    if ui.button("Delete completed").clicked() {
+                        actions.push(Action::RemoveCompleted);
+                        ui.close();
+                    }
+                });
                 ui.menu_button("View", |ui| {
                     if ui.button("Light").clicked() {
                         actions.push(Action::SetTheme(Theme::Light));
@@ -190,7 +209,7 @@ fn draw_menu_bar(ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<Action>
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("LajuFile 0.1.0");
-                    ui.label("M2 preview · single-stream");
+                    ui.label("Segmented download manager for Windows");
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new("v0.1.0").size(10.0).color(palette.faint));
@@ -220,6 +239,15 @@ fn draw_toolbar(
             DownloadStatus::Paused | DownloadStatus::Error
         )
     });
+    let has_active = downloads.iter().any(|download| {
+        matches!(
+            download.status,
+            DownloadStatus::Downloading | DownloadStatus::Queued
+        )
+    });
+    let has_completed = downloads
+        .iter()
+        .any(|download| download.status == DownloadStatus::Done);
 
     egui::Frame::new()
         .fill(palette.bar)
@@ -236,23 +264,29 @@ fn draw_toolbar(
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
-                if toolbar_button(ui, "Pause", can_pause, false, palette) {
-                    if let Some(id) = selected {
-                        actions.push(Action::Pause(id));
-                    }
-                }
                 if toolbar_button(ui, "Resume", can_resume, false, palette) {
                     if let Some(id) = selected {
                         actions.push(Action::Resume(id));
                     }
                 }
-                if toolbar_button(ui, "Remove", selected.is_some(), false, palette) {
+                if toolbar_button(ui, "Stop", can_pause, false, palette) {
+                    if let Some(id) = selected {
+                        actions.push(Action::Pause(id));
+                    }
+                }
+                if toolbar_button(ui, "Stop All", has_active, false, palette) {
+                    actions.push(Action::PauseAll);
+                }
+                if toolbar_button(ui, "Delete", selected.is_some(), false, palette) {
                     if let Some(id) = selected {
                         actions.push(Action::Remove(id));
                     }
                 }
+                if toolbar_button(ui, "Delete Completed", has_completed, false, palette) {
+                    actions.push(Action::RemoveCompleted);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if toolbar_button(ui, "Settings", true, false, palette) {
+                    if toolbar_button(ui, "Options", true, false, palette) {
                         actions.push(Action::OpenSettings);
                     }
                 });
@@ -640,8 +674,12 @@ fn draw_table(
                 if response.clicked() {
                     actions.push(Action::Select(download.id));
                 }
-                if response.double_clicked() && download.status == DownloadStatus::Done {
-                    actions.push(Action::Open(download.id));
+                if response.double_clicked() {
+                    if download.status == DownloadStatus::Done {
+                        actions.push(Action::Open(download.id));
+                    } else {
+                        actions.push(Action::ShowProgress(download.id));
+                    }
                 }
                 response.context_menu(|ui| {
                     if ui
@@ -656,6 +694,10 @@ fn draw_table(
                     }
                     if ui.button("Open folder").clicked() {
                         actions.push(Action::OpenFolder(download.id));
+                        ui.close();
+                    }
+                    if ui.button("Download progress").clicked() {
+                        actions.push(Action::ShowProgress(download.id));
                         ui.close();
                     }
                     if ui.button("Copy URL").clicked() {

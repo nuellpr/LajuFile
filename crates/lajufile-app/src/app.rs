@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -38,6 +39,10 @@ pub struct LajuFileApp {
     pub(crate) pending_add: Option<AddRequest>,
     pub(crate) capture_info: Option<(u64, DownloadInfoDraft)>,
     pub(crate) dismissed_capture: Option<u64>,
+    pub(crate) progress_id: Option<i64>,
+    pub(crate) progress_details: bool,
+    pub(crate) completed_id: Option<i64>,
+    pub(crate) seen_done: Option<HashSet<i64>>,
 }
 
 impl LajuFileApp {
@@ -88,6 +93,10 @@ impl LajuFileApp {
             pending_add: None,
             capture_info: None,
             dismissed_capture: None,
+            progress_id: None,
+            progress_details: true,
+            completed_id: None,
+            seen_done: None,
         }
     }
 
@@ -117,29 +126,44 @@ impl LajuFileApp {
             self.theme = snapshot.settings.theme.clone();
             apply_theme(ctx, &self.theme);
         }
-        let pending = snapshot
-            .pending_capture
-            .as_ref()
-            .map(|prompt| (prompt.key, prompt.url.clone()));
+        let done_now: HashSet<i64> = snapshot
+            .downloads
+            .iter()
+            .filter(|download| download.status == DownloadStatus::Done)
+            .map(|download| download.id)
+            .collect();
+        if let Some(seen) = &mut self.seen_done {
+            for id in &done_now {
+                if !seen.contains(id) {
+                    if self.progress_id == Some(*id) {
+                        self.progress_id = None;
+                    }
+                    self.completed_id = Some(*id);
+                }
+            }
+            *seen = done_now;
+        } else {
+            self.seen_done = Some(done_now);
+        }
+        let pending = snapshot.pending_capture.clone();
         self.snapshot = Some(snapshot);
         match pending {
-            Some((key, url)) if self.dismissed_capture != Some(key) => {
-                if self.capture_info.is_none() {
-                    let file_name = url
-                        .parse::<url::Url>()
-                        .ok()
-                        .and_then(|url| {
-                            url.path_segments()
-                                .and_then(|mut segments| segments.next_back().map(str::to_string))
-                        })
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| "download".to_string());
-                    let category = Category::from_file_name(&file_name);
+            Some(prompt) if self.dismissed_capture != Some(prompt.key) => {
+                if let Some((active_key, draft)) = &mut self.capture_info
+                    && *active_key == prompt.key
+                {
+                    if draft.size.is_none() && prompt.size.is_some() {
+                        draft.size = prompt.size;
+                    }
+                } else if self.capture_info.is_none() {
+                    let category = Category::from_file_name(&prompt.file_name);
                     let folder = self.default_folder_for(category);
                     self.capture_info = Some((
-                        key,
+                        prompt.key,
                         crate::ui::download_info::DownloadInfoDraft {
-                            url,
+                            url: prompt.url,
+                            file_name: prompt.file_name,
+                            size: prompt.size,
                             category,
                             folder: folder.display().to_string(),
                             remember: false,
@@ -315,11 +339,18 @@ impl LajuFileApp {
                 self.folder_picker = Some(FolderPicker::new(PathBuf::from(draft.folder.trim())));
                 self.capture_info = Some((key, draft));
             }
-            Some(DownloadInfoChoice::Start { folder, remember }) => {
+            Some(DownloadInfoChoice::Start {
+                folder,
+                file_name,
+                remember,
+                start_now,
+            }) => {
                 self.dismissed_capture = Some(key);
-                self.send(Command::CaptureFolderDecision {
+                self.send(Command::CaptureDecision {
                     key,
-                    path: Some(folder.clone()),
+                    folder: folder.clone(),
+                    file_name: Some(file_name),
+                    start_now,
                 });
                 if remember && let Some(snapshot) = &self.snapshot {
                     let mut settings = snapshot.settings.clone();
@@ -348,6 +379,19 @@ impl LajuFileApp {
                     if self.selected == Some(id) {
                         self.selected = None;
                     }
+                    if self.progress_id == Some(id) {
+                        self.progress_id = None;
+                    }
+                    if self.completed_id == Some(id) {
+                        self.completed_id = None;
+                    }
+                }
+                Action::RemoveCompleted => {
+                    self.send(Command::RemoveCompleted);
+                    self.completed_id = None;
+                }
+                Action::ShowProgress(id) => {
+                    self.progress_id = Some(id);
                 }
                 Action::PauseAll => self.send(Command::PauseAll),
                 Action::ResumeAll => self.send(Command::ResumeAll),
@@ -485,6 +529,50 @@ impl eframe::App for LajuFileApp {
             )
         {
             self.handle_actions(&ctx, vec![action]);
+        }
+
+        if let Some(id) = self.progress_id {
+            let entry = self.snapshot.as_ref().and_then(|snapshot| {
+                let download = snapshot.downloads.iter().find(|d| d.id == id)?.clone();
+                let segments = snapshot.segments.get(&id).cloned().unwrap_or_default();
+                let speed = snapshot.speeds.get(&id).copied();
+                Some((download, segments, speed))
+            });
+            if let Some((download, segments, speed)) = entry {
+                let (keep_open, action) = ui::dialogs::progress_dialog(
+                    &ctx,
+                    &download,
+                    &segments,
+                    speed,
+                    &mut self.progress_details,
+                );
+                if let Some(action) = action {
+                    self.handle_actions(&ctx, vec![action]);
+                }
+                if !keep_open {
+                    self.progress_id = None;
+                }
+            } else {
+                self.progress_id = None;
+            }
+        }
+
+        if let Some(id) = self.completed_id {
+            let download = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.downloads.iter().find(|d| d.id == id).cloned());
+            if let Some(download) = download {
+                let (keep_open, action) = ui::dialogs::complete_dialog(&ctx, &download);
+                if let Some(action) = action {
+                    self.handle_actions(&ctx, vec![action]);
+                }
+                if !keep_open {
+                    self.completed_id = None;
+                }
+            } else {
+                self.completed_id = None;
+            }
         }
 
         self.poll_capture_info(&ctx);

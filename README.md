@@ -5,11 +5,11 @@
 <h1 align="center">LajuFile</h1>
 <p align="center">A fast, native download manager for Windows — built in Rust.</p>
 
-> **Status:** Milestone 4 is implemented: a local bridge, DPAPI cookie
-> forwarding, and an Edge MV3 extension are in place alongside segmented
-> downloads, true resume, queues, and a global speed limit. The Edge capture
-> flow still needs a manual end-to-end check before it is called verified.
-> Milestone 5 is release hardening and packaging.
+> **Status:** Milestones 1–6 and IDM-style workflow parity are implemented:
+> segmented downloads, true resume, queues, global speed limits, local bridge +
+> Edge MV3 extension, YouTube video downloads (`yt-dlp` + `ffmpeg`), IDM-style
+> `Download File Info` capture dialog, per-connection `Download Progress`
+> window, and `Download Complete` prompt.
 
 ## Why LajuFile
 
@@ -43,6 +43,9 @@ code and design.
 - Browser cookies are stored with Windows DPAPI, never as plaintext.
 - Capture settings in the app: status, port, token copy/regenerate, and Test connection.
 - YouTube downloads through managed `yt-dlp` + `ffmpeg`, with an IDM-style quality list.
+- IDM-style toolbar (`Add URL`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, `Options`) and `Tasks` menu.
+- IDM-style `Download File Info` dialog on browser capture with probed file size, editable file name (auto-updating category), `Start download`, and `Download later`.
+- IDM-style `Download Progress` window (double-click active/paused row) with per-connection/segment progress table (`N.`, `Downloaded`, `Progress`, `Info`) and `Download Complete` prompt.
 
 ## Browser capture
 

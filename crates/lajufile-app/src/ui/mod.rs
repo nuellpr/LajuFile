@@ -54,6 +54,8 @@ pub enum Action {
     Pause(i64),
     Resume(i64),
     Remove(i64),
+    RemoveCompleted,
+    ShowProgress(i64),
     Open(i64),
     OpenFolder(i64),
     CopyUrl(String),
