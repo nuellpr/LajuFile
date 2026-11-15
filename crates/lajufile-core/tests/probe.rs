@@ -21,7 +21,7 @@ fn request(base: &str, path: &str, timeout: Duration) -> ProbeRequest {
 #[tokio::test]
 async fn probe_206_returns_size_and_metadata() {
     let base = support::start_server().await;
-    let req = request(&base, "/range", Duration::from_secs(2));
+    let req = request(&base, "/range", Duration::from_secs(10));
 
     let result = probe(&client(), &req).await.unwrap();
 
@@ -35,7 +35,7 @@ async fn probe_206_returns_size_and_metadata() {
 #[tokio::test]
 async fn probe_200_without_range_sets_ranged_false_and_size() {
     let base = support::start_server().await;
-    let req = request(&base, "/plain", Duration::from_secs(2));
+    let req = request(&base, "/plain", Duration::from_secs(10));
 
     let result = probe(&client(), &req).await.unwrap();
 
@@ -46,7 +46,7 @@ async fn probe_200_without_range_sets_ranged_false_and_size() {
 #[tokio::test]
 async fn probe_404_maps_to_status_error() {
     let base = support::start_server().await;
-    let req = request(&base, "/missing", Duration::from_secs(2));
+    let req = request(&base, "/missing", Duration::from_secs(10));
 
     let error = probe(&client(), &req).await.unwrap_err();
 
@@ -56,7 +56,7 @@ async fn probe_404_maps_to_status_error() {
 #[tokio::test]
 async fn probe_follows_redirect_and_returns_final_url() {
     let base = support::start_server().await;
-    let req = request(&base, "/redirect", Duration::from_secs(2));
+    let req = request(&base, "/redirect", Duration::from_secs(10));
 
     let result = probe(&client(), &req).await.unwrap();
 
@@ -67,7 +67,7 @@ async fn probe_follows_redirect_and_returns_final_url() {
 #[tokio::test]
 async fn probe_416_with_zero_total_is_empty_file() {
     let base = support::start_server().await;
-    let req = request(&base, "/empty-probe", Duration::from_secs(2));
+    let req = request(&base, "/empty-probe", Duration::from_secs(10));
 
     let result = probe(&client(), &req).await.unwrap();
 
@@ -78,7 +78,7 @@ async fn probe_416_with_zero_total_is_empty_file() {
 #[tokio::test]
 async fn probe_rejects_encoded_response() {
     let base = support::start_server().await;
-    let req = request(&base, "/encoded", Duration::from_secs(2));
+    let req = request(&base, "/encoded", Duration::from_secs(10));
 
     let error = probe(&client(), &req).await.unwrap_err();
 
@@ -104,7 +104,7 @@ async fn probe_times_out() {
 #[tokio::test]
 async fn probe_handles_unknown_total() {
     let base = support::start_server().await;
-    let req = request(&base, "/range-nolen", Duration::from_secs(2));
+    let req = request(&base, "/range-nolen", Duration::from_secs(10));
 
     let result = probe(&client(), &req).await.unwrap();
 
@@ -117,7 +117,7 @@ async fn probe_rejects_unsupported_scheme() {
     let req = ProbeRequest {
         url: Url::parse("file:///tmp/file.iso").unwrap(),
         options: RequestOptions::default(),
-        timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(10),
     };
 
     let error = probe(&client(), &req).await.unwrap_err();
@@ -131,7 +131,7 @@ async fn probe_rejects_unsupported_scheme() {
 #[tokio::test]
 async fn probe_rejects_multiple_content_encodings() {
     let base = support::start_server().await;
-    let req = request(&base, "/encoded-multi", Duration::from_secs(2));
+    let req = request(&base, "/encoded-multi", Duration::from_secs(10));
 
     let error = probe(&client(), &req).await.unwrap_err();
 

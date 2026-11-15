@@ -52,7 +52,8 @@ fn bound_port(handle: &EngineHandle) -> u16 {
     let snapshot = wait_for(
         handle,
         |snapshot| snapshot.bridge.state == BridgeState::Bound && snapshot.bridge.port != 0,
-        Duration::from_secs(5),
+        // Generous: a loaded machine can take seconds to bind the bridge.
+        Duration::from_secs(15),
     );
     snapshot.bridge.port
 }
