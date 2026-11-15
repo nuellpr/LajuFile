@@ -1303,6 +1303,8 @@ impl EngineState {
             };
             self.flush_segment_progress(id);
             if success {
+                // The row reserved its temp name before the run; a finished video leaves it empty.
+                let _ = std::fs::remove_file(temp_path_for(&run.save_path));
                 let _ = self.store.mark_done(id, now_millis());
             } else {
                 let message = run

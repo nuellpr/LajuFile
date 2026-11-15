@@ -245,7 +245,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message && message.type === "video-download") {
-    post("video", { url: message.url, video_format: message.selector })
+    post("video", {
+      url: message.url,
+      video_format: message.selector,
+      filename: message.filename,
+    })
       .then(sendResponse)
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;

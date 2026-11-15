@@ -16,11 +16,12 @@ function errorText(result) {
   return "Could not reach LajuFile. Is it running?";
 }
 
-async function download(url, selector, label, menu) {
+async function download(url, selector, label, title, menu) {
   const result = await chrome.runtime.sendMessage({
     type: "video-download",
     url,
     selector,
+    filename: title ? `${title}.mp4` : undefined,
   });
   const status = result ? result.status : 0;
   let text = "Added to LajuFile";
@@ -37,6 +38,7 @@ async function showFormats(menu, url) {
   menu.style.display = "block";
   const result = await chrome.runtime.sendMessage({ type: "video-formats", url });
   const formats = result && result.body ? result.body.formats : null;
+  const title = result && result.body ? result.body.title : "";
   if (!Array.isArray(formats) || formats.length === 0) {
     menu.textContent = errorText(result);
     return;
@@ -48,7 +50,7 @@ async function showFormats(menu, url) {
     styleButton(item);
     item.addEventListener("click", (event) => {
       event.stopPropagation();
-      download(url, format.selector, format.label, menu);
+      download(url, format.selector, format.label, title, menu);
     });
     menu.append(item);
   }
