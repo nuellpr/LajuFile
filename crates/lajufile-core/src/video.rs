@@ -118,7 +118,10 @@ mod tests {
         let choices = quality_choices(&parse_formats(&sample()));
         let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
         assert_eq!(labels, vec!["1080p", "720p", "360p", "Audio only (m4a)"]);
-        assert_eq!(choices[0].selector, "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba");
+        assert_eq!(
+            choices[0].selector,
+            "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba"
+        );
         assert_eq!(choices[3].selector, "ba[ext=m4a]/ba");
     }
 
