@@ -23,6 +23,8 @@ code and design.
 
 - Native egui window with a download table, sidebar filters, and a context menu.
 - Add URL with metadata probe, file naming, and active duplicate detection.
+- Choose the save folder per download (Browse in Add), with an optional
+  "Ask where to save each download" prompt.
 - Segmented downloads with up to 32 parallel byte ranges.
 - True resume using `If-Range`; without a validator, a 64 KiB prefix check.
 - Queue with a configurable simultaneous-download limit.
