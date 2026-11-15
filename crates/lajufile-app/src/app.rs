@@ -477,14 +477,12 @@ impl LajuFileApp {
                 }
                 Action::Open(id) => {
                     if let Some(path) = self.path_for(id) {
-                        let _ = std::process::Command::new("explorer").arg(path).spawn();
+                        open_file(&path);
                     }
                 }
                 Action::OpenFolder(id) => {
                     if let Some(path) = self.path_for(id) {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(format!("/select,{}", path.display()))
-                            .spawn();
+                        open_folder(&path);
                     }
                 }
                 Action::CopyUrl(url) => {
@@ -697,22 +695,64 @@ impl Drop for LajuFileApp {
     }
 }
 
+fn open_file(path: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+fn open_folder(path: &std::path::Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+    #[cfg(not(windows))]
+    if let Some(parent) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+    }
+}
+
 fn sync_autostart(enabled: bool) {
-    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    let mut command = std::process::Command::new("reg.exe");
-    crate::tools::no_window(&mut command);
-    if enabled {
-        let Ok(exe) = std::env::current_exe() else {
+    #[cfg(windows)]
+    {
+        const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+        let mut command = std::process::Command::new("reg.exe");
+        crate::tools::no_window(&mut command);
+        if enabled {
+            let Ok(exe) = std::env::current_exe() else {
+                return;
+            };
+            let quoted = format!("\"{}\"", exe.display());
+            command.args([
+                "add", RUN_KEY, "/v", "LajuFile", "/t", "REG_SZ", "/d", &quoted, "/f",
+            ]);
+        } else {
+            command.args(["delete", RUN_KEY, "/v", "LajuFile", "/f"]);
+        }
+        let _ = command.status();
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return;
         };
-        let quoted = format!("\"{}\"", exe.display());
-        command.args([
-            "add", RUN_KEY, "/v", "LajuFile", "/t", "REG_SZ", "/d", &quoted, "/f",
-        ]);
-    } else {
-        command.args(["delete", RUN_KEY, "/v", "LajuFile", "/f"]);
+        let autostart_dir = home.join(".config/autostart");
+        let desktop_file = autostart_dir.join("lajufile.desktop");
+        if enabled {
+            let Ok(exe) = std::env::current_exe() else {
+                return;
+            };
+            let _ = std::fs::create_dir_all(&autostart_dir);
+            let content = format!(
+                "[Desktop Entry]\nType=Application\nName=LajuFile\nExec=\"{}\"\nTerminal=false\n",
+                exe.display()
+            );
+            let _ = std::fs::write(desktop_file, content);
+        } else {
+            let _ = std::fs::remove_file(desktop_file);
+        }
     }
-    let _ = command.status();
 }
 
 fn should_prompt_for_folder(settings: &Settings, manual: bool) -> bool {

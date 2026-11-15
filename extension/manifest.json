@@ -2,7 +2,8 @@
   "manifest_version": 3,
   "name": "LajuFile Capture",
   "version": "0.1.0",
-  "description": "Send browser downloads to the LajuFile desktop download manager.",
+  "minimum_chrome_version": "102",
+  "description": "Send downloads from Chrome, Brave, Edge, and Chromium browsers to the LajuFile desktop download manager.",
   "permissions": [
     "downloads",
     "cookies",
@@ -19,7 +20,11 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://youtube.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

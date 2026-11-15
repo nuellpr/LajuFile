@@ -247,7 +247,7 @@ pub fn settings_dialog(
                     ui.checkbox(&mut settings.close_to_tray, "Close to tray");
                     ui.checkbox(
                         &mut settings.autostart,
-                        "Launch LajuFile on Windows startup",
+                        "Launch LajuFile on system startup",
                     );
                     ui.checkbox(&mut settings.auto_resume, "Auto-resume on startup");
                     ui.checkbox(
@@ -315,7 +315,7 @@ pub fn settings_dialog(
                     }
                     ui.label(
                         RichText::new(
-                            "Paste this port and token into the LajuFile Edge extension options.",
+                            "Paste this port and token into the LajuFile browser extension options (Chrome, Brave, Edge).",
                         )
                         .size(11.0)
                         .color(ui.visuals().weak_text_color()),

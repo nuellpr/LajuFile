@@ -3,13 +3,14 @@
 </p>
 
 <h1 align="center">LajuFile</h1>
-<p align="center">A fast, native download manager for Windows — built in Rust.</p>
+<p align="center">A fast, native download manager for Windows and Linux — built in Rust.</p>
 
 > **Status:** Milestones 1–6 and IDM-style workflow parity are implemented:
 > segmented downloads, true resume, queues, global speed limits, local bridge +
-> Edge MV3 extension, YouTube video downloads (`yt-dlp` + `ffmpeg`), IDM-style
-> `Download File Info` capture dialog, per-connection `Download Progress`
-> window, and `Download Complete` prompt.
+> Chromium MV3 extension (Google Chrome, Brave, Microsoft Edge), YouTube video
+> downloads (`yt-dlp` + `ffmpeg`), IDM-style `Download File Info` capture
+> dialog, per-connection `Download Progress` window, and `Download Complete`
+> prompt.
 
 ## Why LajuFile
 
@@ -39,8 +40,8 @@ code and design.
 - Windows-safe file names, duplicate-name handling, and reserved-device protection.
 - Local bridge at `127.0.0.1:53841` with token authentication, CORS, and a 64 KiB body limit.
 - `GET /health` and `POST /downloads` for browser integrations.
-- Edge capture through `onDeterminingFilename`, with an `onCreated` fallback and a "Download with LajuFile" link menu.
-- Browser cookies are stored with Windows DPAPI, never as plaintext.
+- Browser capture (Google Chrome, Brave, Microsoft Edge, and other Chromium browsers) through `onDeterminingFilename`, with an `onCreated` fallback and a "Download with LajuFile" link menu.
+- Browser cookies are stored encrypted per-user (Windows DPAPI on Windows, `0600` user key on Linux), never as plaintext.
 - Capture settings in the app: status, port, token copy/regenerate, and Test connection.
 - YouTube downloads through managed `yt-dlp` + `ffmpeg` (with automatic H.264/AAC `.mp4` audio compatibility), plus an IDM-style floating **"Unduh video ini"** bar and quality dropdown (`1080p HD 60 fps`, `720p HD`, `Audio only`, etc.) on YouTube watch pages.
 - IDM-style toolbar (`Add URL`, `Batch`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, `Options`), `Tasks` menu, and graphical file-type icons (`MP4`, `PDF`, `EXE`, `ZIP`, `MP3`, `JPG`, `BIN`, `FILE`) in the download list.
@@ -49,13 +50,16 @@ code and design.
 - IDM-style `Download File Info` dialog on browser capture with probed file size, editable file name (auto-updating category), `Start download`, and `Download later`.
 - IDM-style `Download Progress` window (double-click active/paused row) with per-connection/segment progress table (`N.`, `Downloaded`, `Progress`, `Info`) and `Download Complete` prompt.
 
-## Browser capture
+## Browser capture (Google Chrome, Brave, Microsoft Edge)
 
 1. Start LajuFile and open **Settings → Browser capture**. Copy the port and token.
-2. In Edge, open `edge://extensions`, enable **Developer mode**, and choose
-   **Load unpacked**. Select the `extension/` folder in this repository.
-3. Open the LajuFile Capture extension options and paste the port and token.
-4. Click **Test connection**; the popup should show **Connected**.
+2. Open your browser's extensions page:
+   - **Google Chrome:** `chrome://extensions`
+   - **Brave:** `brave://extensions`
+   - **Microsoft Edge:** `edge://extensions`
+3. Enable **Developer mode**, choose **Load unpacked**, and select the `extension/` folder.
+4. Open the LajuFile Capture extension options and paste the port and token.
+5. Click **Test connection**; the popup should show **Connected**.
 
 The extension sends downloads to the local bridge:
 
@@ -115,8 +119,9 @@ Cancel and remove kill the child process and delete the partial file.
 
 ## Build
 
-Requirements: Windows 10/11 x64, Rust stable with the MSVC toolchain, and
-Visual Studio Build Tools with the C++ workload.
+Requirements:
+- **Windows 10/11 x64:** Rust stable with the MSVC toolchain, and Visual Studio Build Tools with the C++ workload.
+- **Linux x64 (Ubuntu/Debian):** Rust stable and `sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libayatana-appindicator3-dev libxdo-dev pkg-config`.
 
 ```powershell
 cargo test
@@ -124,25 +129,16 @@ cargo run -p lajufile-app
 cargo build --release -p lajufile-app
 ```
 
-Debug builds keep a console for diagnostics. Release builds use the Windows
-GUI subsystem and do not open a console window.
-
-CI runs `cargo fmt --check`, clippy, the workspace tests and `node --check`
-on the extension scripts for every push to `main` and every pull request.
-
 ### Release
 
-Pushing a tag builds the app and publishes a portable zip attached to the
-GitHub release:
+Pushing a tag builds and publishes portable archives for both **Windows** (`LajuFile-<tag>-windows-x64.zip`) and **Linux** (`LajuFile-<tag>-linux-x64.tar.gz`) on the GitHub release page:
 
 ```powershell
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The zip holds `lajufile.exe`, the `extension` folder (load it unpacked in
-Edge), `README.md` and `LICENSE`. There is no installer, auto-updater or
-code signing yet; the video tools still download on first use.
+Each archive holds the `lajufile` executable (`lajufile.exe` on Windows, `lajufile` on Linux), the `extension/` folder (load unpacked in Chrome, Brave, or Edge), `README.md`, and `LICENSE`.
 
 The app resumes downloads that were interrupted by a crash: rows left in
 `Downloading` come back as queued (or paused when auto-resume is off) and

@@ -435,8 +435,8 @@ fn stub_tools() -> std::path::PathBuf {
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join("lajufile-bridge-tools");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("yt-dlp.exe"), b"").unwrap();
-        std::fs::write(dir.join("ffmpeg.exe"), b"").unwrap();
+        std::fs::write(dir.join(lajufile_app::tools::YTDLP), b"").unwrap();
+        std::fs::write(dir.join(lajufile_app::tools::FFMPEG), b"").unwrap();
         unsafe { std::env::set_var("LAJUFILE_TOOLS_DIR", &dir) };
         dir
     })
