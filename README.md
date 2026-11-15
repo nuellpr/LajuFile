@@ -42,8 +42,10 @@ code and design.
 - Edge capture through `onDeterminingFilename`, with an `onCreated` fallback and a "Download with LajuFile" link menu.
 - Browser cookies are stored with Windows DPAPI, never as plaintext.
 - Capture settings in the app: status, port, token copy/regenerate, and Test connection.
-- YouTube downloads through managed `yt-dlp` + `ffmpeg`, with an IDM-style quality list.
-- IDM-style toolbar (`Add URL`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, `Options`) and `Tasks` menu.
+- YouTube downloads through managed `yt-dlp` + `ffmpeg` (with automatic H.264/AAC `.mp4` audio compatibility), plus an IDM-style floating **"Unduh video ini"** bar and quality dropdown (`1080p HD 60 fps`, `720p HD`, `Audio only`, etc.) on YouTube watch pages.
+- IDM-style toolbar (`Add URL`, `Batch`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, `Options`), `Tasks` menu, and graphical file-type icons (`MP4`, `PDF`, `EXE`, `ZIP`, `MP3`, `JPG`, `BIN`, `FILE`) in the download list.
+- Clipboard Monitor (`Ctrl+C` auto-opens `Add Download` for downloadable file & YouTube links), Batch Download / Text Import (URL list + wildcard pattern `*` generator + `.txt` import), and `Launch LajuFile on Windows startup`.
+- Embedded Windows PE application icon, product name (`LajuFile`), and publisher metadata (`Nuel Wallep`).
 - IDM-style `Download File Info` dialog on browser capture with probed file size, editable file name (auto-updating category), `Start download`, and `Download later`.
 - IDM-style `Download Progress` window (double-click active/paused row) with per-connection/segment progress table (`N.`, `Downloaded`, `Progress`, `Info`) and `Download Complete` prompt.
 
