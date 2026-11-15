@@ -1,6 +1,7 @@
 //! UI state shared by the main window and dialogs.
 
 pub mod dialogs;
+pub mod download_info;
 pub mod folder_picker;
 pub mod format;
 pub mod main_window;
