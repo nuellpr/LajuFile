@@ -105,7 +105,7 @@ Cancel and remove kill the child process and delete the partial file.
 - [x] **M2 — Desktop app:** GUI, queue, tray, themes.
 - [x] **M3 — Engine:** segmented downloads, true resume, global speed limit.
 - [x] **M4 — Capture:** local bridge and Edge MV3 extension.
-- [ ] **M5 — Release:** hardening, docs, packaging.
+- [x] **M5 — Release:** hardening, docs, packaging.
 - [x] **M6 — YouTube:** managed yt-dlp + ffmpeg, quality list, video jobs.
 
 ## Build
@@ -121,6 +121,28 @@ cargo build --release -p lajufile-app
 
 Debug builds keep a console for diagnostics. Release builds use the Windows
 GUI subsystem and do not open a console window.
+
+CI runs `cargo fmt --check`, clippy, the workspace tests and `node --check`
+on the extension scripts for every push to `main` and every pull request.
+
+### Release
+
+Pushing a tag builds the app and publishes a portable zip attached to the
+GitHub release:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The zip holds `lajufile.exe`, the `extension` folder (load it unpacked in
+Edge), `README.md` and `LICENSE`. There is no installer, auto-updater or
+code signing yet; the video tools still download on first use.
+
+The app resumes downloads that were interrupted by a crash: rows left in
+`Downloading` come back as queued (or paused when auto-resume is off) and
+continue from their stored segment offsets.
+
 
 ## Design
 

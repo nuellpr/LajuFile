@@ -964,3 +964,94 @@ fn startup_settings_are_clamped() {
     assert_eq!(snap.settings.global_speed_limit_kbps, 1_000_000);
     handle.shutdown();
 }
+
+#[test]
+fn startup_resumes_a_crashed_download() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let payload = seg_payload();
+    let half = SEG_SIZE / 2;
+    let save_path = dir.path().join("downloads/recovered.bin");
+    let temp_path = dir.path().join("downloads/recovered.bin.lajufile");
+    std::fs::create_dir_all(save_path.parent().unwrap()).unwrap();
+    std::fs::write(&temp_path, &payload[..half]).unwrap();
+
+    let db_path = dir.path().join("lajufile.db");
+    let mut store = Store::open(&db_path).unwrap();
+    let id = store
+        .insert_download(&NewDownload {
+            url: format!("{}/seg.bin", server.base),
+            final_url: None,
+            file_name: "recovered.bin".to_string(),
+            save_path: save_path.clone(),
+            temp_path: temp_path.clone(),
+            size: Some(SEG_SIZE as u64),
+            status: DownloadStatus::Downloading,
+            category: Category::Other,
+            kind: "http".to_string(),
+            video_format: None,
+            connections: 2,
+            ranged: true,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: None,
+            user_agent: None,
+            queue_order: 0,
+            created_at: now_millis(),
+            segments: vec![
+                Segment {
+                    idx: 0,
+                    start: 0,
+                    end: half as u64 - 1,
+                    done: half as u64,
+                },
+                Segment {
+                    idx: 1,
+                    start: half as u64,
+                    end: SEG_SIZE as u64 - 1,
+                    done: 0,
+                },
+            ],
+        })
+        .unwrap();
+    drop(store);
+
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        max_connections: 2,
+        max_concurrent: 1,
+        auto_resume: true,
+        ..test_settings(dir.path())
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path,
+        settings,
+    })
+    .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .find(|d| d.id == id)
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        std::fs::read(&snap.downloads[0].save_path).unwrap(),
+        payload
+    );
+    assert!(!temp_path.exists());
+    let ranges = server.ranges();
+    assert!(
+        ranges
+            .iter()
+            .all(|start| *start == 0 || *start >= half as u64),
+        "resume must not refetch the finished half, got {ranges:?}"
+    );
+    handle.shutdown();
+}
