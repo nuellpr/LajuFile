@@ -1,9 +1,11 @@
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use lajufile_core::paths;
-use lajufile_core::settings::{Settings, Theme};
+use lajufile_core::settings::{Settings, Theme, generate_token};
 use lajufile_core::store::DownloadStatus;
 
+use crate::bridge;
 use crate::engine::{Command, EngineConfig, EngineHandle, Snapshot};
 use crate::tray::{self, Tray, TrayEvent};
 use crate::ui::dialogs::AddDraft;
@@ -26,6 +28,7 @@ pub struct LajuFileApp {
     pub(crate) tray: Option<Tray>,
     pub(crate) allow_exit: bool,
     pub(crate) tray_tooltip: String,
+    pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
 }
 
 impl LajuFileApp {
@@ -70,6 +73,7 @@ impl LajuFileApp {
             tray,
             allow_exit: false,
             tray_tooltip: String::new(),
+            bridge_test: None,
         }
     }
 
@@ -100,6 +104,22 @@ impl LajuFileApp {
             apply_theme(ctx, &self.theme);
         }
         self.snapshot = Some(snapshot);
+    }
+
+    fn poll_bridge_test(&mut self) {
+        let received = self.bridge_test.as_ref().map(|rx| rx.try_recv());
+        match received {
+            Some(Ok(Ok(()))) => {
+                self.toast = Some(("Bridge connected".to_string(), Instant::now()));
+                self.bridge_test = None;
+            }
+            Some(Ok(Err(error))) => {
+                self.toast = Some((format!("Bridge check failed: {error}"), Instant::now()));
+                self.bridge_test = None;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => self.bridge_test = None,
+            _ => {}
+        }
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
@@ -211,6 +231,16 @@ impl LajuFileApp {
                         self.send(Command::UpdateSettings(settings));
                     }
                 }
+                Action::TestBridge(port) => {
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(bridge::health_check(port, Duration::from_secs(2)));
+                    });
+                    self.bridge_test = Some(rx);
+                }
+                Action::RegenerateToken => {
+                    self.settings_draft.bridge_token = generate_token();
+                }
             }
         }
     }
@@ -235,6 +265,7 @@ impl eframe::App for LajuFileApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
         self.poll_engine(ctx);
+        self.poll_bridge_test();
         self.update_tray_tooltip();
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -300,6 +331,15 @@ fn normalize_settings(settings: &mut Settings) {
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+    settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+    if settings.bridge_token.len() != 64
+        || !settings
+            .bridge_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        settings.bridge_token = generate_token();
+    }
 }
 
 #[cfg(test)]
@@ -344,5 +384,18 @@ mod tests {
         };
         normalize_settings(&mut settings);
         assert_eq!(settings.max_connections, 1);
+    }
+
+    #[test]
+    fn normalize_settings_clamps_bridge_port() {
+        let mut settings = Settings {
+            bridge_port: 0,
+            ..Settings::default()
+        };
+        normalize_settings(&mut settings);
+        assert_eq!(settings.bridge_port, 1024);
+        settings.bridge_port = 65_535;
+        normalize_settings(&mut settings);
+        assert_eq!(settings.bridge_port, 65_535);
     }
 }

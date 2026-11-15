@@ -62,6 +62,8 @@ pub enum Action {
     SetTheme(Theme),
     PauseAll,
     ResumeAll,
+    TestBridge(u16),
+    RegenerateToken,
     Exit,
 }
 

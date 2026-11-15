@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use lajufile_core::cookie::{protect_cookie, unprotect_cookie};
 use lajufile_core::download::{
     DownloadError, DownloadOutcome, DownloadSpec, download_single_with_limiter,
 };
@@ -14,13 +15,17 @@ use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
 use lajufile_core::segment::plan_segments;
 use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented};
-use lajufile_core::settings::Settings;
+use lajufile_core::settings::{Settings, generate_token};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Store, StoreError, now_millis,
 };
 use tokio::runtime::Runtime;
 use url::Url;
+
+use crate::bridge::{BridgeAddOutcome, BridgeAddRequest};
+
+use crate::bridge::{self, BridgeServer, BridgeStatus};
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,
@@ -38,12 +43,15 @@ impl EngineHandle {
     pub fn start(config: EngineConfig) -> Result<Self, EngineError> {
         let store = Store::open(&config.db_path)?;
         let (command_tx, command_rx) = mpsc::channel();
+        let bridge_commands = command_tx.clone();
         let snapshots = Arc::new(Mutex::new(None));
         let engine_snapshots = Arc::clone(&snapshots);
 
         let join = thread::Builder::new()
             .name("lajufile-engine".to_string())
-            .spawn(move || engine_loop(store, config, command_rx, engine_snapshots))?;
+            .spawn(move || {
+                engine_loop(store, config, command_rx, bridge_commands, engine_snapshots)
+            })?;
 
         Ok(Self {
             commands: command_tx,
@@ -76,6 +84,10 @@ impl EngineHandle {
 #[derive(Debug)]
 pub enum Command {
     Add(AddRequest),
+    BridgeAdd {
+        request: BridgeAddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    },
     Pause(i64),
     Resume(i64),
     Remove(i64),
@@ -92,6 +104,9 @@ pub struct AddRequest {
     pub save_dir: Option<PathBuf>,
     pub start_now: bool,
     pub connections: Option<u32>,
+    pub referrer: Option<String>,
+    pub user_agent: Option<String>,
+    pub cookie: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +115,7 @@ pub struct Snapshot {
     pub settings: Settings,
     pub speeds: HashMap<i64, u64>,
     pub message: Option<String>,
+    pub bridge: BridgeStatus,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,9 +128,18 @@ pub enum EngineError {
     Stopped,
 }
 
+fn valid_bridge_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 enum Event {
     Probe {
         request: AddRequest,
+        result: Box<Result<ProbeResult, ProbeError>>,
+    },
+    BridgeProbe {
+        request: AddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
         result: Box<Result<ProbeResult, ProbeError>>,
     },
     Progress {
@@ -146,6 +171,17 @@ struct ActiveDownload {
     handle: tokio::task::JoinHandle<()>,
 }
 
+struct Inserted {
+    id: i64,
+    file_name: String,
+    size: Option<u64>,
+}
+
+enum InsertError {
+    Duplicate(Box<Download>),
+    Failed(String),
+}
+
 struct EngineState {
     store: Store,
     settings: Settings,
@@ -156,6 +192,9 @@ struct EngineState {
     snapshots: Arc<Mutex<Option<Snapshot>>>,
     active: HashMap<i64, ActiveDownload>,
     limiter: Arc<RateLimiter>,
+    bridge: Option<BridgeServer>,
+    bridge_status: BridgeStatus,
+    bridge_token: Arc<RwLock<String>>,
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
@@ -168,6 +207,7 @@ fn engine_loop(
     store: Store,
     config: EngineConfig,
     commands: Receiver<Command>,
+    bridge_commands: Sender<Command>,
     snapshots: Arc<Mutex<Option<Snapshot>>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -180,9 +220,10 @@ fn engine_loop(
             if let Ok(mut slot) = snapshots.lock() {
                 *slot = Some(Snapshot {
                     downloads: store.list_downloads().unwrap_or_default(),
-                    settings: config.settings,
+                    settings: config.settings.clone(),
                     speeds: HashMap::new(),
                     message: Some(format!("Engine failed: {error}")),
+                    bridge: BridgeStatus::starting(config.settings.bridge_port),
                 });
             }
             return;
@@ -194,7 +235,18 @@ fn engine_loop(
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+    if !valid_bridge_token(&settings.bridge_token) {
+        settings.bridge_token = generate_token();
+        let _ = settings.save(&config.data_dir);
+    }
     let limiter = Arc::new(RateLimiter::new(settings.global_speed_limit_kbps));
+    let bridge_token = Arc::new(RwLock::new(settings.bridge_token.clone()));
+    let bridge = runtime.block_on(bridge::start(
+        settings.bridge_port,
+        Arc::clone(&bridge_token),
+        bridge_commands,
+    ));
+    let bridge_status = bridge.status.clone();
     let mut state = EngineState {
         store,
         settings,
@@ -205,6 +257,9 @@ fn engine_loop(
         snapshots,
         active: HashMap::new(),
         limiter,
+        bridge: Some(bridge),
+        bridge_status,
+        bridge_token,
         generation: 0,
         speeds: HashMap::new(),
         progress: HashMap::new(),
@@ -263,6 +318,7 @@ impl EngineState {
                     self.message = Some(text);
                 }
             }
+            Command::BridgeAdd { request, reply } => self.handle_bridge_add(request, reply),
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
             Command::Remove(id) => self.remove(id),
@@ -292,11 +348,16 @@ impl EngineState {
             Err(error) => return Some(format!("Add failed: {error}")),
         }
 
+        let user_agent = request
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
         let probe_request = ProbeRequest {
             url,
             options: RequestOptions {
-                user_agent: Some(DEFAULT_USER_AGENT.to_string()),
-                ..RequestOptions::default()
+                user_agent: Some(user_agent),
+                referrer: request.referrer.clone(),
+                cookie: request.cookie.clone(),
             },
             timeout: Duration::from_secs(20),
         };
@@ -315,6 +376,67 @@ impl EngineState {
         None
     }
 
+    fn handle_bridge_add(
+        &mut self,
+        request: BridgeAddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    ) {
+        let url = match Url::parse(&request.url) {
+            Ok(url) => url,
+            Err(error) => {
+                let _ = reply.send(BridgeAddOutcome::Invalid(format!("invalid URL: {error}")));
+                return;
+            }
+        };
+        let normalized_url = url.to_string();
+
+        match self.store.active_by_url(&normalized_url) {
+            Ok(Some(existing)) => {
+                let _ = reply.send(BridgeAddOutcome::Conflict { id: existing.id });
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = reply.send(BridgeAddOutcome::Internal(error.to_string()));
+                return;
+            }
+        }
+
+        let user_agent = request
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
+        let probe_request = ProbeRequest {
+            url,
+            options: RequestOptions {
+                user_agent: Some(user_agent),
+                referrer: request.referrer.clone(),
+                cookie: request.cookie.clone(),
+            },
+            timeout: Duration::from_secs(3),
+        };
+        let add = AddRequest {
+            url: normalized_url,
+            file_name: request.filename,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: request.referrer,
+            user_agent: request.user_agent,
+            cookie: request.cookie,
+        };
+        let client = self.client.clone();
+        let events = self.events.clone();
+        self.runtime.spawn(async move {
+            let result = probe(&client, &probe_request).await;
+            let _ = events.send(Event::BridgeProbe {
+                request: add,
+                reply,
+                result: Box::new(result),
+            });
+        });
+    }
+
     fn handle_probe(
         &mut self,
         request: AddRequest,
@@ -324,13 +446,24 @@ impl EngineState {
             Ok(result) => result,
             Err(error) => return format!("Add failed: {error}"),
         };
-
-        match self.store.active_by_url(&request.url) {
-            Ok(Some(existing)) => {
-                return format!("Already in LajuFile: {}", existing.file_name);
+        match self.insert_from_probe(request, result) {
+            Ok(inserted) => format!("Added {}", inserted.file_name),
+            Err(InsertError::Duplicate(existing)) => {
+                format!("Already in LajuFile: {}", existing.file_name)
             }
+            Err(InsertError::Failed(error)) => format!("Add failed: {error}"),
+        }
+    }
+
+    fn insert_from_probe(
+        &mut self,
+        request: AddRequest,
+        result: ProbeResult,
+    ) -> Result<Inserted, InsertError> {
+        match self.store.active_by_url(&request.url) {
+            Ok(Some(existing)) => return Err(InsertError::Duplicate(Box::new(existing))),
             Ok(None) => {}
-            Err(error) => return format!("Add failed: {error}"),
+            Err(error) => return Err(InsertError::Failed(error.to_string())),
         }
 
         let dir = request
@@ -338,7 +471,7 @@ impl EngineState {
             .clone()
             .unwrap_or_else(|| self.settings.download_dir.clone());
         if let Err(error) = ensure_dir(&dir) {
-            return format!("Add failed: {error}");
+            return Err(InsertError::Failed(error.to_string()));
         }
 
         let base_name = resolve_file_name(
@@ -358,7 +491,7 @@ impl EngineState {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     final_path = dedupe_path(&dir, &base_name);
                 }
-                Err(error) => return format!("Add failed: {error}"),
+                Err(error) => return Err(InsertError::Failed(error.to_string())),
             }
         };
         let reserved_temp = temp_path.clone();
@@ -371,11 +504,35 @@ impl EngineState {
             .unwrap_or(self.settings.max_connections)
             .clamp(1, 32);
         let segments = plan_segments(result.size.unwrap_or(0), result.ranged, connections);
-        let _start_now = request.start_now;
+        let size = result.size;
+
+        let cookie_enc = match request
+            .cookie
+            .as_deref()
+            .map(str::trim)
+            .filter(|cookie| !cookie.is_empty())
+        {
+            Some(cookie) => match protect_cookie(cookie) {
+                Ok(encrypted) => Some(encrypted),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&reserved_temp);
+                    return Err(InsertError::Failed(format!("cookie: {error}")));
+                }
+            },
+            None => None,
+        };
+        let referrer = request.referrer.clone();
+        let user_agent = request
+            .user_agent
+            .clone()
+            .or_else(|| Some(DEFAULT_USER_AGENT.to_string()));
 
         let queue_order = match self.store.next_queue_order() {
             Ok(order) => order,
-            Err(error) => return format!("Add failed: {error}"),
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                return Err(InsertError::Failed(error.to_string()));
+            }
         };
         let new = NewDownload {
             url: request.url,
@@ -383,29 +540,33 @@ impl EngineState {
             file_name: file_name.clone(),
             save_path: final_path,
             temp_path,
-            size: result.size,
+            size,
             status: DownloadStatus::Queued,
             category: Category::from_file_name(&file_name),
             connections,
             ranged: result.ranged,
             etag: result.etag,
             last_modified: result.last_modified,
-            cookie_enc: None,
-            referrer: None,
-            user_agent: Some(DEFAULT_USER_AGENT.to_string()),
+            cookie_enc,
+            referrer,
+            user_agent,
             queue_order,
             created_at: now_millis(),
             segments,
         };
 
         match self.store.insert_download(&new) {
-            Ok(_) => {
+            Ok(id) => {
                 self.pump_queue();
-                format!("Added {file_name}")
+                Ok(Inserted {
+                    id,
+                    file_name,
+                    size,
+                })
             }
             Err(error) => {
                 let _ = std::fs::remove_file(&reserved_temp);
-                format!("Add failed: {error}")
+                Err(InsertError::Failed(error.to_string()))
             }
         }
     }
@@ -414,6 +575,27 @@ impl EngineState {
         match event {
             Event::Probe { request, result } => {
                 self.message = Some(self.handle_probe(request, *result));
+            }
+            Event::BridgeProbe {
+                request,
+                reply,
+                result,
+            } => {
+                let outcome = match *result {
+                    Err(error) => BridgeAddOutcome::ProbeFailed(error.to_string()),
+                    Ok(result) => match self.insert_from_probe(request, result) {
+                        Ok(inserted) => BridgeAddOutcome::Created {
+                            id: inserted.id,
+                            filename: inserted.file_name,
+                            size: inserted.size,
+                        },
+                        Err(InsertError::Duplicate(existing)) => {
+                            BridgeAddOutcome::Conflict { id: existing.id }
+                        }
+                        Err(InsertError::Failed(error)) => BridgeAddOutcome::Internal(error),
+                    },
+                };
+                let _ = reply.send(outcome);
             }
             Event::Progress {
                 id,
@@ -555,6 +737,21 @@ impl EngineState {
             }
         };
 
+        let cookie = match download.cookie_enc.as_deref() {
+            Some(encrypted) => match unprotect_cookie(encrypted) {
+                Ok(cookie) => Some(cookie),
+                Err(error) => {
+                    let _ = self.store.update_status(
+                        download.id,
+                        DownloadStatus::Error,
+                        Some(&format!("cookie: {error}")),
+                    );
+                    return false;
+                }
+            },
+            None => None,
+        };
+
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.clear_pending(download.id);
@@ -567,9 +764,12 @@ impl EngineState {
         }
 
         let options = RequestOptions {
-            user_agent: Some(DEFAULT_USER_AGENT.to_string()),
+            user_agent: download
+                .user_agent
+                .clone()
+                .or_else(|| Some(DEFAULT_USER_AGENT.to_string())),
             referrer: download.referrer.clone(),
-            cookie: None,
+            cookie,
         };
         let id = download.id;
         let events = self.events.clone();
@@ -683,26 +883,24 @@ impl EngineState {
 
     fn pump_queue(&mut self) {
         let limit = self.settings.max_concurrent.max(1) as usize;
-        loop {
+        let mut queued: Vec<Download> = match self.store.list_downloads() {
+            Ok(downloads) => downloads
+                .into_iter()
+                .filter(|download| {
+                    download.status == DownloadStatus::Queued
+                        && !self.active.contains_key(&download.id)
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        queued.sort_by_key(|download| download.queue_order);
+        for download in queued {
             if self.active.len() >= limit {
                 break;
             }
-            let next = match self.store.list_downloads() {
-                Ok(downloads) => downloads
-                    .into_iter()
-                    .filter(|download| {
-                        download.status == DownloadStatus::Queued
-                            && !self.active.contains_key(&download.id)
-                    })
-                    .min_by_key(|download| download.queue_order),
-                Err(_) => None,
-            };
-            let Some(download) = next else {
-                break;
-            };
-            if !self.start_download(&download) {
-                break;
-            }
+            // A row that fails before starting (bad cookie, invalid URL) must
+            // not block the rest of the queue.
+            self.start_download(&download);
         }
     }
 
@@ -805,9 +1003,16 @@ impl EngineState {
         settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+        settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+        if !valid_bridge_token(&settings.bridge_token) {
+            settings.bridge_token = generate_token();
+        }
         match settings.save(&self.data_dir) {
             Ok(()) => {
                 self.limiter.set_kbps(settings.global_speed_limit_kbps);
+                if let Ok(mut token) = self.bridge_token.write() {
+                    *token = settings.bridge_token.clone();
+                }
                 self.settings = settings;
                 self.pump_queue();
             }
@@ -818,6 +1023,9 @@ impl EngineState {
     }
 
     fn shutdown(&mut self) {
+        if let Some(bridge) = self.bridge.take() {
+            bridge.shutdown();
+        }
         let active: Vec<i64> = self.active.keys().copied().collect();
         for id in active {
             self.flush_segment_progress(id);
@@ -838,6 +1046,7 @@ impl EngineState {
             settings: self.settings.clone(),
             speeds: self.speeds.clone(),
             message: self.message.clone(),
+            bridge: self.bridge_status.clone(),
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             *slot = Some(snapshot);

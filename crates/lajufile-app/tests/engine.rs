@@ -1,11 +1,23 @@
 mod support;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lajufile_app::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use lajufile_core::settings::Settings;
-use lajufile_core::store::{DownloadStatus, Store};
+use lajufile_core::store::{Category, DownloadStatus, NewDownload, Segment, Store, now_millis};
 use support::{SEG_SIZE, seg_payload, start_server};
+
+const TEST_BRIDGE_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn test_settings(dir: &Path) -> Settings {
+    Settings {
+        download_dir: dir.join("downloads"),
+        bridge_port: 0,
+        bridge_token: TEST_BRIDGE_TOKEN.to_string(),
+        ..Settings::default()
+    }
+}
 
 #[test]
 fn add_probes_and_inserts() {
@@ -13,7 +25,7 @@ fn add_probes_and_inserts() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -32,6 +44,9 @@ fn add_probes_and_inserts() {
             save_dir: None,
             start_now: false,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -50,7 +65,7 @@ fn add_missing_url_keeps_store_empty() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -66,6 +81,9 @@ fn add_missing_url_keeps_store_empty() {
             save_dir: None,
             start_now: false,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -87,7 +105,7 @@ fn add_duplicate_active_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -102,6 +120,9 @@ fn add_duplicate_active_is_rejected() {
         save_dir: None,
         start_now: true,
         connections: None,
+        referrer: None,
+        user_agent: None,
+        cookie: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -122,6 +143,9 @@ fn add_duplicate_active_is_rejected() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let second = wait_for(
@@ -141,7 +165,7 @@ fn back_to_back_duplicate_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -159,6 +183,9 @@ fn back_to_back_duplicate_is_rejected() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -178,7 +205,7 @@ fn same_explicit_name_gets_distinct_paths() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -195,6 +222,9 @@ fn same_explicit_name_gets_distinct_paths() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -219,7 +249,7 @@ fn pause_persists_every_segment_before_status_change() {
         max_connections: 4,
         max_concurrent: 1,
         global_speed_limit_kbps: 256,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -235,6 +265,9 @@ fn pause_persists_every_segment_before_status_change() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -265,6 +298,114 @@ fn pause_persists_every_segment_before_status_change() {
     assert_eq!(download.downloaded, sum);
 }
 
+#[test]
+fn corrupt_cookie_marks_download_error() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("lajufile.db");
+    let mut store = Store::open(&db_path).unwrap();
+    let id = store
+        .insert_download(&NewDownload {
+            url: format!("{}/file.bin", server.base),
+            final_url: None,
+            file_name: "cookie.bin".to_string(),
+            save_path: dir.path().join("downloads/cookie.bin"),
+            temp_path: dir.path().join("downloads/cookie.bin.lajufile"),
+            size: Some(1024 * 1024),
+            status: DownloadStatus::Queued,
+            category: Category::Other,
+            connections: 1,
+            ranged: false,
+            etag: None,
+            last_modified: None,
+            cookie_enc: Some(vec![1, 2, 3]),
+            referrer: None,
+            user_agent: None,
+            queue_order: 0,
+            created_at: now_millis(),
+            segments: vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 1024 * 1024 - 1,
+                done: 0,
+            }],
+        })
+        .unwrap();
+    let valid_id = store
+        .insert_download(&NewDownload {
+            url: format!("{}/file.bin", server.base),
+            final_url: None,
+            file_name: "valid.bin".to_string(),
+            save_path: dir.path().join("downloads/valid.bin"),
+            temp_path: dir.path().join("downloads/valid.bin.lajufile"),
+            size: Some(1024 * 1024),
+            status: DownloadStatus::Queued,
+            category: Category::Other,
+            connections: 1,
+            ranged: false,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: None,
+            user_agent: None,
+            queue_order: 1,
+            created_at: now_millis(),
+            segments: vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 1024 * 1024 - 1,
+                done: 0,
+            }],
+        })
+        .unwrap();
+    drop(store);
+
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        bridge_port: 0,
+        bridge_token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        ..test_settings(dir.path())
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path,
+        settings,
+    })
+    .unwrap();
+    let snap = wait_for(
+        &handle,
+        |s| {
+            let corrupt = s
+                .downloads
+                .iter()
+                .find(|d| d.id == id)
+                .is_some_and(|d| d.status == DownloadStatus::Error);
+            let valid = s
+                .downloads
+                .iter()
+                .find(|d| d.id == valid_id)
+                .is_some_and(|d| d.status == DownloadStatus::Done);
+            corrupt && valid
+        },
+        Duration::from_secs(5),
+    );
+    assert!(
+        snap.downloads
+            .iter()
+            .find(|d| d.id == id)
+            .and_then(|d| d.error.as_deref())
+            .is_some_and(|error| error.contains("cookie"))
+    );
+    assert!(
+        snap.downloads
+            .iter()
+            .find(|d| d.id == valid_id)
+            .is_some_and(|d| d.save_path.exists())
+    );
+    handle.shutdown();
+}
+
 fn wait_for(
     handle: &EngineHandle,
     predicate: impl Fn(&Snapshot) -> bool,
@@ -289,7 +430,7 @@ fn add_start_now_downloads_file() {
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -305,6 +446,9 @@ fn add_start_now_downloads_file() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -334,7 +478,7 @@ fn queue_never_exceeds_max_concurrent() {
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -351,6 +495,9 @@ fn queue_never_exceeds_max_concurrent() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -396,7 +543,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -412,6 +559,9 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -452,7 +602,7 @@ fn remove_deletes_record_and_temp() {
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -468,6 +618,9 @@ fn remove_deletes_record_and_temp() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -501,7 +654,7 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
         download_dir: dir.path().join("downloads"),
         max_connections: 4,
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -517,6 +670,9 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -540,7 +696,7 @@ fn range_ignored_falls_back_to_single() {
         download_dir: dir.path().join("downloads"),
         max_connections: 4,
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -556,6 +712,9 @@ fn range_ignored_falls_back_to_single() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -579,7 +738,7 @@ fn pause_and_resume_continue_from_offset() {
         download_dir: dir.path().join("downloads"),
         max_connections: 4,
         max_concurrent: 1,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -595,6 +754,9 @@ fn pause_and_resume_continue_from_offset() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -649,7 +811,7 @@ fn add_records_requested_connections() {
     let settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_connections: 8,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -665,6 +827,9 @@ fn add_records_requested_connections() {
             save_dir: None,
             start_now: false,
             connections: Some(2),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -690,7 +855,7 @@ fn startup_settings_are_clamped() {
         max_concurrent: 99,
         max_connections: 99,
         global_speed_limit_kbps: 2_000_000,
-        ..Settings::default()
+        ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),

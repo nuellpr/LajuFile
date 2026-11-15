@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LajuFile Capture</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon-32.png" alt="" width="28" height="28" />
+        <div>
+          <h1>LajuFile</h1>
+          <p>Edge capture</p>
+        </div>
+      </header>
+
+      <section class="status-card">
+        <div class="status-line">
+          <span id="dot" class="dot"></span>
+          <strong id="state">Checking…</strong>
+        </div>
+        <p id="detail">Port 53841</p>
+        <button id="test" class="quiet" type="button">Test connection</button>
+      </section>
+
+      <label class="toggle">
+        <span>
+          <strong>Capture downloads</strong>
+          <small>Send new downloads to LajuFile</small>
+        </span>
+        <input id="autoCapture" type="checkbox" />
+      </label>
+
+      <p class="hint">
+        Pair the port and token in extension options. Forms, protected streams, and
+        downloads started before LajuFile is running stay in the browser.
+      </p>
+
+      <button id="options" class="primary" type="button">Extension options</button>
+      <footer>LajuFile 0.1.0</footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
