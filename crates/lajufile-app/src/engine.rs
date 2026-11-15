@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,8 @@ use lajufile_core::store::{
 use tokio::runtime::Runtime;
 use url::Url;
 
+use crate::bridge::{self, BridgeServer, BridgeStatus};
+
 pub struct EngineConfig {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
@@ -38,12 +40,15 @@ impl EngineHandle {
     pub fn start(config: EngineConfig) -> Result<Self, EngineError> {
         let store = Store::open(&config.db_path)?;
         let (command_tx, command_rx) = mpsc::channel();
+        let bridge_commands = command_tx.clone();
         let snapshots = Arc::new(Mutex::new(None));
         let engine_snapshots = Arc::clone(&snapshots);
 
         let join = thread::Builder::new()
             .name("lajufile-engine".to_string())
-            .spawn(move || engine_loop(store, config, command_rx, engine_snapshots))?;
+            .spawn(move || {
+                engine_loop(store, config, command_rx, bridge_commands, engine_snapshots)
+            })?;
 
         Ok(Self {
             commands: command_tx,
@@ -100,6 +105,7 @@ pub struct Snapshot {
     pub settings: Settings,
     pub speeds: HashMap<i64, u64>,
     pub message: Option<String>,
+    pub bridge: BridgeStatus,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +162,8 @@ struct EngineState {
     snapshots: Arc<Mutex<Option<Snapshot>>>,
     active: HashMap<i64, ActiveDownload>,
     limiter: Arc<RateLimiter>,
+    bridge: Option<BridgeServer>,
+    bridge_status: BridgeStatus,
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
@@ -168,6 +176,7 @@ fn engine_loop(
     store: Store,
     config: EngineConfig,
     commands: Receiver<Command>,
+    bridge_commands: Sender<Command>,
     snapshots: Arc<Mutex<Option<Snapshot>>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -180,9 +189,10 @@ fn engine_loop(
             if let Ok(mut slot) = snapshots.lock() {
                 *slot = Some(Snapshot {
                     downloads: store.list_downloads().unwrap_or_default(),
-                    settings: config.settings,
+                    settings: config.settings.clone(),
                     speeds: HashMap::new(),
                     message: Some(format!("Engine failed: {error}")),
+                    bridge: BridgeStatus::starting(config.settings.bridge_port),
                 });
             }
             return;
@@ -195,6 +205,13 @@ fn engine_loop(
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
     let limiter = Arc::new(RateLimiter::new(settings.global_speed_limit_kbps));
+    let bridge_token = Arc::new(RwLock::new(settings.bridge_token.clone()));
+    let bridge = runtime.block_on(bridge::start(
+        settings.bridge_port,
+        bridge_token,
+        bridge_commands,
+    ));
+    let bridge_status = bridge.status.clone();
     let mut state = EngineState {
         store,
         settings,
@@ -205,6 +222,8 @@ fn engine_loop(
         snapshots,
         active: HashMap::new(),
         limiter,
+        bridge: Some(bridge),
+        bridge_status,
         generation: 0,
         speeds: HashMap::new(),
         progress: HashMap::new(),
@@ -818,6 +837,9 @@ impl EngineState {
     }
 
     fn shutdown(&mut self) {
+        if let Some(bridge) = self.bridge.take() {
+            bridge.shutdown();
+        }
         let active: Vec<i64> = self.active.keys().copied().collect();
         for id in active {
             self.flush_segment_progress(id);
@@ -838,6 +860,7 @@ impl EngineState {
             settings: self.settings.clone(),
             speeds: self.speeds.clone(),
             message: self.message.clone(),
+            bridge: self.bridge_status.clone(),
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             *slot = Some(snapshot);

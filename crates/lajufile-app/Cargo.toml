@@ -16,12 +16,15 @@ egui.workspace = true
 egui_extras.workspace = true
 tray-icon.workspace = true
 reqwest.workspace = true
+axum = "0.8"
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tower-http.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-axum = "0.8"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-stream = "0.1"

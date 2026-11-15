@@ -1768,10 +1768,13 @@ dependencies = [
  "egui_extras",
  "lajufile-core",
  "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tower-http",
  "tray-icon",
  "url",
 ]
