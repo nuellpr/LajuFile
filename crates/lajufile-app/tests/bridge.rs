@@ -385,3 +385,32 @@ fn bridge_bind_failure_is_reported() {
     drop(listener);
     handle.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_configured_token_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        bridge_port: 0,
+        bridge_token: String::new(),
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+    let port = bound_port(&handle);
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/downloads"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    handle.shutdown();
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    assert!(store.list_downloads().unwrap().is_empty());
+}

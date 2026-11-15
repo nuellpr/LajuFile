@@ -15,7 +15,7 @@ use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
 use lajufile_core::segment::plan_segments;
 use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented};
-use lajufile_core::settings::Settings;
+use lajufile_core::settings::{Settings, generate_token};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Store, StoreError, now_millis,
@@ -128,6 +128,10 @@ pub enum EngineError {
     Stopped,
 }
 
+fn valid_bridge_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 enum Event {
     Probe {
         request: AddRequest,
@@ -231,6 +235,10 @@ fn engine_loop(
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+    if !valid_bridge_token(&settings.bridge_token) {
+        settings.bridge_token = generate_token();
+        let _ = settings.save(&config.data_dir);
+    }
     let limiter = Arc::new(RateLimiter::new(settings.global_speed_limit_kbps));
     let bridge_token = Arc::new(RwLock::new(settings.bridge_token.clone()));
     let bridge = runtime.block_on(bridge::start(
@@ -875,26 +883,24 @@ impl EngineState {
 
     fn pump_queue(&mut self) {
         let limit = self.settings.max_concurrent.max(1) as usize;
-        loop {
+        let mut queued: Vec<Download> = match self.store.list_downloads() {
+            Ok(downloads) => downloads
+                .into_iter()
+                .filter(|download| {
+                    download.status == DownloadStatus::Queued
+                        && !self.active.contains_key(&download.id)
+                })
+                .collect(),
+            Err(_) => return,
+        };
+        queued.sort_by_key(|download| download.queue_order);
+        for download in queued {
             if self.active.len() >= limit {
                 break;
             }
-            let next = match self.store.list_downloads() {
-                Ok(downloads) => downloads
-                    .into_iter()
-                    .filter(|download| {
-                        download.status == DownloadStatus::Queued
-                            && !self.active.contains_key(&download.id)
-                    })
-                    .min_by_key(|download| download.queue_order),
-                Err(_) => None,
-            };
-            let Some(download) = next else {
-                break;
-            };
-            if !self.start_download(&download) {
-                break;
-            }
+            // A row that fails before starting (bad cookie, invalid URL) must
+            // not block the rest of the queue.
+            self.start_download(&download);
         }
     }
 
@@ -998,6 +1004,9 @@ impl EngineState {
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
         settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+        if !valid_bridge_token(&settings.bridge_token) {
+            settings.bridge_token = generate_token();
+        }
         match settings.save(&self.data_dir) {
             Ok(()) => {
                 self.limiter.set_kbps(settings.global_speed_limit_kbps);

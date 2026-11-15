@@ -227,8 +227,12 @@ fn authorize(
         .get(BRIDGE_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    let expected = token.read().map(|token| token.clone()).unwrap_or_default();
-    if constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
+    let expected = token
+        .read()
+        .ok()
+        .map(|token| token.clone())
+        .unwrap_or_default();
+    if valid_token(&expected) && constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
         Err((
@@ -236,6 +240,10 @@ fn authorize(
             Json(json!({ "error": "unauthorized" })),
         ))
     }
+}
+
+fn valid_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

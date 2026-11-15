@@ -89,15 +89,15 @@ function basename(value) {
 async function capture(item, allowBrowserFallback) {
   const config = await getConfig();
   if (allowBrowserFallback && !config.autoCapture) {
-    return { status: 0, skipped: true };
+    return { status: 0, skipped: true, reason: "disabled" };
   }
   if (!(await health(config.port))) {
-    return { status: 0, skipped: true };
+    return { status: 0, skipped: true, reason: "unreachable" };
   }
 
   const url = item.url || item.finalUrl || item.linkUrl;
   if (!url || !/^https?:/i.test(url)) {
-    return { status: 0, skipped: true };
+    return { status: 0, skipped: true, reason: "unsupported-url" };
   }
 
   const cookie = await cookieHeader(url);
@@ -192,9 +192,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     notify("LajuFile", "Download added to LajuFile.");
   } else if (result.status === 409) {
     notify("LajuFile", "Already in LajuFile.");
-  } else if (result.status === 401) {
-    notify("LajuFile", "Pair the LajuFile extension in its options.");
-  } else if (!result.skipped) {
+  } else if (result.reason === "unreachable") {
     notify("LajuFile", "Could not reach LajuFile. Is it running?");
   }
 });

@@ -5,10 +5,11 @@
 <h1 align="center">LajuFile</h1>
 <p align="center">A fast, native download manager for Windows — built in Rust.</p>
 
-> **Status:** Milestone 4 (browser capture) is complete. LajuFile now has a
-> local bridge and an Edge MV3 extension, alongside segmented downloads,
-> true resume, queues, and a global speed limit. Milestone 5 is release
-> hardening and packaging.
+> **Status:** Milestone 4 is implemented: a local bridge, DPAPI cookie
+> forwarding, and an Edge MV3 extension are in place alongside segmented
+> downloads, true resume, queues, and a global speed limit. The Edge capture
+> flow still needs a manual end-to-end check before it is called verified.
+> Milestone 5 is release hardening and packaging.
 
 ## Why LajuFile
 
