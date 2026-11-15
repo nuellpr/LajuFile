@@ -4,6 +4,7 @@ pub mod dialogs;
 pub mod download_info;
 pub mod folder_picker;
 pub mod format;
+pub mod icons;
 pub mod main_window;
 pub mod theme;
 

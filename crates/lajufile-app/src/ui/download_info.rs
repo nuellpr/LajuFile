@@ -63,6 +63,8 @@ pub fn download_info_dialog(
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                super::icons::draw_file_icon(ui, &draft.file_name, draft.category, false, 40.0);
+                ui.add_space(6.0);
                 ui.label(RichText::new("Category").strong());
                 ui.add_space(8.0);
                 ui.label(category_label(draft.category));

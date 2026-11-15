@@ -550,14 +550,26 @@ pub fn complete_dialog(ctx: &egui::Context, download: &Download) -> (bool, Optio
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_width(480.0);
-            ui.label(RichText::new(&download.file_name).size(14.0).strong());
-            if let Some(size) = download.size {
-                ui.label(
-                    RichText::new(format!("Size: {}", format_size(size)))
-                        .size(11.0)
-                        .color(ui.visuals().weak_text_color()),
+            ui.horizontal(|ui| {
+                super::icons::draw_file_icon(
+                    ui,
+                    &download.file_name,
+                    download.category,
+                    download.kind == "video",
+                    44.0,
                 );
-            }
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&download.file_name).size(14.0).strong());
+                    if let Some(size) = download.size {
+                        ui.label(
+                            RichText::new(format!("Size: {}", format_size(size)))
+                                .size(11.0)
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                });
+            });
             ui.add_space(6.0);
             ui.label(RichText::new("Saved as").strong());
             let mut saved = download.save_path.display().to_string();
