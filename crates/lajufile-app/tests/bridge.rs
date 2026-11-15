@@ -1,9 +1,11 @@
 mod support;
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-use lajufile_app::bridge::BridgeState;
-use lajufile_app::engine::{EngineConfig, EngineHandle, Snapshot};
+use lajufile_app::bridge::{BridgeState, health_check};
+use lajufile_app::engine::{Command, EngineConfig, EngineHandle, Snapshot};
 use lajufile_core::cookie::unprotect_cookie;
 use lajufile_core::settings::Settings;
 use lajufile_core::store::{DownloadStatus, Store};
@@ -63,10 +65,16 @@ fn token_header() -> (HeaderName, HeaderValue) {
 }
 
 async fn post_download(port: u16, body: String) -> reqwest::Response {
-    let (name, value) = token_header();
+    post_download_with_token(port, VALID_TOKEN, body).await
+}
+
+async fn post_download_with_token(port: u16, token: &str, body: String) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/downloads"))
-        .header(name, value)
+        .header(
+            HeaderName::from_static("x-lajufile-token"),
+            HeaderValue::from_str(token).unwrap(),
+        )
         .header("content-type", "application/json")
         .body(body)
         .send()
@@ -300,6 +308,57 @@ async fn bridge_context_is_persisted_encrypted() {
         Some("https://example.test/page")
     );
     assert_eq!(download.user_agent.as_deref(), Some("LajuFileTest/1.0"));
+}
+
+#[test]
+fn health_check_detects_bridge() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    assert!(health_check(port, Duration::from_secs(2)).is_ok());
+    server.join().unwrap();
+
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    assert!(health_check(closed_port, Duration::from_secs(1)).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_rotation_applies_to_live_bridge() {
+    const SECOND_TOKEN: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+
+    let first = post_download_with_token(port, VALID_TOKEN, "{}".to_string()).await;
+    assert_eq!(first.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let mut settings = wait_for(
+        &handle,
+        |snapshot| snapshot.bridge.port == port,
+        Duration::from_secs(5),
+    )
+    .settings;
+    settings.bridge_token = SECOND_TOKEN.to_string();
+    handle.send(Command::UpdateSettings(settings)).unwrap();
+    wait_for(
+        &handle,
+        |snapshot| snapshot.settings.bridge_token == SECOND_TOKEN,
+        Duration::from_secs(5),
+    );
+
+    let old = post_download_with_token(port, VALID_TOKEN, "{}".to_string()).await;
+    assert_eq!(old.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let new = post_download_with_token(port, SECOND_TOKEN, "{}".to_string()).await;
+    assert_eq!(new.status(), reqwest::StatusCode::BAD_REQUEST);
+    handle.shutdown();
 }
 
 #[test]

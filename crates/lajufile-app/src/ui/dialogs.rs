@@ -194,17 +194,42 @@ pub fn settings_dialog(
 
                     ui.separator();
                     section(ui, "Browser capture");
-                    ui.label(format!("Port {}", settings.bridge_port));
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.bridge_port)
+                                .range(1024..=65_535)
+                                .speed(1),
+                        );
+                    });
+                    ui.label(
+                        RichText::new("Port changes apply after restart")
+                            .size(11.0)
+                            .color(ui.visuals().weak_text_color()),
+                    );
                     ui.horizontal(|ui| {
                         ui.label(format!("Token {}", mask_token(&settings.bridge_token)));
-                        if ui.button("Copy token").clicked() {
+                        if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(settings.bridge_token.clone());
+                        }
+                        if ui.button("Regenerate").clicked() {
+                            action = Some(Action::RegenerateToken);
                         }
                     });
                     ui.label(
-                        RichText::new("Bridge and Edge capture arrive in M4")
+                        RichText::new("Regenerating invalidates the old token immediately.")
                             .size(11.0)
                             .color(ui.visuals().weak_text_color()),
+                    );
+                    if ui.button("Test connection").clicked() {
+                        action = Some(Action::TestBridge(settings.bridge_port));
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Paste this port and token into the LajuFile Edge extension options.",
+                        )
+                        .size(11.0)
+                        .color(ui.visuals().weak_text_color()),
                     );
                 });
 

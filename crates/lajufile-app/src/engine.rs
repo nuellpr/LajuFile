@@ -190,6 +190,7 @@ struct EngineState {
     limiter: Arc<RateLimiter>,
     bridge: Option<BridgeServer>,
     bridge_status: BridgeStatus,
+    bridge_token: Arc<RwLock<String>>,
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
@@ -234,7 +235,7 @@ fn engine_loop(
     let bridge_token = Arc::new(RwLock::new(settings.bridge_token.clone()));
     let bridge = runtime.block_on(bridge::start(
         settings.bridge_port,
-        bridge_token,
+        Arc::clone(&bridge_token),
         bridge_commands,
     ));
     let bridge_status = bridge.status.clone();
@@ -250,6 +251,7 @@ fn engine_loop(
         limiter,
         bridge: Some(bridge),
         bridge_status,
+        bridge_token,
         generation: 0,
         speeds: HashMap::new(),
         progress: HashMap::new(),
@@ -995,9 +997,13 @@ impl EngineState {
         settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+        settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
         match settings.save(&self.data_dir) {
             Ok(()) => {
                 self.limiter.set_kbps(settings.global_speed_limit_kbps);
+                if let Ok(mut token) = self.bridge_token.write() {
+                    *token = settings.bridge_token.clone();
+                }
                 self.settings = settings;
                 self.pump_queue();
             }

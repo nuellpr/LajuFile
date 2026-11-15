@@ -1,4 +1,5 @@
-use std::net::Ipv4Addr;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -246,4 +247,35 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         difference |= left ^ right;
     }
     difference == 0
+}
+
+pub fn health_check(port: u16, timeout: Duration) -> Result<(), String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("connect failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("write timeout: {error}"))?;
+    stream
+        .write_all(
+            format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .map_err(|error| format!("request failed: {error}"))?;
+    let mut buffer = [0u8; 64];
+    let read = stream
+        .read(&mut buffer)
+        .map_err(|error| format!("response failed: {error}"))?;
+    let status = String::from_utf8_lossy(&buffer[..read]);
+    let mut parts = status.split_whitespace();
+    let protocol = parts.next().unwrap_or_default();
+    let code = parts.next().unwrap_or_default();
+    if protocol.starts_with("HTTP/") && code == "200" {
+        Ok(())
+    } else {
+        Err(format!("unexpected health response: {status:?}"))
+    }
 }
