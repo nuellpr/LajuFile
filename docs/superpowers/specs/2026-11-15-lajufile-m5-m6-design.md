@@ -35,10 +35,10 @@ formats and downloads the chosen one.
 
 ## Non-goals
 
-- Prompting for a folder on every browser capture. The bridge returns in 5 s;
-  waiting for a dialog would time the request out, and a cancelled dialog would
-  leave the browser copy already removed. Captures keep using the default
-  folder, and the user can move the file later.
+- ~~Prompting for a folder on every browser capture.~~ Changed after review:
+  the user wants IDM behavior for captures too. The extension pauses the Edge
+  download, the bridge waits up to 65 s for the folder choice, 201 cancels the
+  Edge copy, and 204 (cancel or timeout) resumes it. Implemented in M5.
 - Subtitles, thumbnails, chapters, playlists, and DRM-protected media.
 - A general purpose site grabber (IDM's Site Grabber is out of scope).
 - Auto-updating yt-dlp/ffmpeg on a schedule. A manual "Update tools" action is

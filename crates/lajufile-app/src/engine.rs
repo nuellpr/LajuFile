@@ -88,6 +88,10 @@ pub enum Command {
         request: BridgeAddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
     },
+    CaptureFolderDecision {
+        key: u64,
+        path: Option<PathBuf>,
+    },
     Pause(i64),
     Resume(i64),
     Remove(i64),
@@ -110,12 +114,19 @@ pub struct AddRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct CapturePrompt {
+    pub key: u64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub downloads: Vec<Download>,
     pub settings: Settings,
     pub speeds: HashMap<i64, u64>,
     pub message: Option<String>,
     pub bridge: BridgeStatus,
+    pub pending_capture: Option<CapturePrompt>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -201,6 +212,13 @@ struct EngineState {
     pending_segments: HashMap<(i64, u32), u64>,
     last_persist: HashMap<i64, Instant>,
     message: Option<String>,
+    pending_captures: HashMap<u64, PendingCapture>,
+    next_capture_key: u64,
+}
+
+struct PendingCapture {
+    request: BridgeAddRequest,
+    reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
 }
 
 fn engine_loop(
@@ -224,6 +242,7 @@ fn engine_loop(
                     speeds: HashMap::new(),
                     message: Some(format!("Engine failed: {error}")),
                     bridge: BridgeStatus::starting(config.settings.bridge_port),
+                    pending_capture: None,
                 });
             }
             return;
@@ -266,6 +285,8 @@ fn engine_loop(
         pending_segments: HashMap::new(),
         last_persist: HashMap::new(),
         message: None,
+        pending_captures: HashMap::new(),
+        next_capture_key: 0,
     };
 
     state.normalize_startup();
@@ -319,6 +340,9 @@ impl EngineState {
                 }
             }
             Command::BridgeAdd { request, reply } => self.handle_bridge_add(request, reply),
+            Command::CaptureFolderDecision { key, path } => {
+                self.capture_folder_decision(key, path);
+            }
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
             Command::Remove(id) => self.remove(id),
@@ -402,28 +426,44 @@ impl EngineState {
             }
         }
 
-        let user_agent = request
-            .user_agent
-            .clone()
-            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
-        let probe_request = ProbeRequest {
-            url,
-            options: RequestOptions {
-                user_agent: Some(user_agent),
-                referrer: request.referrer.clone(),
-                cookie: request.cookie.clone(),
-            },
-            timeout: Duration::from_secs(3),
-        };
         let add = AddRequest {
             url: normalized_url,
-            file_name: request.filename,
+            file_name: request.filename.clone(),
             save_dir: None,
             start_now: true,
             connections: None,
-            referrer: request.referrer,
-            user_agent: request.user_agent,
-            cookie: request.cookie,
+            referrer: request.referrer.clone(),
+            user_agent: request.user_agent.clone(),
+            cookie: request.cookie.clone(),
+        };
+        if self.settings.ask_where_to_save {
+            let key = self.next_capture_key;
+            self.next_capture_key = self.next_capture_key.wrapping_add(1);
+            self.pending_captures
+                .insert(key, PendingCapture { request, reply });
+            self.message = Some("Waiting for a save folder".to_string());
+            return;
+        }
+        self.spawn_bridge_probe(url, add, reply);
+    }
+
+    fn spawn_bridge_probe(
+        &mut self,
+        url: Url,
+        add: AddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    ) {
+        let probe_request = ProbeRequest {
+            url,
+            options: RequestOptions {
+                user_agent: add
+                    .user_agent
+                    .clone()
+                    .or_else(|| Some(DEFAULT_USER_AGENT.to_string())),
+                referrer: add.referrer.clone(),
+                cookie: add.cookie.clone(),
+            },
+            timeout: Duration::from_secs(3),
         };
         let client = self.client.clone();
         let events = self.events.clone();
@@ -435,6 +475,36 @@ impl EngineState {
                 result: Box::new(result),
             });
         });
+    }
+
+    fn capture_folder_decision(&mut self, key: u64, path: Option<PathBuf>) {
+        let Some(pending) = self.pending_captures.remove(&key) else {
+            return;
+        };
+        match path {
+            Some(path) => {
+                let Ok(url) = Url::parse(&pending.request.url) else {
+                    let _ = pending
+                        .reply
+                        .send(BridgeAddOutcome::Invalid("invalid URL".to_string()));
+                    return;
+                };
+                let add = AddRequest {
+                    url: pending.request.url.clone(),
+                    file_name: pending.request.filename.clone(),
+                    save_dir: Some(path),
+                    start_now: true,
+                    connections: None,
+                    referrer: pending.request.referrer.clone(),
+                    user_agent: pending.request.user_agent.clone(),
+                    cookie: pending.request.cookie.clone(),
+                };
+                self.spawn_bridge_probe(url, add, pending.reply);
+            }
+            None => {
+                let _ = pending.reply.send(BridgeAddOutcome::Canceled);
+            }
+        }
     }
 
     fn handle_probe(
@@ -1026,6 +1096,9 @@ impl EngineState {
         if let Some(bridge) = self.bridge.take() {
             bridge.shutdown();
         }
+        for (_, pending) in self.pending_captures.drain() {
+            let _ = pending.reply.send(BridgeAddOutcome::Canceled);
+        }
         let active: Vec<i64> = self.active.keys().copied().collect();
         for id in active {
             self.flush_segment_progress(id);
@@ -1047,6 +1120,12 @@ impl EngineState {
             speeds: self.speeds.clone(),
             message: self.message.clone(),
             bridge: self.bridge_status.clone(),
+            pending_capture: self.pending_captures.iter().next().map(|(key, pending)| {
+                CapturePrompt {
+                    key: *key,
+                    url: pending.request.url.clone(),
+                }
+            }),
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             *slot = Some(snapshot);

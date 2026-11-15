@@ -33,6 +33,8 @@ pub struct LajuFileApp {
     pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
     pub(crate) folder_picker: Option<FolderPicker>,
     pub(crate) pending_add: Option<AddRequest>,
+    pub(crate) pending_capture: Option<u64>,
+    pub(crate) dismissed_capture: Option<u64>,
 }
 
 impl LajuFileApp {
@@ -80,6 +82,8 @@ impl LajuFileApp {
             bridge_test: None,
             folder_picker: None,
             pending_add: None,
+            pending_capture: None,
+            dismissed_capture: None,
         }
     }
 
@@ -109,7 +113,19 @@ impl LajuFileApp {
             self.theme = snapshot.settings.theme.clone();
             apply_theme(ctx, &self.theme);
         }
+        let pending_key = snapshot.pending_capture.as_ref().map(|prompt| prompt.key);
         self.snapshot = Some(snapshot);
+        match pending_key {
+            Some(key) if self.dismissed_capture != Some(key) => {
+                if self.folder_picker.is_none() && self.pending_capture.is_none() {
+                    self.pending_capture = Some(key);
+                    self.pending_add = None;
+                    self.folder_picker = Some(FolderPicker::new(self.default_save_dir()));
+                }
+            }
+            Some(_) => {}
+            None => self.dismissed_capture = None,
+        }
     }
 
     fn poll_bridge_test(&mut self) {
@@ -190,6 +206,7 @@ impl LajuFileApp {
 
     fn open_folder_picker(&mut self) {
         self.pending_add = None;
+        self.pending_capture = None;
         self.folder_picker = Some(FolderPicker::new(self.default_save_dir()));
     }
 
@@ -214,13 +231,25 @@ impl LajuFileApp {
         match picker.show(ctx) {
             Some(FolderChoice::Select(path)) => {
                 self.add_draft.folder = path.display().to_string();
-                if let Some(mut request) = self.pending_add.take() {
+                if let Some(key) = self.pending_capture.take() {
+                    self.dismissed_capture = Some(key);
+                    self.send(Command::CaptureFolderDecision {
+                        key,
+                        path: Some(path),
+                    });
+                } else if let Some(mut request) = self.pending_add.take() {
                     request.save_dir = Some(path);
                     self.send(Command::Add(request));
                     self.show_add = false;
                 }
             }
-            Some(FolderChoice::Cancel) => self.pending_add = None,
+            Some(FolderChoice::Cancel) => {
+                if let Some(key) = self.pending_capture.take() {
+                    self.dismissed_capture = Some(key);
+                    self.send(Command::CaptureFolderDecision { key, path: None });
+                }
+                self.pending_add = None;
+            }
             None => self.folder_picker = Some(picker),
         }
     }

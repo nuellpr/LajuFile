@@ -38,7 +38,7 @@ async function health(port) {
 async function postDownload(payload) {
   const config = await getConfig();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(() => controller.abort(), 70000);
   try {
     const response = await fetch(`http://127.0.0.1:${config.port}/downloads`, {
       method: "POST",
@@ -125,6 +125,20 @@ async function cancelAndErase(id) {
   await new Promise((resolve) => chrome.downloads.erase({ id }, () => resolve()));
 }
 
+// The bridge may wait up to a minute for the user to pick a save folder, so
+// the browser copy is held while LajuFile asks instead of racing it.
+async function pauseItem(id) {
+  try {
+    await chrome.downloads.pause(id);
+  } catch {}
+}
+
+async function resumeItem(id) {
+  try {
+    await chrome.downloads.resume(id);
+  } catch {}
+}
+
 function markHandled(id) {
   handledIds.add(id);
   setTimeout(() => handledIds.delete(id), 60000);
@@ -147,9 +161,12 @@ if (chrome.downloads.onDeterminingFilename) {
 
     markHandled(item.id);
     (async () => {
+      await pauseItem(item.id);
       const result = await capture(item, true);
       if (result.status === 201 || result.status === 409) {
         await cancelAndErase(item.id);
+      } else {
+        await resumeItem(item.id);
       }
       finish();
     })().catch(finish);
@@ -165,9 +182,12 @@ chrome.downloads.onCreated.addListener((item) => {
     const url = item.finalUrl || item.url;
     if (!url || !/^https?:/i.test(url)) return;
     markHandled(id);
+    await pauseItem(id);
     const result = await capture({ ...item, url }, true);
     if (result.status === 201 || result.status === 409) {
       await cancelAndErase(id);
+    } else {
+      await resumeItem(id);
     }
   }, 1500);
 });

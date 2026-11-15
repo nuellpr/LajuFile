@@ -414,3 +414,84 @@ async fn empty_configured_token_fails_closed() {
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert!(store.list_downloads().unwrap().is_empty());
 }
+
+fn start_engine_prompt(port: u16) -> (EngineHandle, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        bridge_port: port,
+        bridge_token: VALID_TOKEN.to_string(),
+        ask_where_to_save: true,
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+    (handle, dir)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_prompt_queues_into_chosen_folder() {
+    let server = start_server();
+    let (handle, dir) = start_engine_prompt(0);
+    let port = bound_port(&handle);
+    let chosen = dir.path().join("chosen");
+    let body = format!(r#"{{"url":"{}/file.bin"}}"#, server.base);
+    let request = tokio::spawn(async move { post_download(port, body).await });
+
+    let snapshot = wait_for(
+        &handle,
+        |snapshot| snapshot.pending_capture.is_some(),
+        Duration::from_secs(5),
+    );
+    let key = snapshot.pending_capture.as_ref().unwrap().key;
+    handle
+        .send(Command::CaptureFolderDecision {
+            key,
+            path: Some(chosen.clone()),
+        })
+        .unwrap();
+
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let snapshot = wait_for(
+        &handle,
+        |snapshot| {
+            snapshot
+                .downloads
+                .iter()
+                .any(|download| download.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(10),
+    );
+    assert!(snapshot.downloads[0].save_path.starts_with(&chosen));
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_prompt_cancel_returns_204_without_record() {
+    let server = start_server();
+    let (handle, dir) = start_engine_prompt(0);
+    let port = bound_port(&handle);
+    let body = format!(r#"{{"url":"{}/file.bin"}}"#, server.base);
+    let request = tokio::spawn(async move { post_download(port, body).await });
+
+    let snapshot = wait_for(
+        &handle,
+        |snapshot| snapshot.pending_capture.is_some(),
+        Duration::from_secs(5),
+    );
+    let key = snapshot.pending_capture.as_ref().unwrap().key;
+    handle
+        .send(Command::CaptureFolderDecision { key, path: None })
+        .unwrap();
+
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    handle.shutdown();
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    assert!(store.list_downloads().unwrap().is_empty());
+}

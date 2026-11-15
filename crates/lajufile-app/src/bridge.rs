@@ -45,6 +45,7 @@ pub enum BridgeAddOutcome {
     },
     Invalid(String),
     ProbeFailed(String),
+    Canceled,
     Internal(String),
 }
 
@@ -184,7 +185,7 @@ async fn downloads(
         return Err(internal("engine stopped"));
     }
 
-    let outcome = tokio::time::timeout(Duration::from_secs(5), response)
+    let outcome = tokio::time::timeout(Duration::from_secs(65), response)
         .await
         .map_err(|_| internal("engine timeout"))?
         .map_err(|_| internal("engine stopped"))?;
@@ -205,6 +206,7 @@ async fn downloads(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({ "error": message })),
         ),
+        BridgeAddOutcome::Canceled => (StatusCode::NO_CONTENT, Json(json!({}))),
         BridgeAddOutcome::Internal(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": message })),
