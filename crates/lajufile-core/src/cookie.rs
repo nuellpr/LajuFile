@@ -85,10 +85,9 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use rand::RngCore;
     use std::os::unix::fs::PermissionsExt;
 
-    use super::CookieError;
+    use super::{CookieError, open_with_key, seal_with_key};
     use crate::paths;
 
     fn user_key() -> Result<[u8; 32], CookieError> {
@@ -100,81 +99,91 @@ mod platform {
         {
             return Ok(key);
         }
-        let mut key = [0u8; 32];
-        rand::rng().fill_bytes(&mut key);
+        let key = rand::random::<[u8; 32]>();
         std::fs::write(&key_path, key).map_err(|e| CookieError::Dpapi(e.to_string()))?;
         let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
         Ok(key)
     }
 
-    fn keystream_byte(key: &[u8; 32], nonce: &[u8; 16], index: usize) -> u8 {
-        let mut acc = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        for (i, &k) in key.iter().enumerate() {
-            let n = nonce[i % 16] as u64;
-            acc = acc
-                .wrapping_add((k as u64) ^ n.rotate_left((i as u32) * 3))
-                .rotate_left(7)
-                .wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        }
-        (acc ^ (acc >> 32)) as u8
-    }
-
-    fn compute_tag(key: &[u8; 32], nonce: &[u8; 16], body: &[u8]) -> [u8; 16] {
-        let mut state = [0u64; 2];
-        for i in 0..16 {
-            state[i / 8] |= (nonce[i] as u64) << ((i % 8) * 8);
-        }
-        for (idx, &b) in body.iter().chain(key.iter()).enumerate() {
-            let lane = idx & 1;
-            state[lane] = state[lane]
-                .wrapping_add((b as u64).wrapping_mul(0x94D0_49BB_1331_11EB))
-                .rotate_left(13)
-                ^ state[1 - lane];
-        }
-        let mut out = [0u8; 16];
-        out[..8].copy_from_slice(&state[0].to_le_bytes());
-        out[8..].copy_from_slice(&state[1].to_le_bytes());
-        out
-    }
-
     pub fn protect(cookie: &str) -> Result<Vec<u8>, CookieError> {
         let key = user_key()?;
-        let mut nonce = [0u8; 16];
-        rand::rng().fill_bytes(&mut nonce);
-        let body: Vec<u8> = cookie
-            .as_bytes()
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ keystream_byte(&key, &nonce, i))
-            .collect();
-        let tag = compute_tag(&key, &nonce, &body);
-        let mut out = Vec::with_capacity(32 + body.len());
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&tag);
-        out.extend_from_slice(&body);
-        Ok(out)
+        Ok(seal_with_key(&key, cookie))
     }
 
     pub fn unprotect(ciphertext: &[u8]) -> Result<String, CookieError> {
-        if ciphertext.len() <= 32 {
-            return Err(CookieError::Dpapi("invalid cookie blob".to_string()));
-        }
         let key = user_key()?;
-        let nonce: [u8; 16] = ciphertext[..16].try_into().unwrap();
-        let tag = &ciphertext[16..32];
-        let body = &ciphertext[32..];
-        if compute_tag(&key, &nonce, body) != tag {
-            return Err(CookieError::Dpapi(
-                "cookie authentication failed".to_string(),
-            ));
-        }
-        let plain: Vec<u8> = body
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ keystream_byte(&key, &nonce, i))
-            .collect();
-        String::from_utf8(plain).map_err(|_| CookieError::Utf8)
+        open_with_key(&key, ciphertext)
     }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn keystream_byte(key: &[u8; 32], nonce: &[u8; 16], index: usize) -> u8 {
+    let mut acc = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for (i, &k) in key.iter().enumerate() {
+        let n = u64::from(nonce[i % 16]);
+        acc = acc
+            .wrapping_add(u64::from(k) ^ n.rotate_left((i as u32) * 3))
+            .rotate_left(7)
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    }
+    (acc ^ (acc >> 32)) as u8
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn compute_tag(key: &[u8; 32], nonce: &[u8; 16], body: &[u8]) -> [u8; 16] {
+    let mut state = [0u64; 2];
+    for (i, &n) in nonce.iter().enumerate() {
+        state[i / 8] |= u64::from(n) << ((i % 8) * 8);
+    }
+    for (idx, &b) in body.iter().chain(key.iter()).enumerate() {
+        let lane = idx & 1;
+        state[lane] = state[lane]
+            .wrapping_add(u64::from(b).wrapping_mul(0x94D0_49BB_1331_11EB))
+            .rotate_left(13)
+            ^ state[1 - lane];
+    }
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&state[0].to_le_bytes());
+    out[8..].copy_from_slice(&state[1].to_le_bytes());
+    out
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn seal_with_key(key: &[u8; 32], cookie: &str) -> Vec<u8> {
+    let nonce = rand::random::<[u8; 16]>();
+    let body: Vec<u8> = cookie
+        .as_bytes()
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ keystream_byte(key, &nonce, i))
+        .collect();
+    let tag = compute_tag(key, &nonce, &body);
+    let mut out = Vec::with_capacity(32 + body.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&body);
+    out
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn open_with_key(key: &[u8; 32], ciphertext: &[u8]) -> Result<String, CookieError> {
+    if ciphertext.len() <= 32 {
+        return Err(CookieError::Dpapi("invalid cookie blob".to_string()));
+    }
+    let nonce: [u8; 16] = ciphertext[..16].try_into().unwrap();
+    let tag = &ciphertext[16..32];
+    let body = &ciphertext[32..];
+    if compute_tag(key, &nonce, body) != tag {
+        return Err(CookieError::Dpapi(
+            "cookie authentication failed".to_string(),
+        ));
+    }
+    let plain: Vec<u8> = body
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ keystream_byte(key, &nonce, i))
+        .collect();
+    String::from_utf8(plain).map_err(|_| CookieError::Utf8)
 }
 
 pub fn protect_cookie(cookie: &str) -> Result<Vec<u8>, CookieError> {
@@ -190,4 +199,19 @@ pub fn unprotect_cookie(ciphertext: &[u8]) -> Result<String, CookieError> {
         return Err(CookieError::Dpapi("cookie blob is empty".to_string()));
     }
     platform::unprotect(ciphertext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyed_cookie_roundtrip_and_tamper_check() {
+        let key = [7u8; 32];
+        let sealed = seal_with_key(&key, "sid=123");
+        assert_eq!(open_with_key(&key, &sealed).unwrap(), "sid=123");
+        let mut tampered = sealed.clone();
+        tampered[20] ^= 1;
+        assert!(open_with_key(&key, &tampered).is_err());
+    }
 }

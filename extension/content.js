@@ -145,14 +145,14 @@ async function showFormats(menu, url) {
 }
 
 function createPlayIcon() {
-  const badge = document.createElement("span");
-  badge.style.cssText =
-    "display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:3px;background:linear-gradient(180deg,#5ee649 0%,#1ca814 55%,#127d0c 100%);border:1px solid #0e6309;box-shadow:inset 0 1px 0 rgba(255,255,255,0.65);flex-shrink:0;";
-  const tri = document.createElement("span");
-  tri.style.cssText =
-    "display:block;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:7px solid #ffffff;margin-left:2px;";
-  badge.append(tri);
-  return badge;
+  const img = document.createElement("img");
+  img.src = chrome.runtime.getURL("icons/icon-32.png");
+  img.alt = "";
+  img.width = 16;
+  img.height = 16;
+  img.style.cssText =
+    "display:block;width:16px;height:16px;border-radius:3px;flex-shrink:0;object-fit:contain;pointer-events:none;";
+  return img;
 }
 
 function styleSmallControl(btn) {

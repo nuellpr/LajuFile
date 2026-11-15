@@ -13,7 +13,7 @@ rust-version = "1.85"
 arboard = "3"
 content_disposition = "0.4"
 directories = "6"
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links", "x11", "wayland"] }
 egui = "0.37"
 egui_extras = "0.37"
 hex = "0.4"
