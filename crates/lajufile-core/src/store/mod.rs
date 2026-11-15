@@ -307,6 +307,15 @@ impl Store {
         Ok(total)
     }
 
+    /// Fills in a size discovered after the row was created (video jobs).
+    pub fn set_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE downloads SET size = ?1 WHERE id = ?2 AND size IS NULL",
+            params![size as i64, id],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_done(&mut self, id: i64, completed_at: i64) -> Result<(), StoreError> {
         let changed = self.conn.execute(
             "UPDATE downloads
@@ -376,4 +385,32 @@ fn row_to_download(row: &Row<'_>) -> Result<Download, StoreError> {
         created_at: row.get(21)?,
         completed_at: row.get(22)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_database_upgrades_to_video_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO downloads (url, file_name, save_path, temp_path, status, category, connections, queue_order, created_at)
+                 VALUES ('https://example.com/a.bin', 'a.bin', 'C:/a.bin', 'C:/a.bin.lajufile', 'done', 'other', 1, 1, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let rows = store.list_downloads().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "http");
+        assert_eq!(rows[0].video_format, None);
+    }
 }

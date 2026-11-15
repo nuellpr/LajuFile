@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -107,6 +107,8 @@ pub enum Command {
         url: String,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     },
+    UpdateTools,
+    ToolsInstalled(Result<(), String>),
     Shutdown,
 }
 
@@ -169,6 +171,12 @@ enum Event {
         generation: u64,
         done: u64,
     },
+    VideoProgress {
+        id: i64,
+        generation: u64,
+        done: u64,
+        total: Option<u64>,
+    },
     SegmentProgress {
         id: i64,
         generation: u64,
@@ -220,6 +228,8 @@ struct EngineState {
     client: reqwest::Client,
     runtime: Runtime,
     events: Sender<Event>,
+    commands: Sender<Command>,
+    tools_installing: bool,
     snapshots: Arc<Mutex<Option<Snapshot>>>,
     active: HashMap<i64, ActiveDownload>,
     limiter: Arc<RateLimiter>,
@@ -280,6 +290,7 @@ fn engine_loop(
     }
     let limiter = Arc::new(RateLimiter::new(settings.global_speed_limit_kbps));
     let bridge_token = Arc::new(RwLock::new(settings.bridge_token.clone()));
+    let engine_commands = bridge_commands.clone();
     let bridge = runtime.block_on(bridge::start(
         settings.bridge_port,
         Arc::clone(&bridge_token),
@@ -293,6 +304,8 @@ fn engine_loop(
         client,
         runtime,
         events: event_tx,
+        commands: engine_commands,
+        tools_installing: false,
         snapshots,
         active: HashMap::new(),
         limiter,
@@ -372,6 +385,15 @@ impl EngineState {
             Command::ResumeAll => self.resume_all(),
             Command::UpdateSettings(settings) => self.update_settings(settings),
             Command::VideoFormats { url, reply } => self.video_formats(url, reply),
+            Command::UpdateTools => self.update_tools(),
+            Command::ToolsInstalled(result) => {
+                self.tools_installing = false;
+                self.message = Some(match result {
+                    Ok(()) => "Tools ready".to_string(),
+                    Err(error) => format!("Tools failed: {error}"),
+                });
+                self.pump_queue();
+            }
             Command::Shutdown => {
                 self.shutdown();
                 return true;
@@ -495,6 +517,13 @@ impl EngineState {
         add: AddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
     ) {
+        if !tools::tools_ready(&tools::tools_dir()) {
+            self.ensure_tools();
+            let _ = reply.send(BridgeAddOutcome::ProbeFailed(
+                "the video tools are downloading, try again in a minute".to_string(),
+            ));
+            return;
+        }
         let _ = reply.send(match self.insert_video(add) {
             Ok(inserted) => BridgeAddOutcome::Created {
                 id: inserted.id,
@@ -725,12 +754,28 @@ impl EngineState {
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| video_file_name(&request.url)),
         );
-        let base_name = if base_name.ends_with(".mp4") {
+        let base_name = if base_name.to_ascii_lowercase().ends_with(".mp4") {
             base_name
         } else {
             format!("{base_name}.mp4")
         };
-        let save_path = dedupe_path(&dir, &base_name);
+        // Reserve the temp name so two jobs queued before either file exists cannot
+        // collide on one save path.
+        let mut save_path = dedupe_path(&dir, &base_name);
+        let temp_path = loop {
+            let candidate = temp_path_for(&save_path);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(_) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    save_path = dedupe_path(&dir, &base_name);
+                }
+                Err(error) => return Err(InsertError::Failed(error.to_string())),
+            }
+        };
         let file_name = save_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -743,7 +788,7 @@ impl EngineState {
             url: request.url.clone(),
             final_url: Some(request.url),
             file_name: file_name.clone(),
-            temp_path: temp_path_for(&save_path),
+            temp_path,
             save_path,
             size: None,
             status: DownloadStatus::Queued,
@@ -780,6 +825,33 @@ impl EngineState {
         }
     }
 
+    fn update_tools(&mut self) {
+        if tools::tools_ready(&tools::tools_dir()) {
+            self.message = Some("Tools ready".to_string());
+            return;
+        }
+        self.ensure_tools();
+    }
+
+    /// Downloads yt-dlp + ffmpeg once; video jobs work after it lands.
+    fn ensure_tools(&mut self) {
+        if self.tools_installing {
+            self.message = Some("Downloading tools...".to_string());
+            return;
+        }
+        let dir = tools::tools_dir();
+        if tools::tools_ready(&dir) {
+            return;
+        }
+        self.tools_installing = true;
+        self.message = Some("Downloading tools...".to_string());
+        let commands = self.commands.clone();
+        thread::spawn(move || {
+            let result = tools::install_tools(&dir);
+            let _ = commands.send(Command::ToolsInstalled(result));
+        });
+    }
+
     /// Runs `yt-dlp -J` off the engine loop; the reply carries the title and qualities.
     fn video_formats(
         &mut self,
@@ -788,30 +860,14 @@ impl EngineState {
     ) {
         let dir = tools::tools_dir();
         if !tools::tools_ready(&dir) {
-            let _ = reply.send(Err("the video tools are not installed".to_string()));
+            self.ensure_tools();
+            let _ = reply.send(Err(
+                "the video tools are downloading, try again in a minute".to_string(),
+            ));
             return;
         }
         thread::spawn(move || {
-            let output = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP))
-                .args(["--no-playlist", "-J", "--", &url])
-                .stdin(Stdio::null())
-                .output();
-            let result = match output {
-                Ok(output) if output.status.success() => serde_json::from_slice(&output.stdout)
-                    .map(|json| video::listing(&json))
-                    .map_err(|error| format!("yt-dlp: {error}")),
-                Ok(output) => Err(format!(
-                    "yt-dlp: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )),
-                Err(error) => Err(format!("yt-dlp: {error}")),
-            };
-            let _ = reply.send(match result {
-                Ok(listing) if listing.choices.is_empty() => {
-                    Err("this link has no downloadable formats".to_string())
-                }
-                other => other,
-            });
+            let _ = reply.send(ytdlp_listing(&dir, &url));
         });
     }
 
@@ -848,6 +904,31 @@ impl EngineState {
             } => {
                 if self.active.get(&id).map(|active| active.generation) != Some(generation) {
                     return;
+                }
+                self.record_speed(id, done);
+                self.pending_segments.insert((id, 0), done);
+                let should_persist = self
+                    .last_persist
+                    .get(&id)
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(1));
+                if should_persist {
+                    self.flush_segment_progress(id);
+                    self.last_persist.insert(id, Instant::now());
+                }
+            }
+            Event::VideoProgress {
+                id,
+                generation,
+                done,
+                total,
+            } => {
+                if self.active.get(&id).map(|active| active.generation) != Some(generation) {
+                    return;
+                }
+                if let Some(total) = total
+                    && total > 0
+                {
+                    let _ = self.store.set_size(id, total);
                 }
                 self.record_speed(id, done);
                 self.pending_segments.insert((id, 0), done);
@@ -1126,10 +1207,11 @@ impl EngineState {
     fn spawn_video(&mut self, download: &Download, generation: u64) -> bool {
         let dir = tools::tools_dir();
         if !tools::tools_ready(&dir) {
+            // No download here: a test (or a fresh profile) must not hit the network.
             let _ = self.store.update_status(
                 download.id,
                 DownloadStatus::Error,
-                Some("the video tools are not installed"),
+                Some("the video tools are not installed, install them in Settings"),
             );
             return false;
         }
@@ -1145,11 +1227,7 @@ impl EngineState {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
+        tools::no_window(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -1166,11 +1244,12 @@ impl EngineState {
             let events = self.events.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(done) = parse_progress(&line) {
-                        let _ = events.send(Event::Progress {
+                    if let Some((done, total)) = parse_progress(&line) {
+                        let _ = events.send(Event::VideoProgress {
                             id,
                             generation,
                             done,
+                            total,
                         });
                     }
                 }
@@ -1484,6 +1563,59 @@ fn video_file_name(url: &str) -> String {
     }
 }
 
+/// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
+fn ytdlp_listing(dir: &Path, url: &str) -> Result<VideoListing, String> {
+    let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
+    command
+        .args(["--no-playlist", "-J", "--", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    tools::no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("yt-dlp: {error}"))?;
+    let stdout = read_all(child.stdout.take());
+    let stderr = read_all(child.stderr.take());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                tools::kill_tree(child.id());
+                let _ = child.wait();
+                return Err("yt-dlp did not answer in time".to_string());
+            }
+            Err(error) => return Err(format!("yt-dlp: {error}")),
+        }
+    };
+    let output = stdout.join().unwrap_or_default();
+    if !status.success() {
+        let error = String::from_utf8_lossy(&stderr.join().unwrap_or_default())
+            .trim()
+            .to_string();
+        return Err(format!("yt-dlp: {error}"));
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&output).map_err(|error| format!("yt-dlp: {error}"))?;
+    let listing = video::listing(&json);
+    if listing.choices.is_empty() {
+        return Err("this link has no downloadable formats".to_string());
+    }
+    Ok(listing)
+}
+
+fn read_all<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut reader) = reader {
+            let _ = reader.read_to_end(&mut buffer);
+        }
+        buffer
+    })
+}
+
 /// yt-dlp arguments for one video job: merge to mp4 next to the target path.
 fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> Vec<OsString> {
     vec![
@@ -1493,9 +1625,10 @@ fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> 
         "mp4".into(),
         "--ffmpeg-location".into(),
         tools_dir.as_os_str().to_owned(),
-        // Machine-readable progress, one line per update: "LF <downloaded> <total>".
+        // Machine-readable progress, one line per update:
+        // "LF <downloaded> <total> <estimate>", either total may be NA.
         "--progress-template".into(),
-        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s".into(),
+        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s".into(),
         "-f".into(),
         selector.into(),
         "-o".into(),
@@ -1504,23 +1637,27 @@ fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> 
     ]
 }
 
-fn parse_progress(line: &str) -> Option<u64> {
-    line.strip_prefix("LF ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+fn parse_progress(line: &str) -> Option<(u64, Option<u64>)> {
+    let mut fields = line.strip_prefix("LF ")?.split_whitespace();
+    let done = fields.next()?.parse().ok()?;
+    let total = fields
+        .next()
+        .and_then(|text| text.parse().ok())
+        .or_else(|| fields.next().and_then(|text| text.parse().ok()));
+    Some((done, total))
 }
 
 fn stop_video(active: &mut ActiveDownload) {
     if let Some(mut run) = active.video.take() {
-        let _ = run.child.kill();
+        // yt-dlp's ffmpeg child survives a plain kill and would finish the merge.
+        tools::kill_tree(run.child.id());
         let _ = run.child.wait();
         remove_parts(&run.save_path);
     }
 }
 
-/// Drops yt-dlp's `.part` files left by a killed run (`name.part`, `name.f137.mp4.part`).
+/// Drops the temp files yt-dlp leaves behind: `name.part`, `name.part-Frag<N>`,
+/// `name.ytdl`, `name.f137.mp4.part-Frag<N>` and `name.temp.mp4`.
 fn remove_parts(save_path: &Path) {
     let (Some(dir), Some(name)) = (
         save_path.parent(),
@@ -1528,12 +1665,22 @@ fn remove_parts(save_path: &Path) {
     ) else {
         return;
     };
+    let stem = save_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name.starts_with(name) && file_name.ends_with(".part") {
+        let ours = file_name.starts_with(name) || file_name.starts_with(&format!("{stem}."));
+        let temp = file_name.ends_with(".part")
+            || file_name.contains(".part-Frag")
+            || file_name.ends_with(".ytdl")
+            || file_name.ends_with(".temp.mp4")
+            || file_name.ends_with(".lajufile");
+        if ours && temp {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -1556,9 +1703,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_lines_carry_downloaded_bytes() {
-        assert_eq!(parse_progress("LF 1234 5678"), Some(1234));
-        assert_eq!(parse_progress("LF 99 NA"), Some(99));
+    fn progress_lines_carry_downloaded_bytes_and_total() {
+        assert_eq!(
+            parse_progress("LF 1234 5678 5678"),
+            Some((1234, Some(5678)))
+        );
+        assert_eq!(parse_progress("LF 99 NA 4321"), Some((99, Some(4321))));
+        assert_eq!(parse_progress("LF 99 NA NA"), Some((99, None)));
         assert_eq!(parse_progress("[youtube] Extracting URL"), None);
         assert_eq!(parse_progress(""), None);
     }
@@ -1611,15 +1762,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let save = dir.path().join("clip.mp4");
         std::fs::write(&save, b"x").unwrap();
-        std::fs::write(dir.path().join("clip.mp4.part"), b"x").unwrap();
-        std::fs::write(dir.path().join("clip.mp4.f137.mp4.part"), b"x").unwrap();
+        let leftovers = [
+            "clip.mp4.part",
+            "clip.mp4.f137.mp4.part",
+            "clip.mp4.part-Frag12",
+            "clip.mp4.ytdl",
+            "clip.mp4.temp.mp4",
+            "clip.mp4.lajufile",
+        ];
+        for name in leftovers {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
         std::fs::write(dir.path().join("other.mp4.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("clip.mp4"), b"final").unwrap();
 
         remove_parts(&save);
 
-        assert!(save.exists());
+        assert_eq!(std::fs::read(&save).unwrap(), b"final");
         assert!(dir.path().join("other.mp4.part").exists());
-        assert!(!dir.path().join("clip.mp4.part").exists());
-        assert!(!dir.path().join("clip.mp4.f137.mp4.part").exists());
+        for name in leftovers {
+            assert!(!dir.path().join(name).exists(), "{name} should be removed");
+        }
     }
 }

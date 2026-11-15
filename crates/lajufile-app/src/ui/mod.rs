@@ -67,6 +67,7 @@ pub enum Action {
     PauseAll,
     ResumeAll,
     TestBridge(u16),
+    UpdateTools,
     RegenerateToken,
     Exit,
 }

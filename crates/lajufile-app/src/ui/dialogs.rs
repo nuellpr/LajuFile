@@ -255,6 +255,23 @@ pub fn settings_dialog(
                     });
 
                     ui.separator();
+                    section(ui, "Video");
+                    let tools_dir = crate::tools::tools_dir();
+                    let ready = crate::tools::tools_ready(&tools_dir);
+                    ui.label(format!(
+                        "yt-dlp and ffmpeg: {}",
+                        if ready { "installed" } else { "not installed" }
+                    ));
+                    ui.label(
+                        RichText::new(tools_dir.display().to_string())
+                            .size(11.0)
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    if ui.button("Install or update video tools").clicked() {
+                        action = Some(Action::UpdateTools);
+                    }
+
+                    ui.separator();
                     section(ui, "Browser capture");
                     ui.horizontal(|ui| {
                         ui.label("Port");

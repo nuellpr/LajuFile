@@ -412,6 +412,7 @@ impl LajuFileApp {
                 Action::RegenerateToken => {
                     self.settings_draft.bridge_token = generate_token();
                 }
+                Action::UpdateTools => self.send(Command::UpdateTools),
             }
         }
     }

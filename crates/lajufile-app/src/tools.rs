@@ -28,19 +28,15 @@ pub fn install_tools(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create {dir:?}: {error}"))?;
 
     let ytdlp = tool_path(dir, YTDLP);
-    run(
-        "curl.exe",
-        &["-L", "--fail", "-o", path_arg(&ytdlp)?, YTDLP_URL],
-    )?;
+    download(&ytdlp, YTDLP_URL)?;
 
     let zip = dir.join("ffmpeg.zip");
-    run(
-        "curl.exe",
-        &["-L", "--fail", "-o", path_arg(&zip)?, FFMPEG_ZIP_URL],
-    )?;
+    download(&zip, FFMPEG_ZIP_URL)?;
 
     let extract = dir.join("ffmpeg-extract");
     let _ = std::fs::remove_dir_all(&extract);
+    // tar refuses an extraction directory that does not exist yet.
+    std::fs::create_dir_all(&extract).map_err(|error| format!("create {extract:?}: {error}"))?;
     run(
         "tar.exe",
         &["-xf", path_arg(&zip)?, "-C", path_arg(&extract)?],
@@ -65,9 +61,42 @@ fn path_arg(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("path is not valid UTF-8: {path:?}"))
 }
 
+/// Downloads to `<target>.part` and renames on success, so a truncated file never
+/// passes `tools_ready`.
+fn download(target: &Path, url: &str) -> Result<(), String> {
+    let mut part = target.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    run("curl.exe", &["-L", "--fail", "-o", path_arg(&part)?, url])?;
+    std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))
+}
+
+/// Keeps a console window from flashing: the app has no console in release.
+pub fn no_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+}
+
+/// Kills a process and its children: yt-dlp spawns ffmpeg, which `kill()` leaves running.
+pub fn kill_tree(pid: u32) {
+    let mut command = std::process::Command::new("taskkill");
+    command
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    no_window(&mut command);
+    let _ = command.status();
+}
+
 fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = std::process::Command::new(program)
-        .args(args)
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    no_window(&mut command);
+    let output = command
         .output()
         .map_err(|error| format!("{program}: {error}"))?;
     if output.status.success() {
