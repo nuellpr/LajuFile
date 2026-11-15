@@ -194,6 +194,10 @@ async fn bridge_add_creates_download_and_returns_201() {
         Duration::from_secs(15),
     );
     assert!(snapshot.downloads[0].save_path.exists());
+    let final_path = snapshot.downloads[0].save_path.clone();
+    let temp_path = snapshot.downloads[0].temp_path.clone();
+    assert_eq!(std::fs::metadata(&final_path).unwrap().len(), 1_048_576);
+    assert!(!temp_path.exists());
     handle.shutdown();
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert_eq!(store.list_downloads().unwrap().len(), 1);
