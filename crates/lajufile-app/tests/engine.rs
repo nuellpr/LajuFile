@@ -47,6 +47,7 @@ fn add_probes_and_inserts() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 
@@ -84,6 +85,7 @@ fn add_missing_url_keeps_store_empty() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 
@@ -123,6 +125,7 @@ fn add_duplicate_active_is_rejected() {
         referrer: None,
         user_agent: None,
         cookie: None,
+        video_format: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -146,6 +149,7 @@ fn add_duplicate_active_is_rejected() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
     let second = wait_for(
@@ -186,6 +190,7 @@ fn back_to_back_duplicate_is_rejected() {
                 referrer: None,
                 user_agent: None,
                 cookie: None,
+                video_format: None,
             }))
             .unwrap();
     }
@@ -225,6 +230,7 @@ fn same_explicit_name_gets_distinct_paths() {
                 referrer: None,
                 user_agent: None,
                 cookie: None,
+                video_format: None,
             }))
             .unwrap();
     }
@@ -268,6 +274,7 @@ fn pause_persists_every_segment_before_status_change() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -528,6 +535,7 @@ fn add_start_now_downloads_file() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 
@@ -577,6 +585,7 @@ fn queue_never_exceeds_max_concurrent() {
                 referrer: None,
                 user_agent: None,
                 cookie: None,
+                video_format: None,
             }))
             .unwrap();
     }
@@ -641,6 +650,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -700,6 +710,7 @@ fn remove_deletes_record_and_temp() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -752,6 +763,7 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 
@@ -794,6 +806,7 @@ fn range_ignored_falls_back_to_single() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 
@@ -836,6 +849,7 @@ fn pause_and_resume_continue_from_offset() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -909,6 +923,7 @@ fn add_records_requested_connections() {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format: None,
         }))
         .unwrap();
 

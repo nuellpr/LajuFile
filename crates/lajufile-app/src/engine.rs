@@ -13,7 +13,7 @@ use lajufile_core::download::{
     DownloadError, DownloadOutcome, DownloadSpec, download_single_with_limiter,
 };
 use lajufile_core::http::{DEFAULT_USER_AGENT, RequestOptions, build_client};
-use lajufile_core::naming::{dedupe_path, resolve_file_name, temp_path_for};
+use lajufile_core::naming::{dedupe_path, resolve_file_name, sanitize_file_name, temp_path_for};
 use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
 use lajufile_core::segment::plan_segments;
@@ -21,8 +21,9 @@ use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented
 use lajufile_core::settings::{Settings, generate_token};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
-    Category, Download, DownloadStatus, NewDownload, Store, StoreError, now_millis,
+    Category, Download, DownloadStatus, NewDownload, Segment, Store, StoreError, now_millis,
 };
+use lajufile_core::video::{self, DEFAULT_SELECTOR, VideoListing};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -102,6 +103,10 @@ pub enum Command {
     PauseAll,
     ResumeAll,
     UpdateSettings(Settings),
+    VideoFormats {
+        url: String,
+        reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
+    },
     Shutdown,
 }
 
@@ -115,6 +120,8 @@ pub struct AddRequest {
     pub referrer: Option<String>,
     pub user_agent: Option<String>,
     pub cookie: Option<String>,
+    /// yt-dlp selector; `Some` means the add is queued as a video job, not probed.
+    pub video_format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +371,7 @@ impl EngineState {
             Command::PauseAll => self.pause_all(),
             Command::ResumeAll => self.resume_all(),
             Command::UpdateSettings(settings) => self.update_settings(settings),
+            Command::VideoFormats { url, reply } => self.video_formats(url, reply),
             Command::Shutdown => {
                 self.shutdown();
                 return true;
@@ -385,6 +393,20 @@ impl EngineState {
             }
             Ok(None) => {}
             Err(error) => return Some(format!("Add failed: {error}")),
+        }
+
+        if request.video_format.is_some() {
+            let request = AddRequest {
+                url: normalized_url,
+                ..request
+            };
+            return Some(match self.insert_video(request) {
+                Ok(inserted) => format!("Added {}", inserted.file_name),
+                Err(InsertError::Duplicate(existing)) => {
+                    format!("Already in LajuFile: {}", existing.file_name)
+                }
+                Err(InsertError::Failed(error)) => format!("Add failed: {error}"),
+            });
         }
 
         let user_agent = request
@@ -450,6 +472,7 @@ impl EngineState {
             referrer: request.referrer.clone(),
             user_agent: request.user_agent.clone(),
             cookie: request.cookie.clone(),
+            video_format: request.video_format.clone(),
         };
         if self.settings.ask_where_to_save {
             let key = self.next_capture_key;
@@ -459,7 +482,28 @@ impl EngineState {
             self.message = Some("Waiting for a save folder".to_string());
             return;
         }
+        if add.video_format.is_some() {
+            self.finish_video_add(add, reply);
+            return;
+        }
         self.spawn_bridge_probe(url, add, reply);
+    }
+
+    /// Replies to a `/video` request: the row exists or the caller gets the reason.
+    fn finish_video_add(
+        &mut self,
+        add: AddRequest,
+        reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
+    ) {
+        let _ = reply.send(match self.insert_video(add) {
+            Ok(inserted) => BridgeAddOutcome::Created {
+                id: inserted.id,
+                filename: inserted.file_name,
+                size: None,
+            },
+            Err(InsertError::Duplicate(existing)) => BridgeAddOutcome::Conflict { id: existing.id },
+            Err(InsertError::Failed(error)) => BridgeAddOutcome::ProbeFailed(error),
+        });
     }
 
     fn spawn_bridge_probe(
@@ -513,7 +557,12 @@ impl EngineState {
                     referrer: pending.request.referrer.clone(),
                     user_agent: pending.request.user_agent.clone(),
                     cookie: pending.request.cookie.clone(),
+                    video_format: pending.request.video_format.clone(),
                 };
+                if add.video_format.is_some() {
+                    self.finish_video_add(add, pending.reply);
+                    return;
+                }
                 self.spawn_bridge_probe(url, add, pending.reply);
             }
             None => {
@@ -656,6 +705,114 @@ impl EngineState {
                 Err(InsertError::Failed(error.to_string()))
             }
         }
+    }
+
+    /// Queues a yt-dlp job: no probe, no temp file, no parallel ranges.
+    fn insert_video(&mut self, request: AddRequest) -> Result<Inserted, InsertError> {
+        let dir = request
+            .save_dir
+            .clone()
+            .unwrap_or_else(|| self.settings.download_dir.clone());
+        if let Err(error) = ensure_dir(&dir) {
+            return Err(InsertError::Failed(error.to_string()));
+        }
+
+        let base_name = sanitize_file_name(
+            &request
+                .file_name
+                .clone()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| video_file_name(&request.url)),
+        );
+        let base_name = if base_name.ends_with(".mp4") {
+            base_name
+        } else {
+            format!("{base_name}.mp4")
+        };
+        let save_path = dedupe_path(&dir, &base_name);
+        let file_name = save_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(base_name);
+        let queue_order = match self.store.next_queue_order() {
+            Ok(order) => order,
+            Err(error) => return Err(InsertError::Failed(error.to_string())),
+        };
+        let new = NewDownload {
+            url: request.url.clone(),
+            final_url: Some(request.url),
+            file_name: file_name.clone(),
+            temp_path: temp_path_for(&save_path),
+            save_path,
+            size: None,
+            status: DownloadStatus::Queued,
+            category: Category::Video,
+            kind: "video".to_string(),
+            video_format: request.video_format,
+            connections: 1,
+            ranged: false,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: request.referrer,
+            user_agent: request.user_agent,
+            queue_order,
+            created_at: now_millis(),
+            segments: vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 0,
+                done: 0,
+            }],
+        };
+
+        match self.store.insert_download(&new) {
+            Ok(id) => {
+                self.pump_queue();
+                Ok(Inserted {
+                    id,
+                    file_name,
+                    size: None,
+                })
+            }
+            Err(error) => Err(InsertError::Failed(error.to_string())),
+        }
+    }
+
+    /// Runs `yt-dlp -J` off the engine loop; the reply carries the title and qualities.
+    fn video_formats(
+        &mut self,
+        url: String,
+        reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
+    ) {
+        let dir = tools::tools_dir();
+        if !tools::tools_ready(&dir) {
+            let _ = reply.send(Err("the video tools are not installed".to_string()));
+            return;
+        }
+        thread::spawn(move || {
+            let output = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP))
+                .args(["--no-playlist", "-J", "--", &url])
+                .stdin(Stdio::null())
+                .output();
+            let result = match output {
+                Ok(output) if output.status.success() => serde_json::from_slice(&output.stdout)
+                    .map(|json| video::listing(&json))
+                    .map_err(|error| format!("yt-dlp: {error}")),
+                Ok(output) => Err(format!(
+                    "yt-dlp: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(error) => Err(format!("yt-dlp: {error}")),
+            };
+            let _ = reply.send(match result {
+                Ok(listing) if listing.choices.is_empty() => {
+                    Err("this link has no downloadable formats".to_string())
+                }
+                other => other,
+            });
+        });
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -976,10 +1133,15 @@ impl EngineState {
             );
             return false;
         }
-        let selector = download.video_format.as_deref().unwrap_or(DEFAULT_VIDEO_FORMAT);
+        let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
         let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
         command
-            .args(video_args(selector, &download.save_path, &download.url, &dir))
+            .args(video_args(
+                selector,
+                &download.save_path,
+                &download.url,
+                &dir,
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1074,7 +1236,9 @@ impl EngineState {
                 } else {
                     message
                 };
-                let _ = self.store.update_status(id, DownloadStatus::Error, Some(&message));
+                let _ = self
+                    .store
+                    .update_status(id, DownloadStatus::Error, Some(&message));
                 let _ = std::fs::remove_file(&run.save_path);
                 remove_parts(&run.save_path);
             }
@@ -1288,7 +1452,37 @@ impl EngineState {
     }
 }
 
-const DEFAULT_VIDEO_FORMAT: &str = "bv*+ba/b";
+/// File name for a video link that came without one: the YouTube id, else the last path segment.
+fn video_file_name(url: &str) -> String {
+    let id = Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "v")
+                .map(|(_, value)| value.into_owned())
+                .or_else(|| {
+                    url.path_segments()
+                        .and_then(|mut segments| segments.next_back().map(str::to_string))
+                })
+        })
+        .unwrap_or_default();
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let safe = safe.trim_matches('-');
+    if safe.is_empty() {
+        "video.mp4".to_string()
+    } else {
+        format!("{safe}.mp4")
+    }
+}
 
 /// yt-dlp arguments for one video job: merge to mp4 next to the target path.
 fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> Vec<OsString> {
@@ -1382,14 +1576,34 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
 
-        assert_eq!(args[args.iter().position(|a| a == "-f").unwrap() + 1], "bv*[height<=360]+ba");
-        assert_eq!(args[args.iter().position(|a| a == "-o").unwrap() + 1], "C:/dl/clip.mp4");
         assert_eq!(
-            args[args.iter().position(|a| a == "--merge-output-format").unwrap() + 1],
+            args[args.iter().position(|a| a == "-f").unwrap() + 1],
+            "bv*[height<=360]+ba"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "-o").unwrap() + 1],
+            "C:/dl/clip.mp4"
+        );
+        assert_eq!(
+            args[args
+                .iter()
+                .position(|a| a == "--merge-output-format")
+                .unwrap()
+                + 1],
             "mp4"
         );
         assert!(args.iter().any(|arg| arg == "--progress-template"));
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");
+    }
+
+    #[test]
+    fn video_file_name_uses_the_youtube_id() {
+        assert_eq!(
+            video_file_name("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            "dQw4w9WgXcQ.mp4"
+        );
+        assert_eq!(video_file_name("https://youtu.be/abc123"), "abc123.mp4");
+        assert_eq!(video_file_name("not a url"), "video.mp4");
     }
 
     #[test]

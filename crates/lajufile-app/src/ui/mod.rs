@@ -61,6 +61,7 @@ pub enum Action {
     OpenSettings,
     OpenFolderPicker,
     Add(AddRequest),
+    LoadFormats(String),
     SaveSettings(Settings),
     SetTheme(Theme),
     PauseAll,

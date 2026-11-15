@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use lajufile_core::paths;
 use lajufile_core::settings::{Settings, Theme, generate_token};
 use lajufile_core::store::{Category, DownloadStatus};
+use lajufile_core::video::VideoListing;
 
 use crate::bridge;
 use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
@@ -32,6 +33,7 @@ pub struct LajuFileApp {
     pub(crate) allow_exit: bool,
     pub(crate) tray_tooltip: String,
     pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
+    pub(crate) formats: Option<tokio::sync::oneshot::Receiver<Result<VideoListing, String>>>,
     pub(crate) folder_picker: Option<FolderPicker>,
     pub(crate) pending_add: Option<AddRequest>,
     pub(crate) capture_info: Option<(u64, DownloadInfoDraft)>,
@@ -81,6 +83,7 @@ impl LajuFileApp {
             allow_exit: false,
             tray_tooltip: String::new(),
             bridge_test: None,
+            formats: None,
             folder_picker: None,
             pending_add: None,
             capture_info: None,
@@ -165,6 +168,25 @@ impl LajuFileApp {
                 self.bridge_test = None;
             }
             Some(Err(mpsc::TryRecvError::Disconnected)) => self.bridge_test = None,
+            _ => {}
+        }
+    }
+
+    fn poll_formats(&mut self) {
+        let received = self.formats.as_mut().map(|rx| rx.try_recv());
+        match received {
+            Some(Ok(Ok(listing))) => {
+                if self.add_draft.file_name.trim().is_empty() {
+                    self.add_draft.file_name = format!("{}.mp4", listing.title);
+                }
+                self.add_draft.formats = listing.choices;
+                self.formats = None;
+            }
+            Some(Ok(Err(error))) => {
+                self.toast = Some((format!("Qualities failed: {error}"), Instant::now()));
+                self.formats = None;
+            }
+            Some(Err(tokio::sync::oneshot::error::TryRecvError::Closed)) => self.formats = None,
             _ => {}
         }
     }
@@ -358,6 +380,11 @@ impl LajuFileApp {
                     self.show_settings = true;
                 }
                 Action::Add(request) => self.handle_add(request),
+                Action::LoadFormats(url) => {
+                    let (reply, rx) = tokio::sync::oneshot::channel();
+                    self.send(Command::VideoFormats { url, reply });
+                    self.formats = Some(rx);
+                }
                 Action::OpenFolderPicker => self.open_folder_picker(),
                 Action::SaveSettings(mut settings) => {
                     normalize_settings(&mut settings);
@@ -410,6 +437,7 @@ impl eframe::App for LajuFileApp {
         self.poll_tray(ctx);
         self.poll_engine(ctx);
         self.poll_bridge_test();
+        self.poll_formats();
         self.update_tray_tooltip();
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -505,7 +533,7 @@ mod tests {
             file_name: "  ".into(),
             folder: " ".into(),
             start_now: true,
-            connections: 8,
+            ..AddDraft::default()
         };
         let request = draft.into_request();
         assert_eq!(request.url, "https://example.com/a.bin");

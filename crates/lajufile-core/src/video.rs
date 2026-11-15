@@ -18,6 +18,27 @@ pub struct QualityChoice {
     pub selector: String,
 }
 
+/// Selector used when no quality is picked: best video plus best audio.
+pub const DEFAULT_SELECTOR: &str = "bv*+ba/b";
+
+/// What `yt-dlp -J` reports before a download: the title and the quality list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoListing {
+    pub title: String,
+    pub choices: Vec<QualityChoice>,
+}
+
+pub fn listing(json: &Value) -> VideoListing {
+    VideoListing {
+        title: json
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("video")
+            .to_string(),
+        choices: quality_choices(&parse_formats(json)),
+    }
+}
+
 /// Formats from a `yt-dlp -J` document, keeping only entries with a format id.
 pub fn parse_formats(json: &Value) -> Vec<VideoFormat> {
     let Some(formats) = json.get("formats").and_then(Value::as_array) else {
@@ -129,5 +150,15 @@ mod tests {
     fn missing_formats_yield_no_choices() {
         assert!(parse_formats(&json!({})).is_empty());
         assert!(quality_choices(&[]).is_empty());
+    }
+
+    #[test]
+    fn listing_keeps_the_title_and_choices() {
+        let mut sample = sample();
+        sample["title"] = json!("A clip");
+        let parsed = listing(&sample);
+        assert_eq!(parsed.title, "A clip");
+        assert_eq!(parsed.choices.len(), 4);
+        assert_eq!(listing(&json!({})).title, "video");
     }
 }

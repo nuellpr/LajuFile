@@ -31,6 +31,14 @@ pub struct BridgeAddRequest {
     pub user_agent: Option<String>,
     #[serde(default)]
     pub cookie: Option<String>,
+    /// yt-dlp selector; when set the request is queued as a video job.
+    #[serde(default)]
+    pub video_format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FormatsRequest {
+    url: String,
 }
 
 #[derive(Debug)]
@@ -149,6 +157,8 @@ fn router(state: BridgeAppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/downloads", post(downloads))
+        .route("/video", post(video))
+        .route("/video/formats", post(video_formats))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(
             CorsLayer::new()
@@ -169,13 +179,75 @@ async fn downloads(
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     authorize(&headers, &state.token)?;
-    let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid request" })),
-        )
-    })?;
+    let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+    queue_add(&state, request).await
+}
 
+async fn video(
+    State(state): State<BridgeAppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    authorize(&headers, &state.token)?;
+    let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+    if request
+        .video_format
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "video_format is required" })),
+        ));
+    }
+    queue_add(&state, request).await
+}
+
+async fn video_formats(
+    State(state): State<BridgeAppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&headers, &state.token)?;
+    let request: FormatsRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
+
+    let (reply, response) = tokio::sync::oneshot::channel();
+    if state
+        .commands
+        .send(Command::VideoFormats {
+            url: request.url,
+            reply,
+        })
+        .is_err()
+    {
+        return Err(internal("engine stopped"));
+    }
+    let listing = tokio::time::timeout(Duration::from_secs(65), response)
+        .await
+        .map_err(|_| internal("engine timeout"))?
+        .map_err(|_| internal("engine stopped"))?;
+
+    match listing {
+        Ok(listing) => {
+            let formats: Vec<Value> = listing
+                .choices
+                .iter()
+                .map(|choice| json!({ "selector": choice.selector, "label": choice.label }))
+                .collect();
+            Ok(Json(json!({ "title": listing.title, "formats": formats })))
+        }
+        Err(message) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": message })),
+        )),
+    }
+}
+
+async fn queue_add(
+    state: &BridgeAppState,
+    request: BridgeAddRequest,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let (reply, response) = tokio::sync::oneshot::channel();
     if state
         .commands
@@ -218,6 +290,13 @@ fn internal(message: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": message })),
+    )
+}
+
+fn invalid_body() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "invalid request" })),
     )
 }
 

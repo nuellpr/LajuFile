@@ -415,6 +415,91 @@ async fn empty_configured_token_fails_closed() {
     assert!(store.list_downloads().unwrap().is_empty());
 }
 
+async fn post_json(port: u16, path: &str, body: serde_json::Value) -> reqwest::Response {
+    let (name, value) = token_header();
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}{path}"))
+        .header(name, value)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A tools dir with both files present, so `tools_ready` passes; the empty
+/// `yt-dlp.exe` then fails to spawn, which is the error path under test.
+fn stub_tools() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join("lajufile-bridge-tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yt-dlp.exe"), b"").unwrap();
+        std::fs::write(dir.join("ffmpeg.exe"), b"").unwrap();
+        unsafe { std::env::set_var("LAJUFILE_TOOLS_DIR", &dir) };
+        dir
+    })
+    .clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn video_formats_reports_a_broken_yt_dlp_with_422() {
+    stub_tools();
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let response = post_json(
+        port,
+        "/video/formats",
+        serde_json::json!({ "url": "https://www.youtube.com/watch?v=abc" }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let json: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(
+        json["error"].as_str().is_some_and(|e| e.contains("yt-dlp")),
+        "unexpected body: {json}"
+    );
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn video_post_queues_a_video_row() {
+    stub_tools();
+    let (handle, dir) = start_engine(0);
+    let port = bound_port(&handle);
+
+    let missing = post_json(
+        port,
+        "/video",
+        serde_json::json!({ "url": "https://www.youtube.com/watch?v=abc" }),
+    )
+    .await;
+    assert_eq!(missing.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let response = post_json(
+        port,
+        "/video",
+        serde_json::json!({
+            "url": "https://www.youtube.com/watch?v=abc",
+            "video_format": "bv*[height<=360]+ba"
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let json: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(json["filename"], "abc.mp4");
+    handle.shutdown();
+
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    let downloads = store.list_downloads().unwrap();
+    assert_eq!(downloads.len(), 1);
+    assert_eq!(downloads[0].kind, "video");
+    assert_eq!(
+        downloads[0].video_format.as_deref(),
+        Some("bv*[height<=360]+ba")
+    );
+}
+
 fn start_engine_prompt(port: u16) -> (EngineHandle, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {

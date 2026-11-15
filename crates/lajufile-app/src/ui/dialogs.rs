@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Align, Layout, RichText, Ui};
 use lajufile_core::settings::{Settings, Theme};
+use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice};
 
 use crate::engine::AddRequest;
 
@@ -16,6 +17,9 @@ pub struct AddDraft {
     pub folder: String,
     pub start_now: bool,
     pub connections: u32,
+    /// yt-dlp selector picked in the quality combo; `None` means best available.
+    pub quality: Option<String>,
+    pub formats: Vec<QualityChoice>,
 }
 
 impl Default for AddDraft {
@@ -26,6 +30,8 @@ impl Default for AddDraft {
             folder: String::new(),
             start_now: true,
             connections: 8,
+            quality: None,
+            formats: Vec::new(),
         }
     }
 }
@@ -39,6 +45,11 @@ impl AddDraft {
     }
 
     pub fn into_request(self) -> AddRequest {
+        let video_format = youtube_url(&self.url).then(|| {
+            self.quality
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
+        });
         AddRequest {
             url: self.url.trim().to_string(),
             file_name: non_empty(self.file_name),
@@ -48,8 +59,20 @@ impl AddDraft {
             referrer: None,
             user_agent: None,
             cookie: None,
+            video_format,
         }
     }
+}
+
+/// True for the YouTube hosts yt-dlp handles.
+pub fn youtube_url(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    matches!(
+        url.host_str(),
+        Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be")
+    )
 }
 
 pub fn add_dialog(
@@ -105,6 +128,36 @@ pub fn add_dialog(
                     .size(11.0)
                     .color(ui.visuals().weak_text_color()),
             );
+
+            if youtube_url(&draft.url) {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Video quality").strong());
+                if draft.formats.is_empty() {
+                    if ui.button("Load qualities").clicked() {
+                        action = Some(Action::LoadFormats(draft.url.trim().to_string()));
+                    }
+                } else {
+                    let chosen = draft
+                        .formats
+                        .iter()
+                        .position(|choice| Some(&choice.selector) == draft.quality.as_ref())
+                        .map_or(0, |index| index + 1);
+                    let mut selected = chosen;
+                    egui::ComboBox::from_id_salt("quality")
+                        .selected_text(match selected {
+                            0 => "Best available".to_string(),
+                            index => draft.formats[index - 1].label.clone(),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected, 0, "Best available");
+                            for (index, choice) in draft.formats.iter().enumerate() {
+                                ui.selectable_value(&mut selected, index + 1, &choice.label);
+                            }
+                        });
+                    draft.quality =
+                        (selected > 0).then(|| draft.formats[selected - 1].selector.clone());
+                }
+            }
 
             ui.add_space(12.0);
             ui.separator();
@@ -287,7 +340,7 @@ mod tests {
             file_name: " a.bin ".into(),
             folder: " D:\\Downloads ".into(),
             start_now: false,
-            connections: 8,
+            ..AddDraft::default()
         }
         .into_request();
         assert_eq!(request.url, "https://example.com/a.bin");
@@ -295,6 +348,31 @@ mod tests {
         assert_eq!(request.save_dir, Some(PathBuf::from("D:\\Downloads")));
         assert!(!request.start_now);
         assert_eq!(request.connections, Some(8));
+        assert_eq!(request.video_format, None);
+    }
+
+    #[test]
+    fn youtube_links_become_video_jobs() {
+        assert!(youtube_url("https://www.youtube.com/watch?v=abc"));
+        assert!(youtube_url("https://youtu.be/abc"));
+        assert!(youtube_url("https://m.youtube.com/watch?v=abc"));
+        assert!(!youtube_url("https://example.com/a.bin"));
+        assert!(!youtube_url("nonsense"));
+
+        let request = AddDraft {
+            url: "https://youtu.be/abc".into(),
+            ..AddDraft::default()
+        }
+        .into_request();
+        assert_eq!(request.video_format.as_deref(), Some(DEFAULT_SELECTOR));
+
+        let chosen = AddDraft {
+            url: "https://youtu.be/abc".into(),
+            quality: Some("bv*[height<=720]+ba".into()),
+            ..AddDraft::default()
+        }
+        .into_request();
+        assert_eq!(chosen.video_format.as_deref(), Some("bv*[height<=720]+ba"));
     }
 
     #[test]
