@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -26,6 +29,7 @@ use url::Url;
 use crate::bridge::{BridgeAddOutcome, BridgeAddRequest};
 
 use crate::bridge::{self, BridgeServer, BridgeStatus};
+use crate::tools;
 
 pub struct EngineConfig {
     pub data_dir: PathBuf,
@@ -179,7 +183,16 @@ enum Event {
 
 struct ActiveDownload {
     generation: u64,
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+    video: Option<VideoRun>,
+}
+
+/// A running `yt-dlp` child; the engine polls it for exit instead of awaiting it,
+/// so pause and cancel can kill the process.
+struct VideoRun {
+    child: std::process::Child,
+    save_path: PathBuf,
+    last_error: Arc<Mutex<String>>,
 }
 
 struct Inserted {
@@ -305,6 +318,8 @@ fn engine_loop(
         while let Ok(event) = event_rx.try_recv() {
             state.handle_event(event);
         }
+
+        state.poll_videos();
 
         if last_publish.elapsed() >= Duration::from_millis(250) {
             state.publish();
@@ -843,6 +858,9 @@ impl EngineState {
             referrer: download.referrer.clone(),
             cookie,
         };
+        if download.kind == "video" {
+            return self.spawn_video(download, generation);
+        }
         let id = download.id;
         let events = self.events.clone();
         let limiter = self.limiter.clone();
@@ -937,9 +955,135 @@ impl EngineState {
                 });
             })
         };
-        self.active
-            .insert(id, ActiveDownload { generation, handle });
+        self.active.insert(
+            id,
+            ActiveDownload {
+                generation,
+                handle: Some(handle),
+                video: None,
+            },
+        );
         true
+    }
+
+    fn spawn_video(&mut self, download: &Download, generation: u64) -> bool {
+        let dir = tools::tools_dir();
+        if !tools::tools_ready(&dir) {
+            let _ = self.store.update_status(
+                download.id,
+                DownloadStatus::Error,
+                Some("the video tools are not installed"),
+            );
+            return false;
+        }
+        let selector = download.video_format.as_deref().unwrap_or(DEFAULT_VIDEO_FORMAT);
+        let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
+        command
+            .args(video_args(selector, &download.save_path, &download.url, &dir))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = self.store.update_status(
+                    download.id,
+                    DownloadStatus::Error,
+                    Some(&format!("yt-dlp: {error}")),
+                );
+                return false;
+            }
+        };
+        let id = download.id;
+        if let Some(stdout) = child.stdout.take() {
+            let events = self.events.clone();
+            thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(done) = parse_progress(&line) {
+                        let _ = events.send(Event::Progress {
+                            id,
+                            generation,
+                            done,
+                        });
+                    }
+                }
+            });
+        }
+        let last_error = Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let slot = Arc::clone(&last_error);
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = line;
+                    }
+                }
+            });
+        }
+        self.active.insert(
+            id,
+            ActiveDownload {
+                generation,
+                handle: None,
+                video: Some(VideoRun {
+                    child,
+                    save_path: download.save_path.clone(),
+                    last_error,
+                }),
+            },
+        );
+        true
+    }
+
+    fn poll_videos(&mut self) {
+        let exited: Vec<(i64, bool)> = self
+            .active
+            .iter_mut()
+            .filter_map(|(id, active)| {
+                let status = active.video.as_mut()?.child.try_wait().ok()??;
+                Some((*id, status.success()))
+            })
+            .collect();
+        for (id, success) in exited {
+            let Some(mut active) = self.active.remove(&id) else {
+                continue;
+            };
+            let Some(run) = active.video.take() else {
+                continue;
+            };
+            self.flush_segment_progress(id);
+            if success {
+                let _ = self.store.mark_done(id, now_millis());
+            } else {
+                let message = run
+                    .last_error
+                    .lock()
+                    .map(|line| line.clone())
+                    .unwrap_or_default();
+                let message = if message.is_empty() {
+                    "yt-dlp failed".to_string()
+                } else {
+                    message
+                };
+                let _ = self.store.update_status(id, DownloadStatus::Error, Some(&message));
+                let _ = std::fs::remove_file(&run.save_path);
+                remove_parts(&run.save_path);
+            }
+            self.speeds.remove(&id);
+            self.progress.remove(&id);
+            self.last_persist.remove(&id);
+            self.clear_pending(id);
+            self.pump_queue();
+        }
     }
 
     fn reset_to_single(&mut self, id: i64, reason: &str) {
@@ -982,8 +1126,11 @@ impl EngineState {
 
     fn pause_with_pump(&mut self, id: i64, pump: bool) {
         self.flush_segment_progress(id);
-        if let Some(active) = self.active.remove(&id) {
-            active.handle.abort();
+        if let Some(mut active) = self.active.remove(&id) {
+            stop_video(&mut active);
+            if let Some(handle) = active.handle.take() {
+                handle.abort();
+            }
             self.speeds.remove(&id);
             self.progress.remove(&id);
             self.last_persist.remove(&id);
@@ -1015,9 +1162,12 @@ impl EngineState {
     }
 
     fn remove(&mut self, id: i64) {
-        if let Some(active) = self.active.remove(&id) {
-            active.handle.abort();
-            let _ = self.runtime.block_on(active.handle);
+        if let Some(mut active) = self.active.remove(&id) {
+            stop_video(&mut active);
+            if let Some(handle) = active.handle.take() {
+                handle.abort();
+                let _ = self.runtime.block_on(handle);
+            }
         }
         let temp_path = self
             .store
@@ -1104,8 +1254,11 @@ impl EngineState {
         let active: Vec<i64> = self.active.keys().copied().collect();
         for id in active {
             self.flush_segment_progress(id);
-            if let Some(download) = self.active.remove(&id) {
-                download.handle.abort();
+            if let Some(mut download) = self.active.remove(&id) {
+                stop_video(&mut download);
+                if let Some(handle) = download.handle.take() {
+                    handle.abort();
+                }
                 let _ = self.store.update_status(id, DownloadStatus::Paused, None);
             }
             self.clear_pending(id);
@@ -1135,6 +1288,63 @@ impl EngineState {
     }
 }
 
+const DEFAULT_VIDEO_FORMAT: &str = "bv*+ba/b";
+
+/// yt-dlp arguments for one video job: merge to mp4 next to the target path.
+fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> Vec<OsString> {
+    vec![
+        "--no-playlist".into(),
+        "--newline".into(),
+        "--merge-output-format".into(),
+        "mp4".into(),
+        "--ffmpeg-location".into(),
+        tools_dir.as_os_str().to_owned(),
+        // Machine-readable progress, one line per update: "LF <downloaded> <total>".
+        "--progress-template".into(),
+        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s".into(),
+        "-f".into(),
+        selector.into(),
+        "-o".into(),
+        save_path.as_os_str().to_owned(),
+        url.into(),
+    ]
+}
+
+fn parse_progress(line: &str) -> Option<u64> {
+    line.strip_prefix("LF ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn stop_video(active: &mut ActiveDownload) {
+    if let Some(mut run) = active.video.take() {
+        let _ = run.child.kill();
+        let _ = run.child.wait();
+        remove_parts(&run.save_path);
+    }
+}
+
+/// Drops yt-dlp's `.part` files left by a killed run (`name.part`, `name.f137.mp4.part`).
+fn remove_parts(save_path: &Path) {
+    let (Some(dir), Some(name)) = (
+        save_path.parent(),
+        save_path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.starts_with(name) && file_name.ends_with(".part") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn segmented_error(error: SegmentedError) -> DownloadError {
     match error {
         SegmentedError::Download(error) => error,
@@ -1144,5 +1354,58 @@ fn segmented_error(error: SegmentedError) -> DownloadError {
         SegmentedError::RangeIgnored | SegmentedError::RestartRequired => {
             DownloadError::Io(std::io::Error::other("segmented fallback was not handled"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_lines_carry_downloaded_bytes() {
+        assert_eq!(parse_progress("LF 1234 5678"), Some(1234));
+        assert_eq!(parse_progress("LF 99 NA"), Some(99));
+        assert_eq!(parse_progress("[youtube] Extracting URL"), None);
+        assert_eq!(parse_progress(""), None);
+    }
+
+    #[test]
+    fn video_args_select_quality_and_target() {
+        let args = video_args(
+            "bv*[height<=360]+ba",
+            Path::new("C:/dl/clip.mp4"),
+            "https://youtu.be/x",
+            Path::new("C:/tools"),
+        );
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args[args.iter().position(|a| a == "-f").unwrap() + 1], "bv*[height<=360]+ba");
+        assert_eq!(args[args.iter().position(|a| a == "-o").unwrap() + 1], "C:/dl/clip.mp4");
+        assert_eq!(
+            args[args.iter().position(|a| a == "--merge-output-format").unwrap() + 1],
+            "mp4"
+        );
+        assert!(args.iter().any(|arg| arg == "--progress-template"));
+        assert_eq!(args.last().unwrap(), "https://youtu.be/x");
+    }
+
+    #[test]
+    fn remove_parts_keeps_the_target_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("clip.mp4");
+        std::fs::write(&save, b"x").unwrap();
+        std::fs::write(dir.path().join("clip.mp4.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("clip.mp4.f137.mp4.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("other.mp4.part"), b"x").unwrap();
+
+        remove_parts(&save);
+
+        assert!(save.exists());
+        assert!(dir.path().join("other.mp4.part").exists());
+        assert!(!dir.path().join("clip.mp4.part").exists());
+        assert!(!dir.path().join("clip.mp4.f137.mp4.part").exists());
     }
 }

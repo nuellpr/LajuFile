@@ -410,6 +410,81 @@ fn corrupt_cookie_marks_download_error() {
     handle.shutdown();
 }
 
+#[test]
+fn video_row_without_tools_marks_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = dir.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    // Process-wide, so this is the only test that runs a video job.
+    unsafe { std::env::set_var("LAJUFILE_TOOLS_DIR", &tools) };
+
+    let db_path = dir.path().join("lajufile.db");
+    let mut store = Store::open(&db_path).unwrap();
+    let id = store
+        .insert_download(&NewDownload {
+            url: "https://www.youtube.com/watch?v=abc".to_string(),
+            final_url: None,
+            file_name: "clip.mp4".to_string(),
+            save_path: dir.path().join("downloads/clip.mp4"),
+            temp_path: dir.path().join("downloads/clip.mp4.lajufile"),
+            size: None,
+            status: DownloadStatus::Queued,
+            category: Category::Video,
+            kind: "video".to_string(),
+            video_format: Some("bv*[height<=360]+ba".to_string()),
+            connections: 1,
+            ranged: false,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: None,
+            user_agent: None,
+            queue_order: 0,
+            created_at: now_millis(),
+            segments: vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 0,
+                done: 0,
+            }],
+        })
+        .unwrap();
+    drop(store);
+
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        ..test_settings(dir.path())
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path,
+        settings,
+    })
+    .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .find(|d| d.id == id)
+                .is_some_and(|d| d.status == DownloadStatus::Error)
+        },
+        Duration::from_secs(10),
+    );
+    let download = snap.downloads.iter().find(|d| d.id == id).unwrap();
+    assert!(
+        download
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("tools")),
+        "unexpected error: {:?}",
+        download.error
+    );
+    handle.shutdown();
+    unsafe { std::env::remove_var("LAJUFILE_TOOLS_DIR") };
+}
+
 fn wait_for(
     handle: &EngineHandle,
     predicate: impl Fn(&Snapshot) -> bool,

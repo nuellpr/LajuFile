@@ -8,6 +8,10 @@ pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/do
 pub const FFMPEG_ZIP_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
 pub fn tools_dir() -> PathBuf {
+    // LAJUFILE_TOOLS_DIR keeps the tool install out of the real profile in tests.
+    if let Some(dir) = std::env::var_os("LAJUFILE_TOOLS_DIR") {
+        return PathBuf::from(dir);
+    }
     lajufile_core::paths::data_dir().join("tools")
 }
 
