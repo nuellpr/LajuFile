@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use lajufile_app::bridge::BridgeState;
 use lajufile_app::engine::{EngineConfig, EngineHandle, Snapshot};
+use lajufile_core::cookie::unprotect_cookie;
 use lajufile_core::settings::Settings;
 use lajufile_core::store::{DownloadStatus, Store};
 use reqwest::header::{HeaderName, HeaderValue};
@@ -255,6 +256,50 @@ async fn bridge_probe_timeout_returns_422_without_record() {
     handle.shutdown();
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert!(store.list_downloads().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_context_is_persisted_encrypted() {
+    let server = start_server();
+    let (handle, dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let (name, value) = token_header();
+    let body = serde_json::json!({
+        "url": format!("{}/auth.bin", server.base),
+        "referrer": "https://example.test/page",
+        "user_agent": "LajuFileTest/1.0",
+        "cookie": "session=abc"
+    })
+    .to_string();
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/downloads"))
+        .header(name, value)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    wait_for(
+        &handle,
+        |snapshot| {
+            snapshot.downloads.len() == 1 && snapshot.downloads[0].status == DownloadStatus::Done
+        },
+        Duration::from_secs(10),
+    );
+    handle.shutdown();
+
+    let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
+    let download = &store.list_downloads().unwrap()[0];
+    let encrypted = download.cookie_enc.as_deref().unwrap();
+    assert_ne!(encrypted, b"session=abc");
+    assert!(!encrypted.windows(7).any(|window| window == b"session"));
+    assert_eq!(unprotect_cookie(encrypted).unwrap(), "session=abc");
+    assert_eq!(
+        download.referrer.as_deref(),
+        Some("https://example.test/page")
+    );
+    assert_eq!(download.user_agent.as_deref(), Some("LajuFileTest/1.0"));
 }
 
 #[test]

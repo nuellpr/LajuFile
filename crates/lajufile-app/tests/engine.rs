@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use lajufile_app::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use lajufile_core::settings::Settings;
-use lajufile_core::store::{DownloadStatus, Store};
+use lajufile_core::store::{Category, DownloadStatus, NewDownload, Segment, Store, now_millis};
 use support::{SEG_SIZE, seg_payload, start_server};
 
 #[test]
@@ -32,6 +32,9 @@ fn add_probes_and_inserts() {
             save_dir: None,
             start_now: false,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -66,6 +69,9 @@ fn add_missing_url_keeps_store_empty() {
             save_dir: None,
             start_now: false,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -102,6 +108,9 @@ fn add_duplicate_active_is_rejected() {
         save_dir: None,
         start_now: true,
         connections: None,
+        referrer: None,
+        user_agent: None,
+        cookie: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -122,6 +131,9 @@ fn add_duplicate_active_is_rejected() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let second = wait_for(
@@ -159,6 +171,9 @@ fn back_to_back_duplicate_is_rejected() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -195,6 +210,9 @@ fn same_explicit_name_gets_distinct_paths() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -235,6 +253,9 @@ fn pause_persists_every_segment_before_status_change() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -263,6 +284,69 @@ fn pause_persists_every_segment_before_status_change() {
     assert!(segments.iter().all(|segment| segment.done > 0));
     let sum: u64 = segments.iter().map(|segment| segment.done).sum();
     assert_eq!(download.downloaded, sum);
+}
+
+#[test]
+fn corrupt_cookie_marks_download_error() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("lajufile.db");
+    let mut store = Store::open(&db_path).unwrap();
+    let id = store
+        .insert_download(&NewDownload {
+            url: format!("{}/file.bin", server.base),
+            final_url: None,
+            file_name: "cookie.bin".to_string(),
+            save_path: dir.path().join("downloads/cookie.bin"),
+            temp_path: dir.path().join("downloads/cookie.bin.lajufile"),
+            size: Some(1024 * 1024),
+            status: DownloadStatus::Queued,
+            category: Category::Other,
+            connections: 1,
+            ranged: false,
+            etag: None,
+            last_modified: None,
+            cookie_enc: Some(vec![1, 2, 3]),
+            referrer: None,
+            user_agent: None,
+            queue_order: 0,
+            created_at: now_millis(),
+            segments: vec![Segment {
+                idx: 0,
+                start: 0,
+                end: 1024 * 1024 - 1,
+                done: 0,
+            }],
+        })
+        .unwrap();
+    drop(store);
+
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path,
+        settings,
+    })
+    .unwrap();
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.id == id && d.status == DownloadStatus::Error)
+        },
+        Duration::from_secs(5),
+    );
+    assert!(
+        snap.downloads[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cookie"))
+    );
+    handle.shutdown();
 }
 
 fn wait_for(
@@ -305,6 +389,9 @@ fn add_start_now_downloads_file() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -351,6 +438,9 @@ fn queue_never_exceeds_max_concurrent() {
                 save_dir: None,
                 start_now: true,
                 connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
             }))
             .unwrap();
     }
@@ -412,6 +502,9 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -468,6 +561,9 @@ fn remove_deletes_record_and_temp() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -517,6 +613,9 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -556,6 +655,9 @@ fn range_ignored_falls_back_to_single() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 
@@ -595,6 +697,9 @@ fn pause_and_resume_continue_from_offset() {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -665,6 +770,9 @@ fn add_records_requested_connections() {
             save_dir: None,
             start_now: false,
             connections: Some(2),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }))
         .unwrap();
 

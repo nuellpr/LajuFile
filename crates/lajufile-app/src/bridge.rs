@@ -24,6 +24,12 @@ pub struct BridgeAddRequest {
     pub url: String,
     #[serde(default)]
     pub filename: Option<String>,
+    #[serde(default)]
+    pub referrer: Option<String>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub cookie: Option<String>,
 }
 
 #[derive(Debug)]

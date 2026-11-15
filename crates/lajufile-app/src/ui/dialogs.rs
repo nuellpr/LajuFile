@@ -45,6 +45,9 @@ impl AddDraft {
             save_dir: non_empty(self.folder).map(PathBuf::from),
             start_now: self.start_now,
             connections: Some(self.connections.clamp(1, 32)),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
         }
     }
 }

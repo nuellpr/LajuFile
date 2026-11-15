@@ -92,6 +92,7 @@ fn app(state: ServerState) -> Router {
         .route("/range0-only.bin", get(range0_only))
         .route("/slow-seg.bin", get(slow_seg))
         .route("/slow-probe.bin", get(slow_probe))
+        .route("/auth.bin", get(auth_bin))
         .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
         .with_state(state)
 }
@@ -109,6 +110,29 @@ async fn slow_headers() -> impl axum::response::IntoResponse {
 async fn slow_probe() -> impl axum::response::IntoResponse {
     tokio::time::sleep(Duration::from_secs(4)).await;
     file().await
+}
+
+async fn auth_bin(headers: HeaderMap) -> Response {
+    let authorized = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())
+        == Some("session=abc")
+        && headers.get(header::REFERER).and_then(|v| v.to_str().ok())
+            == Some("https://example.test/page")
+        && headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            == Some("LajuFileTest/1.0");
+    if !authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .unwrap();
+    }
+    let mut response = Response::new(Body::from(b"LajuFile".repeat(1024 * 128)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
 }
 
 async fn file() -> impl axum::response::IntoResponse {

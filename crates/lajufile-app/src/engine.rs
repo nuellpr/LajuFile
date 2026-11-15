@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use lajufile_core::cookie::{protect_cookie, unprotect_cookie};
 use lajufile_core::download::{
     DownloadError, DownloadOutcome, DownloadSpec, download_single_with_limiter,
 };
@@ -103,6 +104,9 @@ pub struct AddRequest {
     pub save_dir: Option<PathBuf>,
     pub start_now: bool,
     pub connections: Option<u32>,
+    pub referrer: Option<String>,
+    pub user_agent: Option<String>,
+    pub cookie: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -334,11 +338,16 @@ impl EngineState {
             Err(error) => return Some(format!("Add failed: {error}")),
         }
 
+        let user_agent = request
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
         let probe_request = ProbeRequest {
             url,
             options: RequestOptions {
-                user_agent: Some(DEFAULT_USER_AGENT.to_string()),
-                ..RequestOptions::default()
+                user_agent: Some(user_agent),
+                referrer: request.referrer.clone(),
+                cookie: request.cookie.clone(),
             },
             timeout: Duration::from_secs(20),
         };
@@ -383,11 +392,16 @@ impl EngineState {
             }
         }
 
+        let user_agent = request
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
         let probe_request = ProbeRequest {
             url,
             options: RequestOptions {
-                user_agent: Some(DEFAULT_USER_AGENT.to_string()),
-                ..RequestOptions::default()
+                user_agent: Some(user_agent),
+                referrer: request.referrer.clone(),
+                cookie: request.cookie.clone(),
             },
             timeout: Duration::from_secs(3),
         };
@@ -397,6 +411,9 @@ impl EngineState {
             save_dir: None,
             start_now: true,
             connections: None,
+            referrer: request.referrer,
+            user_agent: request.user_agent,
+            cookie: request.cookie,
         };
         let client = self.client.clone();
         let events = self.events.clone();
@@ -479,6 +496,27 @@ impl EngineState {
         let segments = plan_segments(result.size.unwrap_or(0), result.ranged, connections);
         let size = result.size;
 
+        let cookie_enc = match request
+            .cookie
+            .as_deref()
+            .map(str::trim)
+            .filter(|cookie| !cookie.is_empty())
+        {
+            Some(cookie) => match protect_cookie(cookie) {
+                Ok(encrypted) => Some(encrypted),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&reserved_temp);
+                    return Err(InsertError::Failed(format!("cookie: {error}")));
+                }
+            },
+            None => None,
+        };
+        let referrer = request.referrer.clone();
+        let user_agent = request
+            .user_agent
+            .clone()
+            .or_else(|| Some(DEFAULT_USER_AGENT.to_string()));
+
         let queue_order = match self.store.next_queue_order() {
             Ok(order) => order,
             Err(error) => {
@@ -499,9 +537,9 @@ impl EngineState {
             ranged: result.ranged,
             etag: result.etag,
             last_modified: result.last_modified,
-            cookie_enc: None,
-            referrer: None,
-            user_agent: Some(DEFAULT_USER_AGENT.to_string()),
+            cookie_enc,
+            referrer,
+            user_agent,
             queue_order,
             created_at: now_millis(),
             segments,
@@ -689,6 +727,21 @@ impl EngineState {
             }
         };
 
+        let cookie = match download.cookie_enc.as_deref() {
+            Some(encrypted) => match unprotect_cookie(encrypted) {
+                Ok(cookie) => Some(cookie),
+                Err(error) => {
+                    let _ = self.store.update_status(
+                        download.id,
+                        DownloadStatus::Error,
+                        Some(&format!("cookie: {error}")),
+                    );
+                    return false;
+                }
+            },
+            None => None,
+        };
+
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.clear_pending(download.id);
@@ -701,9 +754,12 @@ impl EngineState {
         }
 
         let options = RequestOptions {
-            user_agent: Some(DEFAULT_USER_AGENT.to_string()),
+            user_agent: download
+                .user_agent
+                .clone()
+                .or_else(|| Some(DEFAULT_USER_AGENT.to_string())),
             referrer: download.referrer.clone(),
-            cookie: None,
+            cookie,
         };
         let id = download.id;
         let events = self.events.clone();
