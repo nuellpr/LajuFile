@@ -150,6 +150,7 @@ pub enum Command {
     },
     VideoFormats {
         url: String,
+        cookie: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     },
     UpdateTools,
@@ -357,6 +358,8 @@ struct VideoRun {
     child: std::process::Child,
     save_path: PathBuf,
     last_error: Arc<Mutex<String>>,
+    // Dropped automatically when the yt-dlp process exits, stops, or is aborted.
+    _cookie_file: Option<TempCookieFile>,
 }
 
 struct Inserted {
@@ -586,7 +589,9 @@ impl EngineState {
                 }
             }
             Command::GrabPageLinks { url, reply } => self.grab_page_links(url, reply),
-            Command::VideoFormats { url, reply } => self.video_formats(url, reply),
+            Command::VideoFormats { url, cookie, reply } => {
+                self.video_formats(url, cookie, reply);
+            }
             Command::UpdateTools => self.update_tools(),
             Command::ToolsInstalled(result) => {
                 self.tools_installing = false;
@@ -966,20 +971,12 @@ impl EngineState {
         let segments = plan_segments(result.size.unwrap_or(0), result.ranged, connections);
         let size = result.size;
 
-        let cookie_enc = match request
-            .cookie
-            .as_deref()
-            .map(str::trim)
-            .filter(|cookie| !cookie.is_empty())
-        {
-            Some(cookie) => match protect_cookie(cookie) {
-                Ok(encrypted) => Some(encrypted),
-                Err(error) => {
-                    let _ = std::fs::remove_file(&reserved_temp);
-                    return Err(InsertError::Failed(format!("cookie: {error}")));
-                }
-            },
-            None => None,
+        let cookie_enc = match encrypt_cookie(request.cookie.as_deref()) {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                return Err(InsertError::Failed(error));
+            }
         };
         let referrer = request.referrer.clone();
         let user_agent = request
@@ -1070,6 +1067,13 @@ impl EngineState {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or(base_name);
+        let cookie_enc = match encrypt_cookie(request.cookie.as_deref()) {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                return Err(InsertError::Failed(error));
+            }
+        };
         let queue_order = match self.store.next_queue_order() {
             Ok(order) => order,
             Err(error) => {
@@ -1097,7 +1101,7 @@ impl EngineState {
             ranged: false,
             etag: None,
             last_modified: None,
-            cookie_enc: None,
+            cookie_enc,
             referrer: request.referrer,
             user_agent: request.user_agent,
             queue_order,
@@ -1127,23 +1131,24 @@ impl EngineState {
     }
 
     fn update_tools(&mut self) {
-        if tools::tools_ready(&tools::tools_dir()) {
-            self.message = Some("Tools ready".to_string());
-            return;
-        }
-        self.ensure_tools();
+        self.spawn_tools_install();
     }
 
-    /// Downloads yt-dlp + ffmpeg once; video jobs work after it lands.
+    /// Downloads missing video tools once; video jobs work after it lands.
     fn ensure_tools(&mut self) {
+        let dir = tools::tools_dir();
+        if tools::tools_ready(&dir) {
+            return;
+        }
+        self.spawn_tools_install();
+    }
+
+    fn spawn_tools_install(&mut self) {
         if self.tools_installing {
             self.message = Some("Downloading tools...".to_string());
             return;
         }
         let dir = tools::tools_dir();
-        if tools::tools_ready(&dir) {
-            return;
-        }
         self.tools_installing = true;
         self.message = Some("Downloading tools...".to_string());
         let commands = self.commands.clone();
@@ -1157,6 +1162,7 @@ impl EngineState {
     fn video_formats(
         &mut self,
         url: String,
+        cookie: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     ) {
         if let Err(error) = validate_http_url(&url) {
@@ -1172,7 +1178,7 @@ impl EngineState {
             return;
         }
         thread::spawn(move || {
-            let _ = reply.send(ytdlp_listing(&dir, &url));
+            let _ = reply.send(ytdlp_listing(&dir, &url, cookie.as_deref()));
         });
     }
 
@@ -1577,6 +1583,24 @@ impl EngineState {
             );
             return false;
         }
+        let cookie_text = match download.cookie_enc.as_deref() {
+            Some(encrypted) => match unprotect_cookie(encrypted) {
+                Ok(cookie) => Some(cookie),
+                Err(error) => {
+                    let _ = self.store.update_status(
+                        download.id,
+                        DownloadStatus::Error,
+                        Some(&format!("cookie: {error}")),
+                    );
+                    return false;
+                }
+            },
+            None => None,
+        };
+        let cookie_file = cookie_text
+            .as_deref()
+            .and_then(TempCookieFile::from_netscape);
+        let js_runtime = tools::js_runtime_arg(&dir);
         let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
         let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
         command
@@ -1587,6 +1611,8 @@ impl EngineState {
                 &dir,
                 self.settings.video_subtitles,
                 self.settings.video_chapters,
+                js_runtime.as_deref(),
+                cookie_file.as_ref().map(TempCookieFile::path),
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1624,12 +1650,17 @@ impl EngineState {
             let slot = Arc::clone(&last_error);
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let line = line.trim().to_string();
+                    let line = line.trim();
                     if line.is_empty() {
                         continue;
                     }
                     if let Ok(mut slot) = slot.lock() {
-                        *slot = line;
+                        if !slot.is_empty() {
+                            slot.push('\n');
+                        }
+                        if slot.len() < 4096 {
+                            slot.push_str(line);
+                        }
                     }
                 }
             });
@@ -1643,6 +1674,7 @@ impl EngineState {
                     child,
                     save_path: download.save_path.clone(),
                     last_error,
+                    _cookie_file: cookie_file,
                 }),
             },
         );
@@ -1672,16 +1704,12 @@ impl EngineState {
                 let _ = std::fs::remove_file(temp_path_for(&run.save_path));
                 let _ = self.store.mark_done(id, now_millis());
             } else {
-                let message = run
+                let raw = run
                     .last_error
                     .lock()
                     .map(|line| line.clone())
                     .unwrap_or_default();
-                let message = if message.is_empty() {
-                    "yt-dlp failed".to_string()
-                } else {
-                    message
-                };
+                let message = format_ytdlp_error(&raw);
                 let _ = self
                     .store
                     .update_status(id, DownloadStatus::Error, Some(&message));
@@ -2030,11 +2058,108 @@ fn video_file_name(url: &str) -> String {
     }
 }
 
+fn encrypt_cookie(raw: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+    match raw.map(str::trim).filter(|cookie| !cookie.is_empty()) {
+        Some(cookie) => protect_cookie(cookie)
+            .map(Some)
+            .map_err(|error| format!("cookie: {error}")),
+        None => Ok(None),
+    }
+}
+
+/// Short-lived Netscape cookie file for `yt-dlp --cookies`, deleted automatically on drop.
+struct TempCookieFile {
+    path: PathBuf,
+}
+
+impl TempCookieFile {
+    fn from_netscape(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with("# Netscape HTTP Cookie File") {
+            return None;
+        }
+        let has_entries = trimmed
+            .lines()
+            .any(|line| !line.is_empty() && !line.starts_with('#') && line.contains('\t'));
+        if !has_entries {
+            return None;
+        }
+
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        for _ in 0..8 {
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = dir.join(format!("lajufile-yt-{pid}-{seq}.cookies"));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if file.write_all(trimmed.as_bytes()).is_err() || file.write_all(b"\n").is_err()
+                    {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return None;
+                    }
+                    return Some(Self { path });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempCookieFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn format_ytdlp_error(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.contains("Sign in to confirm you're not a bot") {
+        return "yt-dlp: YouTube requires a signed-in browser session on this network. Log in to YouTube in your browser and retry from the LajuFile extension (paired with this app).".to_string();
+    }
+    if let Some(err_line) = trimmed
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("ERROR:"))
+    {
+        return format!("yt-dlp: {}", err_line.trim());
+    }
+    if trimmed.is_empty() {
+        "yt-dlp failed".to_string()
+    } else {
+        format!("yt-dlp: {trimmed}")
+    }
+}
+
 /// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
-fn ytdlp_listing(dir: &Path, url: &str) -> Result<VideoListing, String> {
+fn ytdlp_listing(dir: &Path, url: &str, cookie: Option<&str>) -> Result<VideoListing, String> {
+    let cookie_file = cookie.and_then(TempCookieFile::from_netscape);
+    let js_runtime = tools::js_runtime_arg(dir);
     let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
+    command.args(["--no-playlist", "-J"]);
+    if let Some(runtime) = js_runtime.as_deref() {
+        command.args(["--js-runtimes", runtime]);
+    }
+    if let Some(cookies) = cookie_file.as_ref() {
+        command.arg("--cookies").arg(cookies.path());
+    }
     command
-        .args(["--no-playlist", "-J", "--", url])
+        .args(["--", url])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2059,10 +2184,8 @@ fn ytdlp_listing(dir: &Path, url: &str) -> Result<VideoListing, String> {
     };
     let output = stdout.join().unwrap_or_default();
     if !status.success() {
-        let error = String::from_utf8_lossy(&stderr.join().unwrap_or_default())
-            .trim()
-            .to_string();
-        return Err(format!("yt-dlp: {error}"));
+        let error = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).to_string();
+        return Err(format_ytdlp_error(&error));
     }
     let json: serde_json::Value =
         serde_json::from_slice(&output).map_err(|error| format!("yt-dlp: {error}"))?;
@@ -2169,6 +2292,7 @@ async fn fetch_page_links(url: Url) -> Result<Vec<String>, String> {
 }
 
 /// yt-dlp arguments for one video job: merge to mp4 next to the target path.
+#[allow(clippy::too_many_arguments)]
 fn video_args(
     selector: &str,
     save_path: &Path,
@@ -2176,6 +2300,8 @@ fn video_args(
     tools_dir: &Path,
     subtitles: bool,
     embed_chapters: bool,
+    js_runtime: Option<&str>,
+    cookie_file: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "--no-playlist".into(),
@@ -2190,6 +2316,14 @@ fn video_args(
         "--ffmpeg-location".into(),
         tools_dir.as_os_str().to_owned(),
     ];
+    if let Some(runtime) = js_runtime {
+        args.push("--js-runtimes".into());
+        args.push(runtime.into());
+    }
+    if let Some(cookies) = cookie_file {
+        args.push("--cookies".into());
+        args.push(cookies.as_os_str().to_owned());
+    }
     if subtitles {
         args.extend([
             "--write-subs".into(),
@@ -2331,6 +2465,8 @@ mod tests {
             Path::new("C:/tools"),
             false,
             false,
+            Some("node:/usr/bin/node"),
+            Some(Path::new("C:/tmp/cookies.txt")),
         );
         let args: Vec<String> = args
             .iter()
@@ -2361,6 +2497,14 @@ mod tests {
             args[args.iter().position(|a| a == "--ppa").unwrap() + 1],
             "Merger+ffmpeg_o1:-c:a aac"
         );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--js-runtimes").unwrap() + 1],
+            "node:/usr/bin/node"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--cookies").unwrap() + 1],
+            "C:/tmp/cookies.txt"
+        );
         assert!(!args.iter().any(|arg| arg == "--embed-subs"));
         assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
         assert!(args.iter().any(|arg| arg == "--http-chunk-size"));
@@ -2386,6 +2530,8 @@ mod tests {
             Path::new("C:/tools"),
             true,
             true,
+            None,
+            None,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -2469,5 +2615,33 @@ mod tests {
         assert!(validate_http_url("http://example.com/a.zip").is_ok());
         assert!(validate_http_url("file:///tmp/a.zip").is_err());
         assert!(validate_http_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn temp_cookie_file_writes_netscape_cookies_and_cleans_up_on_drop() {
+        assert!(TempCookieFile::from_netscape("SID=abc; HSID=xyz").is_none());
+        assert!(TempCookieFile::from_netscape("# Netscape HTTP Cookie File\n").is_none());
+
+        let netscape =
+            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tvalue123\n";
+        let path = {
+            let file = TempCookieFile::from_netscape(netscape).expect("valid cookie file");
+            let saved = std::fs::read_to_string(file.path()).unwrap();
+            assert!(saved.contains("SID\tvalue123"));
+            file.path().to_path_buf()
+        };
+        assert!(!path.exists(), "cookie file must be deleted on drop");
+    }
+
+    #[test]
+    fn format_ytdlp_error_clarifies_bot_check_and_picks_error_line() {
+        let bot = "WARNING: foo\nERROR: [youtube] xyz: Sign in to confirm you're not a bot.\nAlso see wiki";
+        assert!(format_ytdlp_error(bot).contains("signed-in browser session"));
+
+        let other = "WARNING: minor\nERROR: [youtube] xyz: Video unavailable";
+        assert_eq!(
+            format_ytdlp_error(other),
+            "yt-dlp: ERROR: [youtube] xyz: Video unavailable"
+        );
     }
 }

@@ -39,6 +39,8 @@ pub struct BridgeAddRequest {
 #[derive(Debug, Deserialize)]
 struct FormatsRequest {
     url: String,
+    #[serde(default)]
+    cookie: Option<String>,
 }
 
 #[derive(Debug)]
@@ -270,6 +272,7 @@ async fn video_formats(
         .commands
         .send(Command::VideoFormats {
             url: request.url,
+            cookie: request.cookie,
             reply,
         })
         .is_err()

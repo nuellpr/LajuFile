@@ -105,6 +105,47 @@ async function cookieHeader(url) {
   }
 }
 
+function sanitizeCookieField(value) {
+  return String(value ?? "").replace(/[\t\r\n]/g, " ");
+}
+
+async function netscapeCookies(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const queries = [chrome.cookies.getAll({ url: rawUrl })];
+    const host = parsed.hostname.toLowerCase();
+    if (host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")) {
+      queries.push(chrome.cookies.getAll({ domain: "youtube.com" }));
+    }
+    const lists = await Promise.all(queries);
+    const seen = new Set();
+    let totalBytes = 0;
+    const lines = ["# Netscape HTTP Cookie File"];
+    for (const cookies of lists) {
+      for (const c of cookies) {
+        if (!c || !c.name) continue;
+        const domain = sanitizeCookieField(c.domain || host);
+        const path = sanitizeCookieField(c.path || "/");
+        const name = sanitizeCookieField(c.name);
+        const key = `${domain}\t${path}\t${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const subdomains = domain.startsWith(".") ? "TRUE" : "FALSE";
+        const secure = c.secure ? "TRUE" : "FALSE";
+        const expiry = c.expirationDate ? Math.floor(c.expirationDate) : 0;
+        const value = sanitizeCookieField(c.value);
+        const line = `${domain}\t${subdomains}\t${path}\t${secure}\t${expiry}\t${name}\t${value}`;
+        if (totalBytes + line.length + 1 > 48 * 1024) break;
+        totalBytes += line.length + 1;
+        lines.push(line);
+      }
+    }
+    return lines.length > 1 ? `${lines.join("\n")}\n` : "";
+  } catch {
+    return "";
+  }
+}
+
 function notify(title, message) {
   chrome.notifications.create(`lajufile-${Date.now()}`, {
     type: "basic",
@@ -153,7 +194,7 @@ function detectExtension(item, url) {
     const pathname = new URL(url).pathname;
     const seg = basename(pathname);
     if (seg) candidates.push(seg);
-  } catch {}
+  } catch { }
   for (const name of candidates) {
     const idx = name.lastIndexOf(".");
     if (idx > 0 && idx < name.length - 1) {
@@ -196,7 +237,7 @@ async function fetchBridgeExcludedDomains(config) {
         remoteExcludedDomains: excludedDomains,
         remoteCapturedExtensions: capturedExtensions,
       })
-      .catch(() => {});
+      .catch(() => { });
     return excludedDomains;
   } catch {
     return "";
@@ -291,13 +332,13 @@ async function cancelAndErase(id) {
 async function pauseItem(id) {
   try {
     await chrome.downloads.pause(id);
-  } catch {}
+  } catch { }
 }
 
 async function resumeItem(id) {
   try {
     await chrome.downloads.resume(id);
-  } catch {}
+  } catch { }
 }
 
 function isLiveDownload(item) {
@@ -402,9 +443,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "lajufile-download" || !info.linkUrl) return;
   if (isYouTubeVideoUrl(info.linkUrl)) {
     try {
+      const cookie = await netscapeCookies(info.linkUrl);
       const result = await post("video", {
         url: info.linkUrl,
         video_format: "bv*+ba/b",
+        cookie: cookie || undefined,
       });
       if (result.status === 201) {
         notify("LajuFile", "Video added to LajuFile.");
@@ -444,7 +487,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
     getConfig()
       .then((config) => fetchBridgeExcludedDomains(config))
-      .catch(() => {});
+      .catch(() => { });
     return;
   }
   if (message && message.type === "bypass-url") {
@@ -476,17 +519,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message && message.type === "video-formats") {
-    post("video/formats", { url: message.url })
+    (async () => {
+      const cookie = await netscapeCookies(message.url);
+      return post("video/formats", {
+        url: message.url,
+        cookie: cookie || undefined,
+      });
+    })()
       .then(sendResponse)
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;
   }
   if (message && message.type === "video-download") {
-    post("video", {
-      url: message.url,
-      video_format: message.selector,
-      filename: message.filename,
-    })
+    (async () => {
+      const cookie = await netscapeCookies(message.url);
+      return post("video", {
+        url: message.url,
+        video_format: message.selector,
+        filename: message.filename,
+        cookie: cookie || undefined,
+      });
+    })()
       .then(sendResponse)
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;

@@ -113,7 +113,6 @@ impl LajuFileApp {
         let batch_draft = BatchDraft::for_settings(&settings);
         let custom_speed_kbps = settings.global_speed_limit_kbps.to_string();
         let settings_draft = settings.clone();
-        let show_browser_wizard = !settings.browser_paired && !settings.suppress_browser_wizard;
         let engine = EngineHandle::start(EngineConfig {
             data_dir: data_dir.clone(),
             db_path: paths::db_path(&data_dir),
@@ -144,7 +143,7 @@ impl LajuFileApp {
             show_add: false,
             show_batch: false,
             show_settings: false,
-            show_browser_wizard,
+            show_browser_wizard: false,
             show_language_picker: false,
             show_update_dialog: false,
             update_state: UpdateUiState::Idle,
@@ -1042,7 +1041,11 @@ impl LajuFileApp {
                 }
                 Action::LoadFormats(url) => {
                     let (reply, rx) = tokio::sync::oneshot::channel();
-                    self.send(Command::VideoFormats { url, reply });
+                    self.send(Command::VideoFormats {
+                        url,
+                        cookie: None,
+                        reply,
+                    });
                     self.formats = Some(rx);
                 }
                 Action::GrabPageLinks(url) => {

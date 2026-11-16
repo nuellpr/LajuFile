@@ -13,6 +13,35 @@ pub const FFMPEG: &str = "ffmpeg.exe";
 pub const FFMPEG: &str = "ffmpeg";
 
 #[cfg(windows)]
+pub const DENO: &str = "deno.exe";
+#[cfg(not(windows))]
+pub const DENO: &str = "deno";
+
+#[cfg(windows)]
+pub const NODE: &str = "node.exe";
+#[cfg(not(windows))]
+pub const NODE: &str = "node";
+
+#[cfg(all(windows, target_arch = "aarch64"))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-pc-windows-msvc.zip";
+#[cfg(all(windows, not(target_arch = "aarch64")))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
+pub const DENO_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip";
+
+#[cfg(windows)]
 pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 #[cfg(target_os = "macos")]
 pub const YTDLP_URL: &str =
@@ -245,7 +274,62 @@ pub fn tools_ready(dir: &Path) -> bool {
     tool_path(dir, YTDLP).is_file() && tool_path(dir, FFMPEG).is_file()
 }
 
-/// Downloads both tools with curl and tar.
+fn find_executable_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn find_on_path_or(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        let path_dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+        if let Some(found) = find_executable_in_dirs(name, &path_dirs) {
+            return Some(found);
+        }
+    }
+    find_executable_in_dirs(name, extra_dirs)
+}
+
+fn standard_node_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        for key in ["PROGRAMFILES", "PROGRAMFILES(X86)"] {
+            if let Some(base) = std::env::var_os(key) {
+                dirs.push(PathBuf::from(base).join("nodejs"));
+            }
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Programs").join("nodejs"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        dirs.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+        ]);
+    }
+    dirs
+}
+
+/// Resolves an available JS runtime (`deno` or `node`) for yt-dlp's YouTube EJS extractor.
+pub fn js_runtime_arg(dir: &Path) -> Option<String> {
+    let bundled_deno = tool_path(dir, DENO);
+    if bundled_deno.is_file() {
+        return Some(format!("deno:{}", bundled_deno.display()));
+    }
+    if let Some(deno) = find_on_path_or(DENO, &[]) {
+        return Some(format!("deno:{}", deno.display()));
+    }
+    if let Some(node) = find_on_path_or(NODE, &standard_node_dirs()) {
+        return Some(format!("node:{}", node.display()));
+    }
+    None
+}
+
+/// Downloads yt-dlp, ffmpeg (if missing), and deno (when no JS runtime is installed yet).
 pub fn install_tools(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create {dir:?}: {error}"))?;
 
@@ -253,31 +337,84 @@ pub fn install_tools(dir: &Path) -> Result<(), String> {
     download(&ytdlp, YTDLP_URL)?;
     make_executable(&ytdlp);
 
-    let archive = dir.join("ffmpeg-archive");
-    download(&archive, FFMPEG_ZIP_URL)?;
+    if !tool_path(dir, FFMPEG).is_file() {
+        let archive = dir.join("ffmpeg-archive");
+        download(&archive, FFMPEG_ZIP_URL)?;
 
-    let extract = dir.join("ffmpeg-extract");
-    let _ = std::fs::remove_dir_all(&extract);
-    // tar refuses an extraction directory that does not exist yet.
-    std::fs::create_dir_all(&extract).map_err(|error| format!("create {extract:?}: {error}"))?;
-    run(
-        TAR_BIN,
-        &["-xf", path_arg(&archive)?, "-C", path_arg(&extract)?],
-    )?;
+        let extract = dir.join("ffmpeg-extract");
+        let _ = std::fs::remove_dir_all(&extract);
+        // tar refuses an extraction directory that does not exist yet.
+        std::fs::create_dir_all(&extract)
+            .map_err(|error| format!("create {extract:?}: {error}"))?;
+        run(
+            TAR_BIN,
+            &["-xf", path_arg(&archive)?, "-C", path_arg(&extract)?],
+        )?;
 
-    let found = find_file(&extract, FFMPEG).ok_or("ffmpeg not found in the archive")?;
-    let ffmpeg = tool_path(dir, FFMPEG);
-    std::fs::copy(&found, &ffmpeg).map_err(|error| format!("copy ffmpeg: {error}"))?;
-    make_executable(&ffmpeg);
+        let found = find_file(&extract, FFMPEG).ok_or("ffmpeg not found in the archive")?;
+        let ffmpeg = tool_path(dir, FFMPEG);
+        std::fs::copy(&found, &ffmpeg).map_err(|error| format!("copy ffmpeg: {error}"))?;
+        make_executable(&ffmpeg);
 
-    let _ = std::fs::remove_file(&archive);
-    let _ = std::fs::remove_dir_all(&extract);
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&extract);
+    }
+
+    if js_runtime_arg(dir).is_none() {
+        let _ = install_deno(dir);
+    }
 
     if tools_ready(dir) {
         Ok(())
     } else {
         Err("tools are still missing after install".to_string())
     }
+}
+
+fn install_deno(dir: &Path) -> Result<(), String> {
+    let archive = dir.join("deno-archive.zip");
+    download(&archive, DENO_ZIP_URL)?;
+
+    let extract = dir.join("deno-extract");
+    let _ = std::fs::remove_dir_all(&extract);
+    std::fs::create_dir_all(&extract).map_err(|error| format!("create {extract:?}: {error}"))?;
+
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        run(
+            TAR_BIN,
+            &["-xf", path_arg(&archive)?, "-C", path_arg(&extract)?],
+        )?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        if run(
+            "unzip",
+            &["-oq", path_arg(&archive)?, "-d", path_arg(&extract)?],
+        )
+        .is_err()
+        {
+            run(
+                "python3",
+                &[
+                    "-m",
+                    "zipfile",
+                    "-e",
+                    path_arg(&archive)?,
+                    path_arg(&extract)?,
+                ],
+            )?;
+        }
+    }
+
+    let found = find_file(&extract, DENO).ok_or("deno not found in the archive")?;
+    let deno = tool_path(dir, DENO);
+    std::fs::copy(&found, &deno).map_err(|error| format!("copy deno: {error}"))?;
+    make_executable(&deno);
+
+    let _ = std::fs::remove_file(&archive);
+    let _ = std::fs::remove_dir_all(&extract);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -429,5 +566,14 @@ mod tests {
     fn extension_dir_finds_workspace_extension_folder() {
         let dir = extension_dir().expect("workspace extension directory");
         assert!(dir.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn js_runtime_arg_prefers_bundled_deno() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = tool_path(dir.path(), DENO);
+        std::fs::write(&bundled, b"deno").unwrap();
+        let runtime = js_runtime_arg(dir.path()).expect("bundled deno detected");
+        assert_eq!(runtime, format!("deno:{}", bundled.display()));
     }
 }
