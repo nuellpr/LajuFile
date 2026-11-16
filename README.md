@@ -7,7 +7,7 @@
 **Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows, macOS & Linux.**  
 *Fast, lightweight, secure, multi-connection download manager built with Rust.*
 
-[![Version](https://img.shields.io/badge/version-v1.0.1-3B82F6?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.0.2-3B82F6?style=flat-square)](#)
 [![Rust](https://img.shields.io/badge/Rust-2024%20%2F%20MSRV%201.85-orange?style=flat-square)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--installation)
@@ -38,9 +38,9 @@
 
 Unduh installer sesuai sistem operasi dari halaman [Releases](../../releases):
 
-- **Windows:** Jalankan **`LajuFile-v1.0.1-windows-x64-setup.exe`**, setujui lisensi, dan klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
-- **macOS:** Buka **`LajuFile-v1.0.1-macos-arm64-setup.dmg`** dan jalankan **`LajuFile Setup.app`** (atau jalankan executable **`LajuFile-v1.0.1-macos-arm64-setup`** via terminal `chmod +x`), yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
-- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.1-linux-x64-setup.run && ./LajuFile-v1.0.1-linux-x64-setup.run`**, memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop` di menu aplikasi, dan symlink `~/.local/bin/lajufile`.
+- **Windows:** Jalankan **`LajuFile-v1.0.2-windows-x64-setup.exe`**, setujui lisensi, dan klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
+- **macOS:** Buka **`LajuFile-v1.0.2-macos-arm64-setup.dmg`** dan jalankan **`LajuFile Setup.app`** (atau jalankan executable **`LajuFile-v1.0.2-macos-arm64-setup`** via terminal `chmod +x`), yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
+- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.2-linux-x64-setup.run && ./LajuFile-v1.0.2-linux-x64-setup.run`**, memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop` di menu aplikasi, dan symlink `~/.local/bin/lajufile`.
 
 **Memperbarui versi terpasang:**
 - **Langsung dari aplikasi (`v1.0.1+`):** Buka **Bantuan -> Periksa pembaruan...** (`Help -> Check for updates...`), lalu klik **Update now** — LajuFile mengunduh installer resmi dari GitHub Releases, memasangnya otomatis, dan memulai ulang aplikasi (antrean & pengaturan tetap aman di `%APPDATA%\LajuFile`).
@@ -67,7 +67,7 @@ cargo test --workspace
 # Jalankan aplikasi desktop langsung
 cargo run -p lajufile-app --bin lajufile
 
-# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.1-Windows-x64-Setup.exe
+# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.2-Windows-x64-Setup.exe
 powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 
@@ -102,7 +102,7 @@ chmod +x installer/build-unix-installer.sh
 - **Batch Smart Grabber:** Expand numeric ranges (`[01..20]`) or extract downloadable links directly from public web pages.
 - **Video & Audio Integration:** Auto-installs `yt-dlp` and `ffmpeg` over HTTPS on first video request across Windows, macOS, and Linux; supports H.264/AAC MP4 merging, M4A audio-only extraction, embedded subtitles, and chapters.
 - **86-Language Catalog & RTL:** OS display language auto-detection, built-in translations, runtime `.tsv` override support, locale number formatting, and automatic RTL layout mirroring.
-- **Cross-Platform Native Installers (`.exe`, `.dmg`, `.run`):** Self-contained setup wizard with SHA-256 payload integrity verification, desktop/menu launchers (Windows `.lnk` + Add/Remove Programs, macOS `.app` bundle + `.dmg`, Linux XDG `.desktop` + `~/.local/bin`), in-app **Help -> Check for updates...** self-updater, and built-in uninstaller (`v1.0.1`).
+- **Cross-Platform Native Installers (`.exe`, `.dmg`, `.run`):** Self-contained setup wizard with SHA-256 payload integrity verification, desktop/menu launchers (Windows `.lnk` + Add/Remove Programs, macOS `.app` bundle + `.dmg`, Linux XDG `.desktop` + `~/.local/bin`), in-app **Help -> Check for updates...** self-updater, and built-in uninstaller (`v1.0.2`).
 
 ---
 

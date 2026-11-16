@@ -393,7 +393,7 @@ where
         return Err(DownloadError::ContentRange(raw.to_string()).into());
     }
 
-    const WRITE_BUF_CAP: usize = 256 * 1024;
+    const WRITE_BUF_CAP: usize = 128 * 1024;
     let mut write_buf: Vec<u8> = Vec::with_capacity(WRITE_BUF_CAP);
     let mut last_notify = std::time::Instant::now();
     let mut response = response;
@@ -411,8 +411,11 @@ where
         }
         limiter.throttle(chunk_len).await;
         write_buf.extend_from_slice(&chunk);
-        if write_buf.len() >= WRITE_BUF_CAP
-            || last_notify.elapsed() >= std::time::Duration::from_millis(80)
+        if !write_buf.is_empty()
+            && (*done == 0
+                || write_buf.len() >= WRITE_BUF_CAP
+                || last_notify.elapsed() >= std::time::Duration::from_millis(50)
+                || *done + (write_buf.len() as u64) >= length)
         {
             let flushed = write_buf.len() as u64;
             file.write_all(&write_buf)
@@ -421,13 +424,11 @@ where
             write_buf.clear();
             *done += flushed;
             let total = total_done.fetch_add(flushed, Ordering::Relaxed) + flushed;
-            if last_notify.elapsed() >= std::time::Duration::from_millis(50) || *done == length {
-                let mut callback = on_progress
-                    .lock()
-                    .expect("progress callback mutex poisoned");
-                callback(segment.idx, *done, total);
-                last_notify = std::time::Instant::now();
-            }
+            let mut callback = on_progress
+                .lock()
+                .expect("progress callback mutex poisoned");
+            callback(segment.idx, *done, total);
+            last_notify = std::time::Instant::now();
         }
     }
     if !write_buf.is_empty() {

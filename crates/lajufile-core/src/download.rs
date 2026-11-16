@@ -125,7 +125,7 @@ where
         expected = Some(length);
     }
 
-    const WRITE_BUF_CAP: usize = 256 * 1024;
+    const WRITE_BUF_CAP: usize = 128 * 1024;
     let mut downloaded = 0_u64;
     let mut write_buf: Vec<u8> = Vec::with_capacity(WRITE_BUF_CAP);
     let mut last_notify = std::time::Instant::now();
@@ -147,19 +147,20 @@ where
             limiter.throttle(length).await;
         }
         write_buf.extend_from_slice(&chunk);
-        if write_buf.len() >= WRITE_BUF_CAP
-            || last_notify.elapsed() >= std::time::Duration::from_millis(80)
+        if !write_buf.is_empty()
+            && (downloaded == 0
+                || write_buf.len() >= WRITE_BUF_CAP
+                || last_notify.elapsed() >= std::time::Duration::from_millis(50)
+                || expected.is_some_and(|known| {
+                    downloaded.saturating_add(write_buf.len() as u64) >= known
+                }))
         {
             let flushed = write_buf.len() as u64;
             file.write_all(&write_buf).await?;
             write_buf.clear();
             downloaded = downloaded.saturating_add(flushed);
-            if last_notify.elapsed() >= std::time::Duration::from_millis(50)
-                || expected.is_some_and(|known| downloaded == known)
-            {
-                on_progress(downloaded);
-                last_notify = std::time::Instant::now();
-            }
+            on_progress(downloaded);
+            last_notify = std::time::Instant::now();
         }
     }
     if !write_buf.is_empty() {

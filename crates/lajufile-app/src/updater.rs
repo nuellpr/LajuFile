@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use url::Url;
 
+#[cfg(not(target_os = "macos"))]
 use crate::installer::APP_BIN;
 
 pub const GITHUB_LATEST_API: &str = "https://api.github.com/repos/nuellpr/LajuFile/releases/latest";
@@ -284,7 +285,7 @@ pub fn launch_installer_and_update(installer_path: &Path) -> Result<bool, String
             .arg(installer_path)
             .spawn()
             .map_err(|e| format!("Could not open disk image: {e}"))?;
-        return Ok(false);
+        Ok(false)
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -213,7 +213,7 @@ fn slow_range_response(body: Vec<u8>, start: usize, end: usize, file_name: &str)
     let slice = body.get(start..=end).unwrap_or_default().to_vec();
     let chunks: Vec<Bytes> = slice.chunks(CHUNK).map(Bytes::copy_from_slice).collect();
     let stream = tokio_stream::iter(chunks).then(|chunk| async move {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
         Ok::<Bytes, std::io::Error>(chunk)
     });
     let mut response = Response::new(Body::from_stream(stream));
