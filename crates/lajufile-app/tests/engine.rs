@@ -48,6 +48,7 @@ fn add_probes_and_inserts() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -86,6 +87,7 @@ fn add_missing_url_keeps_store_empty() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -126,6 +128,7 @@ fn add_duplicate_active_is_rejected() {
         user_agent: None,
         cookie: None,
         video_format: None,
+        video_size: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -150,6 +153,7 @@ fn add_duplicate_active_is_rejected() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     let second = wait_for(
@@ -191,6 +195,7 @@ fn back_to_back_duplicate_is_rejected() {
                 user_agent: None,
                 cookie: None,
                 video_format: None,
+                video_size: None,
             }))
             .unwrap();
     }
@@ -231,6 +236,7 @@ fn same_explicit_name_gets_distinct_paths() {
                 user_agent: None,
                 cookie: None,
                 video_format: None,
+                video_size: None,
             }))
             .unwrap();
     }
@@ -275,6 +281,7 @@ fn pause_persists_every_segment_before_status_change() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -536,6 +543,7 @@ fn add_start_now_downloads_file() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -586,6 +594,7 @@ fn queue_never_exceeds_max_concurrent() {
                 user_agent: None,
                 cookie: None,
                 video_format: None,
+                video_size: None,
             }))
             .unwrap();
     }
@@ -651,6 +660,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -711,6 +721,7 @@ fn remove_deletes_record_and_temp() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -764,6 +775,7 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -807,6 +819,7 @@ fn range_ignored_falls_back_to_single() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -850,6 +863,7 @@ fn pause_and_resume_continue_from_offset() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -924,6 +938,7 @@ fn add_records_requested_connections() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -1083,6 +1098,7 @@ fn remove_completed_clears_done_rows_and_keeps_files() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
     handle
@@ -1096,6 +1112,7 @@ fn remove_completed_clears_done_rows_and_keeps_files() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -1158,6 +1175,7 @@ fn remove_with_file_deletes_saved_file_when_requested() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -1208,6 +1226,7 @@ fn move_rename_moves_completed_file_and_updates_store() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -1271,6 +1290,7 @@ fn update_url_and_resume_completes_with_refreshed_url() {
             user_agent: None,
             cookie: None,
             video_format: None,
+            video_size: None,
         }))
         .unwrap();
 
@@ -1331,6 +1351,7 @@ fn duplicate_policy_resume_and_numbered_behavior() {
         user_agent: None,
         cookie: None,
         video_format: None,
+        video_size: None,
     };
 
     let first_url = format!("{}/file.bin", server.base);

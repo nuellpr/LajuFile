@@ -34,6 +34,9 @@ pub struct BridgeAddRequest {
     /// yt-dlp selector; when set the request is queued as a video job.
     #[serde(default)]
     pub video_format: Option<String>,
+    /// Pre-estimated byte size of the selected video stream + audio.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +297,7 @@ async fn video_formats(
                         "selector": choice.selector,
                         "label": choice.label,
                         "fps": choice.fps,
+                        "size": choice.size,
                     })
                 })
                 .collect();

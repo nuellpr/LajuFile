@@ -25,6 +25,8 @@ pub struct AddDraft {
     pub connections: u32,
     /// yt-dlp selector picked in the quality combo; `None` means best available.
     pub quality: Option<String>,
+    /// Pre-estimated byte size for the selected quality choice.
+    pub quality_size: Option<u64>,
     pub formats: Vec<QualityChoice>,
 }
 
@@ -37,6 +39,7 @@ impl Default for AddDraft {
             start_now: true,
             connections: 8,
             quality: None,
+            quality_size: None,
             formats: Vec::new(),
         }
     }
@@ -51,11 +54,18 @@ impl AddDraft {
     }
 
     pub fn into_request(self) -> AddRequest {
-        let video_format = youtube_url(&self.url).then(|| {
+        let is_youtube = youtube_url(&self.url);
+        let video_format = is_youtube.then(|| {
             self.quality
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
         });
+        let video_size = is_youtube
+            .then(|| {
+                self.quality_size
+                    .or_else(|| self.formats.first().and_then(|c| c.size))
+            })
+            .flatten();
         AddRequest {
             url: self.url.trim().to_string(),
             file_name: non_empty(self.file_name),
@@ -66,6 +76,7 @@ impl AddDraft {
             user_agent: None,
             cookie: None,
             video_format,
+            video_size,
         }
     }
 }
@@ -149,19 +160,32 @@ pub fn add_dialog(
                         .position(|choice| Some(&choice.selector) == draft.quality.as_ref())
                         .map_or(0, |index| index + 1);
                     let mut selected = chosen;
+                    let best_hint = draft
+                        .formats
+                        .first()
+                        .and_then(|c| c.size)
+                        .map(|sz| format!("Best available (~{})", format_size(sz)))
+                        .unwrap_or_else(|| "Best available".to_string());
+                    let choice_text = |c: &QualityChoice| match c.size {
+                        Some(sz) if sz > 0 => format!("{} (~{})", c.label, format_size(sz)),
+                        _ => c.label.clone(),
+                    };
                     egui::ComboBox::from_id_salt("quality")
                         .selected_text(match selected {
-                            0 => "Best available".to_string(),
-                            index => draft.formats[index - 1].label.clone(),
+                            0 => best_hint.clone(),
+                            index => choice_text(&draft.formats[index - 1]),
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut selected, 0, "Best available");
+                            ui.selectable_value(&mut selected, 0, &best_hint);
                             for (index, choice) in draft.formats.iter().enumerate() {
-                                ui.selectable_value(&mut selected, index + 1, &choice.label);
+                                ui.selectable_value(&mut selected, index + 1, choice_text(choice));
                             }
                         });
                     draft.quality =
                         (selected > 0).then(|| draft.formats[selected - 1].selector.clone());
+                    draft.quality_size = (selected > 0)
+                        .then(|| draft.formats[selected - 1].size)
+                        .flatten();
                 }
             }
 
@@ -2328,7 +2352,7 @@ pub(crate) fn draw_h_divider(ui: &mut Ui, color: Color32) {
     ui.painter().rect_filled(rect, 0.0, color);
 }
 
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+pub(crate) fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     Color32::from_rgba_unmultiplied(
         (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t).round() as u8,
@@ -3763,6 +3787,7 @@ impl BatchDraft {
                     user_agent: None,
                     cookie: None,
                     video_format,
+                    video_size: None,
                 }
             })
             .collect()

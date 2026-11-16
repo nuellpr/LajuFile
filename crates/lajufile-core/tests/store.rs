@@ -364,6 +364,18 @@ fn set_size_only_fills_an_unknown_size() {
 
     store.set_size(id, 900).unwrap();
     assert_eq!(store.get_download(id).unwrap().size, Some(500));
+
+    let mut video = sample("https://www.youtube.com/watch?v=x", 1024);
+    video.kind = "video".to_string();
+    video.size = None;
+    let vid = store.insert_download(&video).unwrap();
+    store.set_video_size(vid, 50_000_000).unwrap();
+    assert_eq!(store.get_download(vid).unwrap().size, Some(50_000_000));
+    store.mark_video_done(vid, Some(48_500_000), 999).unwrap();
+    let done = store.get_download(vid).unwrap();
+    assert_eq!(done.status, DownloadStatus::Done);
+    assert_eq!(done.size, Some(48_500_000));
+    assert_eq!(done.downloaded, 48_500_000);
 }
 
 #[test]

@@ -537,6 +537,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         url: message.url,
         video_format: message.selector,
         filename: message.filename,
+        size:
+          typeof message.size === "number" && message.size > 0
+            ? Math.round(message.size)
+            : undefined,
         cookie: cookie || undefined,
       });
     })()

@@ -14,6 +14,11 @@ pub fn data_dir() -> PathBuf {
         })
 }
 
+/// Returns the user's system Downloads directory when available.
+pub fn user_downloads_dir() -> Option<PathBuf> {
+    UserDirs::new().and_then(|u| u.download_dir().map(Path::to_path_buf))
+}
+
 /// The user's Downloads folder plus `LajuFile`, or a data-dir fallback.
 pub fn default_download_dir() -> PathBuf {
     UserDirs::new()

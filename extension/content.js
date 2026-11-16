@@ -24,19 +24,43 @@ function truncateTitle(title, maxLen = 36) {
   return `${clean.slice(0, maxLen).trimEnd()} ...`;
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let num = value / 1024;
+  let unit = 0;
+  while (num >= 1024 && unit + 1 < units.length) {
+    num /= 1024;
+    unit += 1;
+  }
+  return `${num.toFixed(1)} ${units[unit]}`;
+}
+
+function createSizeBadge(sizeBytes) {
+  const text = formatBytes(sizeBytes);
+  if (!text) return null;
+  const badge = document.createElement("span");
+  badge.textContent = `~${text}`;
+  badge.style.cssText =
+    'padding:2px 7px;border-radius:999px;background:rgba(76,154,255,0.16);border:1px solid rgba(76,154,255,0.32);color:#93c5fd;font:600 10.5px "Segoe UI",system-ui,sans-serif;font-variant-numeric:tabular-nums;flex-shrink:0;';
+  return badge;
+}
+
 function formatQualityDescription(format) {
   const label = String(format.label || "");
   if (/audio/i.test(label)) {
-    return "M4A berkas, quality Audio only";
+    return "M4A · Audio only";
   }
   const match = label.match(/^(\d+)p$/i);
   if (!match) {
-    return `MP4 berkas, quality ${label}`;
+    return `MP4 · ${label}`;
   }
   const height = Number(match[1]);
   const hd = height >= 720 ? " HD" : "";
   const fps = format.fps && Number(format.fps) > 30 ? ` ${Number(format.fps)} fps` : "";
-  return `MP4 berkas, quality ${label}${hd}${fps}`;
+  return `MP4 · ${label}${hd}${fps}`;
 }
 
 function errorText(result) {
@@ -64,7 +88,7 @@ function styleMenuRow(row) {
   });
 }
 
-async function download(url, selector, label, title, menu) {
+async function download(url, selector, label, title, menu, sizeBytes) {
   showStatusRow(menu, `Mengirim "${truncateTitle(title, 28)}" (${label}) ke LajuFile...`);
   const ext = /audio/i.test(label) ? "m4a" : "mp4";
   const baseTitle = title || pageVideoTitle();
@@ -73,6 +97,7 @@ async function download(url, selector, label, title, menu) {
     url,
     selector,
     filename: baseTitle ? `${baseTitle}.${ext}` : undefined,
+    size: typeof sizeBytes === "number" && sizeBytes > 0 ? sizeBytes : undefined,
   });
   const status = result ? result.status : 0;
   if (status === 401) {
@@ -113,11 +138,15 @@ async function showFormats(menu, url) {
   allRow.style.borderBottom = "1px solid rgba(148,163,184,0.18)";
   allRow.style.fontWeight = "600";
   allRow.style.color = "#4c9aff";
-  allRow.textContent = `Download best (${formats[0].label})`;
+  const allLeft = document.createElement("span");
+  allLeft.textContent = `Download best (${formats[0].label})`;
+  allRow.append(allLeft);
+  const allSize = createSizeBadge(formats[0].size);
+  if (allSize) allRow.append(allSize);
   allRow.addEventListener("click", (event) => {
     event.stopPropagation();
     const best = formats[0];
-    download(url, best.selector, best.label, rawTitle, menu);
+    download(url, best.selector, best.label, rawTitle, menu, best.size);
   });
   menu.append(allRow);
 
@@ -131,13 +160,18 @@ async function showFormats(menu, url) {
     left.style.cssText = "overflow:hidden;text-overflow:ellipsis;color:#e7edf5;";
 
     const right = document.createElement("span");
-    right.textContent = formatQualityDescription(format);
-    right.style.cssText = "color:#94a3b8;font-size:11px;flex-shrink:0;";
+    right.style.cssText = "display:inline-flex;align-items:center;gap:8px;flex-shrink:0;";
+    const desc = document.createElement("span");
+    desc.textContent = formatQualityDescription(format);
+    desc.style.cssText = "color:#94a3b8;font-size:11px;";
+    right.append(desc);
+    const sizeBadge = createSizeBadge(format.size);
+    if (sizeBadge) right.append(sizeBadge);
 
     item.append(left, right);
     item.addEventListener("click", (event) => {
       event.stopPropagation();
-      download(url, format.selector, format.label, rawTitle, menu);
+      download(url, format.selector, format.label, rawTitle, menu, format.size);
     });
     menu.append(item);
   });
@@ -209,7 +243,7 @@ function mount() {
 
   const menu = document.createElement("div");
   menu.style.cssText =
-    "display:none;position:absolute;top:100%;right:0;margin-top:6px;background:rgba(18,24,33,0.96);backdrop-filter:blur(14px);color:#e7edf5;border:1px solid rgba(148,163,184,0.22);border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,0.55);min-width:440px;max-width:560px;max-height:320px;overflow-y:auto;padding:6px;z-index:10000;";
+    "display:none;position:absolute;top:100%;right:0;margin-top:6px;background:rgba(18,24,33,0.96);backdrop-filter:blur(14px);color:#e7edf5;border:1px solid rgba(148,163,184,0.22);border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,0.55);min-width:480px;max-width:600px;max-height:340px;overflow-y:auto;padding:6px;z-index:10000;";
 
   button.addEventListener("click", (event) => {
     event.stopPropagation();

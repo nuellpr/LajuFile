@@ -170,6 +170,8 @@ pub struct AddRequest {
     pub cookie: Option<String>,
     /// yt-dlp selector; `Some` means the add is queued as a video job, not probed.
     pub video_format: Option<String>,
+    /// Optional estimated byte size selected from video formats.
+    pub video_size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +328,7 @@ enum Event {
         generation: u64,
         done: u64,
         total: Option<u64>,
+        filename: Option<String>,
     },
     SegmentProgress {
         id: i64,
@@ -402,6 +405,7 @@ struct EngineState {
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
+    video_streams: HashMap<i64, VideoStreamTracker>,
     pending_segments: HashMap<(i64, u32), u64>,
     last_persist: HashMap<i64, Instant>,
     message: Option<String>,
@@ -416,6 +420,68 @@ struct PendingCapture {
     file_name: String,
     size: Option<u64>,
     probe: Option<ProbeResult>,
+}
+
+#[derive(Default)]
+struct VideoStreamTracker {
+    seeded_size: Option<u64>,
+    current_file: Option<String>,
+    completed_bytes: u64,
+    current_peak: u64,
+    current_total: u64,
+}
+
+impl VideoStreamTracker {
+    fn from_seeded(seeded_size: Option<u64>) -> Self {
+        Self {
+            seeded_size: seeded_size.filter(|s| *s > 0),
+            ..Self::default()
+        }
+    }
+
+    fn record(
+        &mut self,
+        done: u64,
+        total: Option<u64>,
+        filename: Option<&str>,
+    ) -> (u64, Option<u64>) {
+        if let Some(fname) = filename {
+            if self.current_file.as_deref() != Some(fname) {
+                if self.current_file.is_some() {
+                    let finished = self.current_total.max(self.current_peak);
+                    self.completed_bytes = self.completed_bytes.saturating_add(finished);
+                    self.current_peak = 0;
+                    self.current_total = 0;
+                }
+                self.current_file = Some(fname.to_string());
+            }
+        } else if self.current_peak > 0 && done < self.current_peak / 2 {
+            // Filename omitted by yt-dlp; treat a sharp drop back toward zero as a new stream.
+            let finished = self.current_total.max(self.current_peak);
+            self.completed_bytes = self.completed_bytes.saturating_add(finished);
+            self.current_peak = 0;
+            self.current_total = 0;
+        }
+        self.current_peak = self.current_peak.max(done);
+        if let Some(t) = total
+            && t > 0
+        {
+            self.current_total = t;
+        }
+        let cumulative_done = self.completed_bytes.saturating_add(done);
+        let observed_total = self
+            .completed_bytes
+            .saturating_add(self.current_total.max(done));
+        let expected_size = if self.current_total > 0 {
+            Some(
+                self.seeded_size
+                    .map_or(observed_total, |seeded| seeded.max(observed_total)),
+            )
+        } else {
+            self.seeded_size
+        };
+        (cumulative_done, expected_size)
+    }
 }
 
 fn engine_loop(
@@ -484,6 +550,7 @@ fn engine_loop(
         generation: 0,
         speeds: HashMap::new(),
         progress: HashMap::new(),
+        video_streams: HashMap::new(),
         pending_segments: HashMap::new(),
         last_persist: HashMap::new(),
         message: None,
@@ -740,6 +807,7 @@ impl EngineState {
             user_agent: request.user_agent.clone(),
             cookie: request.cookie.clone(),
             video_format: request.video_format.clone(),
+            video_size: request.size,
         };
         if self.settings.ask_where_to_save {
             let key = self.next_capture_key;
@@ -890,6 +958,7 @@ impl EngineState {
             user_agent: pending.request.user_agent,
             cookie: pending.request.cookie,
             video_format: pending.request.video_format,
+            video_size: pending.request.size,
         };
         if add.video_format.is_some() {
             self.finish_video_add(add, pending.reply);
@@ -1092,7 +1161,7 @@ impl EngineState {
             file_name: file_name.clone(),
             temp_path,
             save_path,
-            size: None,
+            size: request.video_size.filter(|s| *s > 0),
             status,
             category: Category::Video,
             kind: "video".to_string(),
@@ -1268,17 +1337,22 @@ impl EngineState {
                 generation,
                 done,
                 total,
+                filename,
             } => {
                 if self.active.get(&id).map(|active| active.generation) != Some(generation) {
                     return;
                 }
-                if let Some(total) = total
-                    && total > 0
+                let (cumulative_done, expected_size) = {
+                    let tracker = self.video_streams.entry(id).or_default();
+                    tracker.record(done, total, filename.as_deref())
+                };
+                if let Some(size) = expected_size
+                    && size > 0
                 {
-                    let _ = self.store.set_size(id, total);
+                    let _ = self.store.set_video_size(id, size);
                 }
-                self.record_speed(id, done);
-                self.pending_segments.insert((id, 0), done);
+                self.record_speed(id, cumulative_done);
+                self.pending_segments.insert((id, 0), cumulative_done);
                 let should_persist = self
                     .last_persist
                     .get(&id)
@@ -1630,16 +1704,22 @@ impl EngineState {
             }
         };
         let id = download.id;
+        self.video_streams
+            .insert(id, VideoStreamTracker::from_seeded(download.size));
         if let Some(stdout) = child.stdout.take() {
             let events = self.events.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some((done, total)) = parse_progress(&line) {
+                    if let Some(parsed) = parse_progress(&line) {
+                        if is_auxiliary_media_file(parsed.filename.as_deref()) {
+                            continue;
+                        }
                         let _ = events.send(Event::VideoProgress {
                             id,
                             generation,
-                            done,
-                            total,
+                            done: parsed.done,
+                            total: parsed.total,
+                            filename: parsed.filename,
                         });
                     }
                 }
@@ -1702,7 +1782,8 @@ impl EngineState {
             if success {
                 // The row reserved its temp name before the run; a finished video leaves it empty.
                 let _ = std::fs::remove_file(temp_path_for(&run.save_path));
-                let _ = self.store.mark_done(id, now_millis());
+                let actual_bytes = std::fs::metadata(&run.save_path).ok().map(|m| m.len());
+                let _ = self.store.mark_video_done(id, actual_bytes, now_millis());
             } else {
                 let raw = run
                     .last_error
@@ -1716,6 +1797,7 @@ impl EngineState {
                 let _ = std::fs::remove_file(&run.save_path);
                 remove_parts(&run.save_path);
             }
+            self.video_streams.remove(&id);
             self.speeds.remove(&id);
             self.progress.remove(&id);
             self.last_persist.remove(&id);
@@ -1770,6 +1852,7 @@ impl EngineState {
             if let Some(handle) = active.handle.take() {
                 handle.abort();
             }
+            self.video_streams.remove(&id);
             self.speeds.remove(&id);
             self.progress.remove(&id);
             self.last_persist.remove(&id);
@@ -1889,6 +1972,7 @@ impl EngineState {
                 let _ = std::fs::remove_file(&save_path);
             }
         }
+        self.video_streams.remove(&id);
         self.speeds.remove(&id);
         self.progress.remove(&id);
         self.last_persist.remove(&id);
@@ -2343,9 +2427,9 @@ fn video_args(
         "--http-chunk-size".into(),
         "10M".into(),
         // Machine-readable progress, one line per update:
-        // "LF <downloaded> <total> <estimate>", either total may be NA.
+        // "LF <downloaded> <total> <estimate> <filename>", either total may be NA.
         "--progress-template".into(),
-        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s".into(),
+        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.filename)s".into(),
         "-f".into(),
         selector.into(),
         "-o".into(),
@@ -2362,14 +2446,58 @@ fn compute_smoothed_speed(previous: Option<u64>, instant: u64) -> u64 {
     }
 }
 
-fn parse_progress(line: &str) -> Option<(u64, Option<u64>)> {
-    let mut fields = line.strip_prefix("LF ")?.split_whitespace();
-    let done = fields.next()?.parse().ok()?;
-    let total = fields
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedVideoProgress {
+    done: u64,
+    total: Option<u64>,
+    filename: Option<String>,
+}
+
+fn is_auxiliary_media_file(filename: Option<&str>) -> bool {
+    let Some(name) = filename else {
+        return false;
+    };
+    let lower = name.trim().to_ascii_lowercase();
+    let base = lower.strip_suffix(".part").unwrap_or(&lower);
+    [
+        ".vtt",
+        ".srt",
+        ".ass",
+        ".ssa",
+        ".ttml",
+        ".lrc",
+        ".srv1",
+        ".srv2",
+        ".srv3",
+        ".json3",
+        ".description",
+        ".info.json",
+        ".webp",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".ytdl",
+    ]
+    .iter()
+    .any(|ext| base.ends_with(ext))
+}
+
+fn parse_progress(line: &str) -> Option<ParsedVideoProgress> {
+    let rest = line.strip_prefix("LF ")?;
+    let mut parts = rest.splitn(4, ' ');
+    let done = parts.next()?.parse().ok()?;
+    let total_opt = parts.next().and_then(|text| text.parse().ok());
+    let estimate_opt = parts.next().and_then(|text| text.parse().ok());
+    let filename = parts
         .next()
-        .and_then(|text| text.parse().ok())
-        .or_else(|| fields.next().and_then(|text| text.parse().ok()));
-    Some((done, total))
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "NA")
+        .map(str::to_string);
+    Some(ParsedVideoProgress {
+        done,
+        total: total_opt.or(estimate_opt),
+        filename,
+    })
 }
 
 fn stop_video(active: &mut ActiveDownload) {
@@ -2448,12 +2576,49 @@ mod tests {
     fn progress_lines_carry_downloaded_bytes_and_total() {
         assert_eq!(
             parse_progress("LF 1234 5678 5678"),
-            Some((1234, Some(5678)))
+            Some(ParsedVideoProgress {
+                done: 1234,
+                total: Some(5678),
+                filename: None,
+            })
         );
-        assert_eq!(parse_progress("LF 99 NA 4321"), Some((99, Some(4321))));
-        assert_eq!(parse_progress("LF 99 NA NA"), Some((99, None)));
+        assert_eq!(
+            parse_progress("LF 99 NA 4321 C:/dl/clip with spaces.f137.mp4"),
+            Some(ParsedVideoProgress {
+                done: 99,
+                total: Some(4321),
+                filename: Some("C:/dl/clip with spaces.f137.mp4".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_progress("LF 99 NA NA"),
+            Some(ParsedVideoProgress {
+                done: 99,
+                total: None,
+                filename: None,
+            })
+        );
         assert_eq!(parse_progress("[youtube] Extracting URL"), None);
         assert_eq!(parse_progress(""), None);
+    }
+
+    #[test]
+    fn video_stream_tracker_skips_subtitles_and_accumulates_video_and_audio() {
+        assert!(is_auxiliary_media_file(Some("clip.en.vtt")));
+        assert!(is_auxiliary_media_file(Some("clip.id.srt.part")));
+        assert!(!is_auxiliary_media_file(Some("clip.f137.mp4")));
+
+        let mut tracker = VideoStreamTracker::from_seeded(Some(150_000_000));
+        let (done1, sz1) = tracker.record(20_000_000, Some(135_000_000), Some("clip.f137.mp4"));
+        assert_eq!(done1, 20_000_000);
+        assert_eq!(sz1, Some(150_000_000));
+
+        let (done2, _) = tracker.record(135_000_000, Some(135_000_000), Some("clip.f137.mp4"));
+        assert_eq!(done2, 135_000_000);
+
+        let (done3, sz3) = tracker.record(5_000_000, Some(18_000_000), Some("clip.f140.m4a"));
+        assert_eq!(done3, 140_000_000);
+        assert_eq!(sz3, Some(153_000_000));
     }
 
     #[test]

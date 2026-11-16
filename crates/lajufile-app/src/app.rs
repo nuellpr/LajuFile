@@ -616,7 +616,8 @@ impl LajuFileApp {
         let Some(mut picker) = self.folder_picker.take() else {
             return;
         };
-        match picker.show(ctx) {
+        let dark = matches!(self.theme, Theme::Dark);
+        match picker.show(ctx, dark) {
             Some(FolderChoice::Select(path)) => match self.folder_picker_target.take() {
                 Some(FolderTarget::Category(cat)) => {
                     self.settings_draft.category_dirs.insert(cat, path);
@@ -918,6 +919,7 @@ impl LajuFileApp {
                             user_agent: download.user_agent,
                             cookie: None,
                             video_format: download.video_format,
+                            video_size: download.size,
                         }));
                         self.toast = Some(("Redownload queued".to_string(), Instant::now()));
                     }

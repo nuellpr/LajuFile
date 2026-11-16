@@ -307,10 +307,19 @@ impl Store {
         Ok(total)
     }
 
-    /// Fills in a size discovered after the row was created (video jobs).
+    /// Fills in a size discovered after the row was created (HTTP probe).
     pub fn set_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE downloads SET size = ?1 WHERE id = ?2 AND size IS NULL",
+            params![size as i64, id],
+        )?;
+        Ok(())
+    }
+
+    /// Updates estimated total size for a video job as yt-dlp switches streams.
+    pub fn set_video_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE downloads SET size = ?1 WHERE id = ?2 AND kind = 'video'",
             params![size as i64, id],
         )?;
         Ok(())
@@ -327,6 +336,35 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
+        Ok(())
+    }
+
+    /// Completes a video download using the actual merged file size on disk.
+    pub fn mark_video_done(
+        &mut self,
+        id: i64,
+        actual_bytes: Option<u64>,
+        completed_at: i64,
+    ) -> Result<(), StoreError> {
+        let Some(bytes) = actual_bytes.filter(|b| *b > 0) else {
+            return self.mark_done(id, completed_at);
+        };
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE downloads
+             SET status = 'done', completed_at = ?1,
+                 size = ?2, downloaded = ?2, error = NULL
+             WHERE id = ?3",
+            params![completed_at, bytes as i64, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.execute(
+            "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = 0",
+            params![bytes as i64, id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
