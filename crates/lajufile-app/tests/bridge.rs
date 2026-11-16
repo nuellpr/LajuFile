@@ -154,6 +154,24 @@ async fn options_allows_extension_cors_headers() {
         .to_ascii_lowercase();
     assert!(allowed.contains("content-type"));
     assert!(allowed.contains("x-lajufile-token"));
+
+    let blocked = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Origin", "https://evil.example")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !blocked
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
+
+    let bad_scheme =
+        post_download(port, r#"{"url":"file:///C:/Windows/win.ini"}"#.to_string()).await;
+    assert_eq!(bad_scheme.status(), reqwest::StatusCode::BAD_REQUEST);
     handle.shutdown();
 }
 
@@ -629,4 +647,111 @@ async fn capture_decision_supports_custom_name_and_download_later() {
     assert_eq!(snapshot.downloads[0].status, DownloadStatus::Paused);
     assert_eq!(snapshot.downloads[0].save_path, chosen.join("custom.bin"));
     handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capture_prompts_are_served_in_fifo_order() {
+    let server = start_server();
+    let (handle, dir) = start_engine_prompt(0);
+    let port = bound_port(&handle);
+    let chosen = dir.path().join("chosen");
+
+    let first_body = format!(r#"{{"url":"{}/file.bin"}}"#, server.base);
+    let first_req = tokio::spawn(async move { post_download(port, first_body).await });
+
+    let first_snapshot = wait_for(
+        &handle,
+        |snapshot| snapshot.pending_capture.is_some(),
+        Duration::from_secs(5),
+    );
+    let first_prompt = first_snapshot.pending_capture.as_ref().unwrap();
+    assert_eq!(first_prompt.key, 0);
+
+    let second_body = format!(r#"{{"url":"{}/slow.bin"}}"#, server.base);
+    let second_req = tokio::spawn(async move { post_download(port, second_body).await });
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    handle
+        .send(Command::CaptureFolderDecision {
+            key: 0,
+            path: Some(chosen.clone()),
+        })
+        .unwrap();
+    assert_eq!(
+        first_req.await.unwrap().status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    let second_snapshot = wait_for(
+        &handle,
+        |snapshot| {
+            snapshot
+                .pending_capture
+                .as_ref()
+                .is_some_and(|prompt| prompt.key == 1)
+        },
+        Duration::from_secs(5),
+    );
+    assert!(
+        second_snapshot
+            .pending_capture
+            .as_ref()
+            .unwrap()
+            .url
+            .ends_with("/slow.bin")
+    );
+
+    handle
+        .send(Command::CaptureFolderDecision {
+            key: 1,
+            path: Some(chosen),
+        })
+        .unwrap();
+    assert_eq!(
+        second_req.await.unwrap().status(),
+        reqwest::StatusCode::CREATED
+    );
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rules_requires_token_and_returns_settings_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        bridge_port: 0,
+        bridge_token: VALID_TOKEN.to_string(),
+        excluded_domains: "ads.example.com, *.blocked.net".to_string(),
+        captured_extensions: "zip, iso".to_string(),
+        ..Settings::default()
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+    let port = bound_port(&handle);
+    let url = format!("http://127.0.0.1:{port}/rules");
+    let client = reqwest::Client::new();
+
+    let unauthorized = client.get(&url).send().await.unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let (name, value) = token_header();
+    let authorized = client.get(&url).header(name, value).send().await.unwrap();
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+    let json: serde_json::Value =
+        serde_json::from_slice(&authorized.bytes().await.unwrap()).unwrap();
+    assert_eq!(json["excluded_domains"], "ads.example.com, *.blocked.net");
+    assert_eq!(json["captured_extensions"], "zip, iso");
+    let paired = wait_for(
+        &handle,
+        |snapshot| snapshot.settings.browser_paired,
+        Duration::from_secs(5),
+    );
+    assert!(paired.settings.browser_paired);
+    handle.shutdown();
+    let persisted = Settings::load_or_create(dir.path()).unwrap();
+    assert!(persisted.browser_paired);
 }

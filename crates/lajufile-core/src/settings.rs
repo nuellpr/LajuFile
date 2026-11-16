@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_CAPTURE_EXTENSIONS: &str = "zip rar 7z tar gz bz2 xz tgz exe msi msix apk dmg deb rpm iso img bin mp4 mkv webm avi mov flv wmv m4v mp3 m4a wav flac ogg aac opus pdf doc docx xls xlsx ppt pptx epub csv torrent";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicatePolicy {
+    #[default]
+    Reject,
+    RenameNumbered,
+    ResumeExisting,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -30,10 +41,44 @@ pub struct Settings {
     pub clipboard_monitor: bool,
     #[serde(default)]
     pub category_dirs: std::collections::BTreeMap<String, PathBuf>,
+    #[serde(default = "default_scale")]
+    pub ui_scale_pct: u32,
+    #[serde(default)]
+    pub excluded_domains: String,
+    #[serde(default = "default_capture_extensions")]
+    pub captured_extensions: String,
+    #[serde(default = "default_true")]
+    pub show_complete_dialog: bool,
+    #[serde(default)]
+    pub show_progress_on_start: bool,
+    #[serde(default)]
+    pub duplicate_policy: DuplicatePolicy,
+    #[serde(default)]
+    pub video_subtitles: bool,
+    #[serde(default = "default_true")]
+    pub video_chapters: bool,
+    #[serde(default)]
+    pub browser_paired: bool,
+    #[serde(default)]
+    pub suppress_browser_wizard: bool,
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_scale() -> u32 {
+    100
+}
+
+fn default_capture_extensions() -> String {
+    DEFAULT_CAPTURE_EXTENSIONS.to_string()
+}
+
+fn default_language() -> String {
+    "system".to_string()
 }
 
 impl Default for Settings {
@@ -52,7 +97,55 @@ impl Default for Settings {
             ask_where_to_save: false,
             clipboard_monitor: true,
             category_dirs: std::collections::BTreeMap::new(),
+            ui_scale_pct: 100,
+            excluded_domains: String::new(),
+            captured_extensions: default_capture_extensions(),
+            show_complete_dialog: true,
+            show_progress_on_start: false,
+            duplicate_policy: DuplicatePolicy::Reject,
+            video_subtitles: false,
+            video_chapters: true,
+            browser_paired: false,
+            suppress_browser_wizard: false,
+            language: default_language(),
         }
+    }
+}
+
+impl Settings {
+    pub fn is_domain_excluded(&self, host: &str) -> bool {
+        let host = host.trim().to_ascii_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        self.excluded_domains
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .filter_map(|token| {
+                let clean = token
+                    .trim()
+                    .trim_start_matches("*.")
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase();
+                (!clean.is_empty()).then_some(clean)
+            })
+            .any(|rule| host == rule || host.ends_with(&format!(".{rule}")))
+    }
+
+    pub fn is_extension_captured(&self, ext: &str) -> bool {
+        let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+        if ext.is_empty() {
+            return false;
+        }
+        let source = if self.captured_extensions.trim().is_empty() {
+            DEFAULT_CAPTURE_EXTENSIONS
+        } else {
+            self.captured_extensions.as_str()
+        };
+        source
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .map(|token| token.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|token| !token.is_empty())
+            .any(|rule| rule == "*" || rule == ext)
     }
 }
 
@@ -165,6 +258,29 @@ mod tests {
         }"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         assert!(!settings.ask_where_to_save);
+        assert_eq!(settings.ui_scale_pct, 100);
+        assert!(settings.show_complete_dialog);
+        assert!(!settings.show_progress_on_start);
+        assert_eq!(settings.duplicate_policy, DuplicatePolicy::Reject);
+        assert!(!settings.browser_paired);
+        assert!(!settings.suppress_browser_wizard);
+        assert_eq!(settings.language, "system");
+    }
+
+    #[test]
+    fn domain_and_extension_rules_match_cleanly() {
+        let s = Settings {
+            excluded_domains: "*.example.com, cdn.skip.org".to_string(),
+            captured_extensions: "zip, .gguf, iso".to_string(),
+            ..Settings::default()
+        };
+        assert!(s.is_domain_excluded("example.com"));
+        assert!(s.is_domain_excluded("dl.example.com"));
+        assert!(s.is_domain_excluded("CDN.SKIP.ORG"));
+        assert!(!s.is_domain_excluded("other-example.com"));
+        assert!(s.is_extension_captured("gguf"));
+        assert!(s.is_extension_captured(".ZIP"));
+        assert!(!s.is_extension_captured("html"));
     }
 
     #[test]

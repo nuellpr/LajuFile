@@ -14,13 +14,24 @@ pub const FFMPEG: &str = "ffmpeg";
 
 #[cfg(windows)]
 pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub const YTDLP_URL: &str =
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+pub const YTDLP_URL: &str =
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 pub const YTDLP_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
 
 #[cfg(windows)]
 pub const FFMPEG_ZIP_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub const FFMPEG_ZIP_URL: &str = "https://evermeet.cx/ffmpeg/getrelease/zip";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+pub const FFMPEG_ZIP_URL: &str =
+    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 pub const FFMPEG_ZIP_URL: &str =
     "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
 
@@ -40,6 +51,190 @@ pub fn tools_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     lajufile_core::paths::data_dir().join("tools")
+}
+
+/// Resolves the Chromium extension folder next to the executable, bundle Resources, cwd, or workspace root.
+pub fn extension_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        candidates.push(parent.join("extension"));
+        if let Some(bundle_contents) = parent.parent() {
+            candidates.push(bundle_contents.join("Resources").join("extension"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("extension"));
+    }
+    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+    {
+        candidates.push(root.join("extension"));
+    }
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("manifest.json").is_file())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedBrowser {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub extensions_url: &'static str,
+    pub is_firefox: bool,
+    pub executable: Option<PathBuf>,
+}
+
+/// Detects common browsers installed on the user's machine so the onboarding dialog
+/// prioritizes browsers actually present on this system.
+pub fn detect_installed_browsers() -> Vec<DetectedBrowser> {
+    struct Spec {
+        id: &'static str,
+        name: &'static str,
+        extensions_url: &'static str,
+        is_firefox: bool,
+        rel_paths: &'static [&'static str],
+    }
+
+    const SPECS: &[Spec] = &[
+        Spec {
+            id: "chrome",
+            name: "Google Chrome",
+            extensions_url: "chrome://extensions",
+            is_firefox: false,
+            #[cfg(windows)]
+            rel_paths: &[r"Google\Chrome\Application\chrome.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Google Chrome.app/Contents/MacOS/Google Chrome"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["google-chrome", "google-chrome-stable", "chromium"],
+        },
+        Spec {
+            id: "edge",
+            name: "Microsoft Edge",
+            extensions_url: "edge://extensions",
+            is_firefox: false,
+            #[cfg(windows)]
+            rel_paths: &[r"Microsoft\Edge\Application\msedge.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["microsoft-edge", "microsoft-edge-stable"],
+        },
+        Spec {
+            id: "brave",
+            name: "Brave",
+            extensions_url: "brave://extensions",
+            is_firefox: false,
+            #[cfg(windows)]
+            rel_paths: &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Brave Browser.app/Contents/MacOS/Brave Browser"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["brave-browser", "brave"],
+        },
+        Spec {
+            id: "opera",
+            name: "Opera",
+            extensions_url: "opera://extensions",
+            is_firefox: false,
+            #[cfg(windows)]
+            rel_paths: &[r"Programs\Opera\opera.exe", r"Opera\opera.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Opera.app/Contents/MacOS/Opera"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["opera"],
+        },
+        Spec {
+            id: "vivaldi",
+            name: "Vivaldi",
+            extensions_url: "vivaldi://extensions",
+            is_firefox: false,
+            #[cfg(windows)]
+            rel_paths: &[r"Vivaldi\Application\vivaldi.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Vivaldi.app/Contents/MacOS/Vivaldi"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["vivaldi", "vivaldi-stable"],
+        },
+        Spec {
+            id: "firefox",
+            name: "Mozilla Firefox",
+            extensions_url: "about:addons",
+            is_firefox: true,
+            #[cfg(windows)]
+            rel_paths: &[r"Mozilla Firefox\firefox.exe"],
+            #[cfg(target_os = "macos")]
+            rel_paths: &["Firefox.app/Contents/MacOS/firefox"],
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            rel_paths: &["firefox"],
+        },
+    ];
+
+    #[cfg(windows)]
+    let roots: Vec<PathBuf> = [
+        std::env::var_os("PROGRAMFILES"),
+        std::env::var_os("PROGRAMFILES(X86)"),
+        std::env::var_os("LOCALAPPDATA"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .collect();
+
+    #[cfg(target_os = "macos")]
+    let roots: Vec<PathBuf> = {
+        let mut r = vec![PathBuf::from("/Applications")];
+        if let Some(home) = std::env::var_os("HOME") {
+            r.push(PathBuf::from(home).join("Applications"));
+        }
+        r
+    };
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let roots: Vec<PathBuf> = {
+        let mut r: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        r.extend([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/snap/bin"),
+        ]);
+        r
+    };
+
+    let mut found = Vec::new();
+    for spec in SPECS {
+        let exe = roots
+            .iter()
+            .flat_map(|root| spec.rel_paths.iter().map(move |rel| root.join(rel)))
+            .find(|candidate| candidate.is_file());
+        if exe.is_some() {
+            found.push(DetectedBrowser {
+                id: spec.id,
+                name: spec.name,
+                extensions_url: spec.extensions_url,
+                is_firefox: spec.is_firefox,
+                executable: exe,
+            });
+        }
+    }
+
+    if found.is_empty() {
+        for spec in SPECS.iter().take(3) {
+            found.push(DetectedBrowser {
+                id: spec.id,
+                name: spec.name,
+                extensions_url: spec.extensions_url,
+                is_firefox: spec.is_firefox,
+                executable: None,
+            });
+        }
+    }
+    found
 }
 
 pub fn tool_path(dir: &Path, name: &str) -> PathBuf {
@@ -105,7 +300,19 @@ fn download(target: &Path, url: &str) -> Result<(), String> {
     let mut part = target.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    run(CURL_BIN, &["-L", "--fail", "-o", path_arg(&part)?, url])?;
+    run(
+        CURL_BIN,
+        &[
+            "-L",
+            "--fail",
+            "--proto",
+            "=https",
+            "-o",
+            path_arg(&part)?,
+            "--",
+            url,
+        ],
+    )?;
     std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))
 }
 
@@ -216,5 +423,11 @@ mod tests {
 
         assert_eq!(find_file(dir.path(), FFMPEG), Some(bin.join(FFMPEG)));
         assert_eq!(find_file(dir.path(), "missing.bin"), None);
+    }
+
+    #[test]
+    fn extension_dir_finds_workspace_extension_folder() {
+        let dir = extension_dir().expect("workspace extension directory");
+        assert!(dir.join("manifest.json").is_file());
     }
 }

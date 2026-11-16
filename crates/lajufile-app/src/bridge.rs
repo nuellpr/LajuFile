@@ -8,12 +8,12 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, HeaderName, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::engine::Command;
 
@@ -153,16 +153,40 @@ pub async fn start(
     }
 }
 
+fn is_local_origin(origin: &str, prefix: &str) -> bool {
+    match origin.strip_prefix(prefix) {
+        Some("") => true,
+        Some(rest) => rest.starts_with(':'),
+        None => false,
+    }
+}
+
+fn is_allowed_origin(origin: &HeaderValue) -> bool {
+    let Ok(s) = origin.to_str() else {
+        return false;
+    };
+    s.starts_with("chrome-extension://")
+        || s.starts_with("moz-extension://")
+        || s.starts_with("extension://")
+        || s.starts_with("safari-web-extension://")
+        || is_local_origin(s, "http://127.0.0.1")
+        || is_local_origin(s, "http://localhost")
+        || is_local_origin(s, "http://[::1]")
+}
+
 fn router(state: BridgeAppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/rules", get(rules))
         .route("/downloads", post(downloads))
         .route("/video", post(video))
         .route("/video/formats", post(video_formats))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    is_allowed_origin(origin)
+                }))
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([header::CONTENT_TYPE, HeaderName::from_static(BRIDGE_HEADER)]),
         )
@@ -173,12 +197,41 @@ async fn health() -> Json<Value> {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
+fn authorize_and_pair(
+    headers: &HeaderMap,
+    state: &BridgeAppState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    authorize(headers, &state.token)?;
+    let _ = state.commands.send(Command::MarkBrowserPaired);
+    Ok(())
+}
+
+async fn rules(
+    State(state): State<BridgeAppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_and_pair(&headers, &state)?;
+    let (reply, response) = tokio::sync::oneshot::channel();
+    if state.commands.send(Command::GetRules { reply }).is_err() {
+        return Err(internal("engine stopped"));
+    }
+    let (excluded_domains, captured_extensions) =
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|_| internal("engine timeout"))?
+            .map_err(|_| internal("engine stopped"))?;
+    Ok(Json(json!({
+        "excluded_domains": excluded_domains,
+        "captured_extensions": captured_extensions,
+    })))
+}
+
 async fn downloads(
     State(state): State<BridgeAppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    authorize(&headers, &state.token)?;
+    authorize_and_pair(&headers, &state)?;
     let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
     queue_add(&state, request).await
 }
@@ -188,7 +241,7 @@ async fn video(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    authorize(&headers, &state.token)?;
+    authorize_and_pair(&headers, &state)?;
     let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
     if request
         .video_format
@@ -209,7 +262,7 @@ async fn video_formats(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authorize(&headers, &state.token)?;
+    authorize_and_pair(&headers, &state)?;
     let request: FormatsRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
 
     let (reply, response) = tokio::sync::oneshot::channel();

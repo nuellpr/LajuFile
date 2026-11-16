@@ -8,38 +8,78 @@
   </head>
   <body>
     <main>
+      <div class="hero-glow"></div>
       <header>
-        <img src="icons/icon-32.png" alt="" width="28" height="28" />
-        <div>
-          <h1>LajuFile</h1>
-          <p>Edge capture</p>
+        <div class="brand">
+          <div class="logo-ring">
+            <img src="icons/icon-32.png" alt="" width="28" height="28" />
+          </div>
+          <div>
+            <h1>LajuFile</h1>
+            <p>Browser integration</p>
+          </div>
         </div>
+        <span id="pairBadge" class="badge pending">Unpaired</span>
       </header>
 
-      <section class="status-card">
-        <div class="status-line">
-          <span id="dot" class="dot"></span>
-          <strong id="state">Checking…</strong>
+      <section class="card status-card">
+        <div class="status-row">
+          <div class="status-line">
+            <span id="dot" class="dot"></span>
+            <div>
+              <strong id="state">Checking bridge…</strong>
+              <p id="detail">127.0.0.1:53841</p>
+            </div>
+          </div>
+          <button id="test" class="ghost-btn" type="button">Test</button>
         </div>
-        <p id="detail">Port 53841</p>
-        <button id="test" class="quiet" type="button">Test connection</button>
       </section>
 
-      <label class="toggle">
+      <label class="card toggle">
         <span>
-          <strong>Capture downloads</strong>
-          <small>Send new downloads to LajuFile</small>
+          <strong>Capture browser downloads</strong>
+          <small>Auto-catches links, PDFs &amp; videos</small>
         </span>
-        <input id="autoCapture" type="checkbox" />
+        <span class="switch">
+          <input id="autoCapture" type="checkbox" />
+          <span class="slider"></span>
+        </span>
       </label>
 
-      <p class="hint">
-        Pair the port and token in extension options. Forms, protected streams, and
-        downloads started before LajuFile is running stay in the browser.
-      </p>
+      <section id="siteCard" class="card site-card hidden">
+        <div class="site-row">
+          <div>
+            <span class="mini-kicker">THIS WEBSITE</span>
+            <strong id="siteHost" class="site-host">example.com</strong>
+          </div>
+          <button id="siteToggle" class="ghost-btn" type="button">Pause on site</button>
+        </div>
+      </section>
 
-      <button id="options" class="primary" type="button">Extension options</button>
-      <footer>LajuFile 0.1.0</footer>
+      <section id="quickPairBox" class="card pair-card hidden">
+        <div class="pair-head">
+          <strong>Quick-Pair with Desktop</strong>
+          <span class="mini-hint">Paste JSON code</span>
+        </div>
+        <div class="pair-row">
+          <input
+            id="pairCode"
+            type="text"
+            placeholder='{"port":53841,"token":"..."}'
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="pairApply" class="mini-primary" type="button">Pair</button>
+        </div>
+        <p id="pairFeedback" class="pair-feedback"></p>
+      </section>
+
+      <div class="tip-card">
+        <span>Hold <kbd>Alt</kbd> + <strong>Click</strong> on any link to keep the download inside your browser.</span>
+      </div>
+
+      <button id="options" class="primary" type="button">Extension Options &amp; Filters</button>
+      <footer>LajuFile Capture · v1.0.0</footer>
     </main>
     <script src="popup.js"></script>
   </body>

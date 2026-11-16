@@ -1,3 +1,11 @@
 /target
+/dist
 *.lajufile
 /.superpowers/
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+settings.json
+*.key

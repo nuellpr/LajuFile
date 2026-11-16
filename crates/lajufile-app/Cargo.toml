@@ -10,6 +10,10 @@ rust-version.workspace = true
 name = "lajufile"
 path = "src/main.rs"
 
+[[bin]]
+name = "lajufile-setup"
+path = "src/bin/lajufile-setup.rs"
+
 [dependencies]
 lajufile-core = { path = "../lajufile-core" }
 arboard.workspace = true

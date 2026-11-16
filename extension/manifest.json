@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "LajuFile Capture",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "minimum_chrome_version": "102",
-  "description": "Send downloads from Chrome, Brave, Edge, and Chromium browsers to the LajuFile desktop download manager.",
+  "description": "Send downloads from Chrome, Brave, Edge, Vivaldi, Opera, and Chromium browsers on Windows, macOS, and Linux to LajuFile.",
   "permissions": [
     "downloads",
     "cookies",
     "contextMenus",
     "storage",
-    "notifications"
+    "notifications",
+    "activeTab"
   ],
   "host_permissions": [
     "<all_urls>",
@@ -25,8 +26,21 @@
         "https://m.youtube.com/*",
         "https://youtube.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "interceptor.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "action": {
@@ -51,7 +65,11 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/icon-16.png", "icons/icon-32.png", "icons/icon-48.png"],
+      "resources": [
+        "icons/icon-16.png",
+        "icons/icon-32.png",
+        "icons/icon-48.png"
+      ],
       "matches": [
         "https://www.youtube.com/*",
         "https://m.youtube.com/*",

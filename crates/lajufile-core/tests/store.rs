@@ -365,3 +365,42 @@ fn set_size_only_fills_an_unknown_size() {
     store.set_size(id, 900).unwrap();
     assert_eq!(store.get_download(id).unwrap().size, Some(500));
 }
+
+#[test]
+fn update_url_clears_validators_and_error() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut new = sample("https://example.com/old.zip", 100);
+    new.etag = Some("\"v1\"".to_string());
+    new.last_modified = Some("Mon, 01 Jan 2024 00:00:00 GMT".to_string());
+    let id = store.insert_download(&new).unwrap();
+    store
+        .update_status(id, DownloadStatus::Error, Some("403 expired"))
+        .unwrap();
+
+    store
+        .update_url(id, "https://example.com/new.zip?token=fresh")
+        .unwrap();
+    let updated = store.get_download(id).unwrap();
+    assert_eq!(updated.url, "https://example.com/new.zip?token=fresh");
+    assert_eq!(updated.final_url, None);
+    assert_eq!(updated.etag, None);
+    assert_eq!(updated.last_modified, None);
+    assert_eq!(updated.error, None);
+}
+
+#[test]
+fn update_location_renames_and_updates_paths() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store
+        .insert_download(&sample("https://example.com/a.iso", 100))
+        .unwrap();
+    let save = PathBuf::from("D:/Renamed/ubuntu.iso");
+    let temp = PathBuf::from("D:/Renamed/ubuntu.iso.lajufile");
+    store
+        .update_location(id, "ubuntu.iso", &save, &temp)
+        .unwrap();
+    let d = store.get_download(id).unwrap();
+    assert_eq!(d.file_name, "ubuntu.iso");
+    assert_eq!(d.save_path, save);
+    assert_eq!(d.temp_path, temp);
+}

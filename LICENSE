@@ -20,28 +20,62 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
--------------------------------------------------------------------------------
+================================================================================
+TERMS AND CONDITIONS
+================================================================================
 
-Lisensi MIT (Terjemahan Bahasa Indonesia)
+1. Definitions
+   "Software" refers to LajuFile, including its desktop application, core
+   download engine, Windows installer, browser extensions, documentation, and
+   associated source files distributed under this repository.
+   "Contributor" refers to the copyright holder and any person submitting
+   accepted code or documentation contributions to the Software.
+
+2. Grant of Rights
+   Subject to compliance with this License, you are granted a worldwide,
+   royalty-free, non-exclusive license to use, copy, modify, merge, publish,
+   distribute, sublicense, and/or sell copies of the Software, either in
+   source code or compiled executable/installer form.
+
+3. Conditions of Redistribution
+   All copies or substantial portions of the Software, whether modified or
+   unmodified, must retain the Copyright notice above, this License text, and
+   these Terms and Conditions.
+
+4. Lawful & Responsible Use
+   LajuFile is a general-purpose download manager and browser productivity
+   tool. You are solely responsible for ensuring that URLs, media streams,
+   and third-party tools (such as yt-dlp and ffmpeg) downloaded or invoked
+   through the Software comply with applicable laws, copyright regulations,
+   and the terms of service of the source websites you access.
+
+5. Disclaimer of Warranty & Limitation of Liability
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+   CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF OR INABILITY TO
+   USE THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+SYARAT DAN KETENTUAN (TERJEMAHAN BAHASA INDONESIA)
+--------------------------------------------------------------------------------
 
 Hak Cipta (c) 2026 Nuel Wallep
 
-Izin dengan ini diberikan, secara gratis, kepada siapa pun yang memperoleh
-salinan perangkat lunak ini dan berkas dokumentasi terkait ("Perangkat Lunak"),
-untuk menggunakan Perangkat Lunak tanpa batasan, termasuk namun tidak terbatas
-pada hak untuk menggunakan, menyalin, memodifikasi, menggabungkan, menerbitkan,
-mendistribusikan, mensublisensikan, dan/atau menjual salinan Perangkat Lunak,
-serta mengizinkan orang yang menerima Perangkat Lunak ini untuk melakukan hal
-tersebut, dengan tunduk pada ketentuan berikut:
+Dengan ini diberikan izin secara gratis kepada siapa pun yang memperoleh salinan
+perangkat lunak LajuFile dan berkas dokumentasi terkait ("Perangkat Lunak"),
+untuk menggunakan, menyalin, memodifikasi, menggabungkan, mempublikasikan,
+mendistribusikan, mensublisensikan, dan/atau menjual salinan Perangkat Lunak
+tanpa batasan, dengan ketentuan sebagai berikut:
 
-Pemberitahuan hak cipta di atas dan pemberitahuan izin ini harus disertakan
-dalam semua salinan atau bagian penting dari Perangkat Lunak.
+1. Pemberitahuan hak cipta di atas dan teks lisensi ini wajib dicantumkan pada
+   seluruh salinan atau bagian penting dari Perangkat Lunak.
+2. Penggunaan Perangkat Lunak untuk mengunduh berkas, tautan batch, maupun
+   video/audio pihak ketiga sepenuhnya menjadi tanggung jawab pengguna sesuai
+   hukum yang berlaku.
+3. PERANGKAT LUNAK INI DISEDIAKAN "APA ADANYA", TANPA JAMINAN APA PUN. PENULIS
+   ATAU PEMEGANG HAK CIPTA TIDAK BERTANGGUNG JAWAB ATAS KERUSAKAN ATAU KERUGIAN
+   YANG TIMBUL DARI PENGGUNAAN PERANGKAT LUNAK INI.
 
-PERANGKAT LUNAK INI DISEDIAKAN "SEBAGAIMANA ADANYA", TANPA JAMINAN APA PUN,
-BAIK TERSURAT MAUPUN TERSIRAT, TERMASUK NAMUN TIDAK TERBATAS PADA JAMINAN
-KELAYAKAN UNTUK DIPERDAGANGKAN, KESESUAIAN UNTUK TUJUAN TERTENTU, DAN TIDAK
-ADANYA PELANGGARAN. DALAM KEADAAN APA PUN, PEMBUAT ATAU PEMEGANG HAK CIPTA
-TIDAK BERTANGGUNG JAWAB ATAS KLAIM, KERUSAKAN, ATAU KEWAJIBAN LAINNYA, BAIK
-DALAM TINDAKAN KONTRAK, PERBUATAN MELAWAN HUKUM, ATAU LAINNYA, YANG TIMBUL
-DARI, DI LUAR, ATAU SEHUBUNGAN DENGAN PERANGKAT LUNAK ATAU PENGGUNAAN ATAU
-TRANSAKSI LAINNYA DALAM PERANGKAT LUNAK.
+================================================================================
+END TERMS AND CONDITIONS
+================================================================================

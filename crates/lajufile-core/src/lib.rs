@@ -1,5 +1,6 @@
 //! Core download engine and persistence for LajuFile.
 
+pub mod checksum;
 pub mod cookie;
 pub mod download;
 pub mod http;

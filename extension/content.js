@@ -48,21 +48,19 @@ function showStatusRow(menu, message, isError = false) {
   menu.textContent = "";
   const row = document.createElement("div");
   row.textContent = message;
-  row.style.cssText = `padding:8px 12px;color:${isError ? "#b42318" : "#1d2939"};font:12px "Segoe UI",Tahoma,sans-serif;`;
+  row.style.cssText = `padding:10px 14px;color:${isError ? "#ff6b6b" : "#cbd5e1"};font:12px/1.4 "Segoe UI",system-ui,sans-serif;`;
   menu.append(row);
   menu.style.display = "block";
 }
 
 function styleMenuRow(row) {
   row.style.cssText =
-    'display:flex;align-items:center;justify-content:space-between;gap:18px;width:100%;box-sizing:border-box;background:transparent;color:#111;border:1px solid transparent;padding:4px 12px;cursor:pointer;font:12px "Segoe UI",Tahoma,sans-serif;text-align:left;white-space:nowrap;';
+    'display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;box-sizing:border-box;background:transparent;color:#e7edf5;border:0;border-radius:7px;padding:7px 11px;cursor:pointer;font:12px "Segoe UI",system-ui,sans-serif;text-align:left;white-space:nowrap;transition:background 0.14s ease;';
   row.addEventListener("mouseenter", () => {
-    row.style.background = "#e5f1fb";
-    row.style.borderColor = "#a8d2f0";
+    row.style.background = "rgba(76,154,255,0.16)";
   });
   row.addEventListener("mouseleave", () => {
     row.style.background = "transparent";
-    row.style.borderColor = "transparent";
   });
 }
 
@@ -107,14 +105,15 @@ async function showFormats(menu, url) {
   menu.textContent = "";
   const shortTitle = truncateTitle(rawTitle, 36);
 
-  // Top "Unduh semua" action row (queues best available quality)
+  // Top "Download best" action row
   const allRow = document.createElement("button");
   allRow.type = "button";
   styleMenuRow(allRow);
-  allRow.style.paddingLeft = "22px";
-  allRow.style.marginBottom = "2px";
-  allRow.style.borderBottom = "1px solid #e4e7ec";
-  allRow.textContent = "Unduh semua";
+  allRow.style.marginBottom = "4px";
+  allRow.style.borderBottom = "1px solid rgba(148,163,184,0.18)";
+  allRow.style.fontWeight = "600";
+  allRow.style.color = "#4c9aff";
+  allRow.textContent = `Download best (${formats[0].label})`;
   allRow.addEventListener("click", (event) => {
     event.stopPropagation();
     const best = formats[0];
@@ -129,11 +128,11 @@ async function showFormats(menu, url) {
 
     const left = document.createElement("span");
     left.textContent = `${index + 1}. ${shortTitle}`;
-    left.style.cssText = "overflow:hidden;text-overflow:ellipsis;color:#111;";
+    left.style.cssText = "overflow:hidden;text-overflow:ellipsis;color:#e7edf5;";
 
     const right = document.createElement("span");
     right.textContent = formatQualityDescription(format);
-    right.style.cssText = "color:#222;flex-shrink:0;";
+    right.style.cssText = "color:#94a3b8;font-size:11px;flex-shrink:0;";
 
     item.append(left, right);
     item.addEventListener("click", (event) => {
@@ -151,14 +150,14 @@ function createPlayIcon() {
   img.width = 16;
   img.height = 16;
   img.style.cssText =
-    "display:block;width:16px;height:16px;border-radius:3px;flex-shrink:0;object-fit:contain;pointer-events:none;";
+    "display:block;width:16px;height:16px;border-radius:4px;flex-shrink:0;object-fit:contain;pointer-events:none;";
   return img;
 }
 
 function styleSmallControl(btn) {
   btn.type = "button";
   btn.style.cssText =
-    'width:18px;height:20px;border-radius:3px;border:1px solid #6b8db8;background:linear-gradient(180deg,#f5f9ff 0%,#c7dcf4 52%,#a9c6e8 100%);color:#1e467a;font:bold 11px "Segoe UI",Tahoma,sans-serif;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;box-shadow:inset 0 1px 0 rgba(255,255,255,0.8);';
+    'width:24px;height:26px;border-radius:7px;border:1px solid rgba(148,163,184,0.2);background:rgba(255,255,255,0.06);color:#cbd5e1;font:600 12px "Segoe UI",system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1;';
 }
 
 function mount() {
@@ -181,36 +180,36 @@ function mount() {
   const wrap = document.createElement("div");
   wrap.id = PANEL_ID;
   wrap.style.cssText =
-    "position:absolute;top:10px;right:12px;z-index:9999;pointer-events:auto;user-select:none;font-family:'Segoe UI',Tahoma,sans-serif;";
+    "position:absolute;top:12px;right:14px;z-index:9999;pointer-events:auto;user-select:none;font-family:'Segoe UI',system-ui,sans-serif;";
   wrap.addEventListener("click", (event) => event.stopPropagation());
 
-  // IDM-style glossy blue-silver bar
+  // Modern dark-glass floating pill bar matching LajuFile Desktop
   const bar = document.createElement("div");
   bar.style.cssText =
-    "display:inline-flex;align-items:center;gap:3px;padding:2px 3px;border-radius:5px;border:1px solid #698bb7;background:linear-gradient(180deg,#ebf3fc 0%,#c4d9f2 48%,#a5c2e7 52%,#d5e5f7 100%);box-shadow:0 2px 7px rgba(0,0,0,0.35),inset 0 1px 0 rgba(255,255,255,0.85);";
+    "display:inline-flex;align-items:center;gap:4px;padding:4px;border-radius:11px;border:1px solid rgba(76,154,255,0.38);background:rgba(14,19,25,0.88);backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.45);";
 
   const button = document.createElement("button");
   button.type = "button";
   button.style.cssText =
-    'display:inline-flex;align-items:center;gap:6px;padding:2px 10px 2px 6px;height:20px;border-radius:4px;border:1px solid #7899c2;background:linear-gradient(180deg,#f9fcff 0%,#d7e7f9 48%,#bbd5f1 52%,#e7f2fd 100%);color:#195d30;font:600 12px "Segoe UI",Tahoma,sans-serif;cursor:pointer;text-shadow:0 1px 0 rgba(255,255,255,0.9);box-shadow:inset 0 1px 0 rgba(255,255,255,0.9);';
+    'display:inline-flex;align-items:center;gap:7px;padding:0 12px 0 8px;height:26px;border-radius:7px;border:0;background:linear-gradient(135deg,#4c9aff,#2563eb);color:#ffffff;font:600 12px "Segoe UI",system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 10px rgba(37,99,235,0.35);';
 
   const label = document.createElement("span");
-  label.textContent = "Unduh video ini";
+  label.textContent = "Download with LajuFile";
   button.append(createPlayIcon(), label);
 
   const helpBtn = document.createElement("button");
   styleSmallControl(helpBtn);
   helpBtn.textContent = "?";
-  helpBtn.title = "Bantuan LajuFile Video Capture";
+  helpBtn.title = "LajuFile Video Capture Help";
 
   const closeBtn = document.createElement("button");
   styleSmallControl(closeBtn);
   closeBtn.textContent = "×";
-  closeBtn.title = "Sembunyikan panel untuk video ini";
+  closeBtn.title = "Hide panel for this video";
 
   const menu = document.createElement("div");
   menu.style.cssText =
-    "display:none;position:absolute;top:100%;right:0;margin-top:2px;background:#ffffff;color:#111111;border:1px solid #7f9db9;box-shadow:0 4px 14px rgba(0,0,0,0.38);min-width:460px;max-width:560px;max-height:320px;overflow-y:auto;padding:3px 0;z-index:10000;";
+    "display:none;position:absolute;top:100%;right:0;margin-top:6px;background:rgba(18,24,33,0.96);backdrop-filter:blur(14px);color:#e7edf5;border:1px solid rgba(148,163,184,0.22);border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,0.55);min-width:440px;max-width:560px;max-height:320px;overflow-y:auto;padding:6px;z-index:10000;";
 
   button.addEventListener("click", (event) => {
     event.stopPropagation();

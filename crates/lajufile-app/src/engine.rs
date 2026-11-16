@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
 use lajufile_core::segment::plan_segments;
 use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented};
-use lajufile_core::settings::{Settings, generate_token};
+use lajufile_core::settings::{DuplicatePolicy, Settings, generate_token};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Segment, Store, StoreError, now_millis,
@@ -38,9 +38,15 @@ pub struct EngineConfig {
     pub settings: Settings,
 }
 
+#[derive(Default)]
+struct SnapshotSlot {
+    version: u64,
+    snapshot: Option<Arc<Snapshot>>,
+}
+
 pub struct EngineHandle {
     commands: Sender<Command>,
-    snapshots: Arc<Mutex<Option<Snapshot>>>,
+    snapshots: Arc<Mutex<SnapshotSlot>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -49,7 +55,7 @@ impl EngineHandle {
         let store = Store::open(&config.db_path)?;
         let (command_tx, command_rx) = mpsc::channel();
         let bridge_commands = command_tx.clone();
-        let snapshots = Arc::new(Mutex::new(None));
+        let snapshots = Arc::new(Mutex::new(SnapshotSlot::default()));
         let engine_snapshots = Arc::clone(&snapshots);
 
         let join = thread::Builder::new()
@@ -71,11 +77,22 @@ impl EngineHandle {
             .map_err(|_| EngineError::Stopped)
     }
 
+    pub fn latest_snapshot_if_changed(&self, seen_version: &mut u64) -> Option<Arc<Snapshot>> {
+        let guard = self.snapshots.lock().ok()?;
+        if guard.version > *seen_version
+            && let Some(snapshot) = &guard.snapshot
+        {
+            *seen_version = guard.version;
+            return Some(Arc::clone(snapshot));
+        }
+        None
+    }
+
     pub fn latest_snapshot(&self) -> Option<Snapshot> {
         self.snapshots
             .lock()
             .ok()
-            .and_then(|mut snapshot| snapshot.take())
+            .and_then(|guard| guard.snapshot.as_ref().map(|snapshot| (**snapshot).clone()))
     }
 
     pub fn shutdown(mut self) {
@@ -105,11 +122,32 @@ pub enum Command {
     },
     Pause(i64),
     Resume(i64),
+    UpdateUrlAndResume {
+        id: i64,
+        url: String,
+    },
+    MoveRename {
+        id: i64,
+        file_name: String,
+        dir: Option<PathBuf>,
+    },
     Remove(i64),
+    RemoveWithFile {
+        id: i64,
+        delete_file: bool,
+    },
     RemoveCompleted,
     PauseAll,
     ResumeAll,
     UpdateSettings(Settings),
+    GetRules {
+        reply: tokio::sync::oneshot::Sender<(String, String)>,
+    },
+    MarkBrowserPaired,
+    GrabPageLinks {
+        url: String,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    },
     VideoFormats {
         url: String,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
@@ -139,6 +177,7 @@ pub struct CapturePrompt {
     pub url: String,
     pub file_name: String,
     pub size: Option<u64>,
+    pub ranged: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +199,102 @@ pub enum EngineError {
     Thread(#[from] std::io::Error),
     #[error("engine stopped")]
     Stopped,
+}
+
+fn validate_http_url(raw: &str) -> Result<Url, String> {
+    let url = Url::parse(raw.trim()).map_err(|error| format!("invalid URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("only http:// and https:// URLs are supported".to_string());
+    }
+    Ok(url)
+}
+
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            let shared_cgnat = oct[0] == 100 && (oct[1] & 0xc0) == 64;
+            let benchmark = oct[0] == 198 && (oct[1] & 0xfe) == 18;
+            let reserved = oct[0] == 0 || oct[0] >= 240;
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_documentation()
+                && !v4.is_unspecified()
+                && !v4.is_multicast()
+                && !shared_cgnat
+                && !benchmark
+                && !reserved
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            let ula = (seg[0] & 0xfe00) == 0xfc00;
+            let link_local = (seg[0] & 0xffc0) == 0xfe80;
+            let site_local = (seg[0] & 0xffc0) == 0xfec0;
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                && !v6.is_multicast()
+                && !ula
+                && !link_local
+                && !site_local
+        }
+    }
+}
+
+fn validate_public_page_url(url: &Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Only http:// or https:// web page URLs are supported".to_string());
+    }
+    let Some(host) = url.host() else {
+        return Err("Web page URL is missing a host".to_string());
+    };
+    match host {
+        url::Host::Ipv4(v4) => {
+            if !is_public_ip(std::net::IpAddr::V4(v4)) {
+                return Err("Refusing to scan private or local IP addresses".to_string());
+            }
+        }
+        url::Host::Ipv6(v6) => {
+            if !is_public_ip(std::net::IpAddr::V6(v6)) {
+                return Err("Refusing to scan private or local IP addresses".to_string());
+            }
+        }
+        url::Host::Domain(domain) => {
+            let lower = domain.trim_end_matches('.').to_ascii_lowercase();
+            if lower == "localhost"
+                || lower.ends_with(".localhost")
+                || lower.ends_with(".local")
+                || lower.ends_with(".internal")
+            {
+                return Err("Refusing to scan localhost or internal domains".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reserves a deduplicated save path and empty `.lajufile` sentinel so queued rows
+/// cannot collide before download writes begin.
+fn reserve_download_paths(dir: &Path, base_name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let mut final_path = dedupe_path(dir, base_name);
+    loop {
+        let candidate = temp_path_for(&final_path);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok((final_path, candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                final_path = dedupe_path(dir, base_name);
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn valid_bridge_token(token: &str) -> bool {
@@ -235,6 +370,17 @@ enum InsertError {
     Failed(String),
 }
 
+enum DuplicateAction {
+    Proceed,
+    Handled {
+        id: i64,
+        file_name: String,
+        size: Option<u64>,
+        message: String,
+    },
+    Rejected(Box<Download>),
+}
+
 struct EngineState {
     store: Store,
     settings: Settings,
@@ -244,7 +390,7 @@ struct EngineState {
     events: Sender<Event>,
     commands: Sender<Command>,
     tools_installing: bool,
-    snapshots: Arc<Mutex<Option<Snapshot>>>,
+    snapshots: Arc<Mutex<SnapshotSlot>>,
     active: HashMap<i64, ActiveDownload>,
     limiter: Arc<RateLimiter>,
     bridge: Option<BridgeServer>,
@@ -256,8 +402,9 @@ struct EngineState {
     pending_segments: HashMap<(i64, u32), u64>,
     last_persist: HashMap<i64, Instant>,
     message: Option<String>,
-    pending_captures: HashMap<u64, PendingCapture>,
+    pending_captures: BTreeMap<u64, PendingCapture>,
     next_capture_key: u64,
+    dirty: bool,
 }
 
 struct PendingCapture {
@@ -273,7 +420,7 @@ fn engine_loop(
     config: EngineConfig,
     commands: Receiver<Command>,
     bridge_commands: Sender<Command>,
-    snapshots: Arc<Mutex<Option<Snapshot>>>,
+    snapshots: Arc<Mutex<SnapshotSlot>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -283,7 +430,8 @@ fn engine_loop(
         Ok(client) => client,
         Err(error) => {
             if let Ok(mut slot) = snapshots.lock() {
-                *slot = Some(Snapshot {
+                slot.version = slot.version.saturating_add(1);
+                slot.snapshot = Some(Arc::new(Snapshot {
                     downloads: store.list_downloads().unwrap_or_default(),
                     segments: HashMap::new(),
                     settings: config.settings.clone(),
@@ -291,7 +439,7 @@ fn engine_loop(
                     message: Some(format!("Engine failed: {error}")),
                     bridge: BridgeStatus::starting(config.settings.bridge_port),
                     pending_capture: None,
-                });
+                }));
             }
             return;
         }
@@ -336,31 +484,41 @@ fn engine_loop(
         pending_segments: HashMap::new(),
         last_persist: HashMap::new(),
         message: None,
-        pending_captures: HashMap::new(),
+        pending_captures: BTreeMap::new(),
         next_capture_key: 0,
+        dirty: false,
     };
 
     state.normalize_startup();
     state.pump_queue();
     state.publish();
+    state.dirty = false;
     let mut last_publish = Instant::now();
 
     loop {
         while let Ok(command) = commands.try_recv() {
+            let mutates = !matches!(command, Command::GetRules { .. });
             if state.handle_command(command) {
                 state.publish();
                 return;
+            }
+            if mutates {
+                state.dirty = true;
             }
         }
 
         while let Ok(event) = event_rx.try_recv() {
             state.handle_event(event);
+            state.dirty = true;
         }
 
-        state.poll_videos();
+        if state.poll_videos() || !state.active.is_empty() {
+            state.dirty = true;
+        }
 
-        if last_publish.elapsed() >= Duration::from_millis(250) {
+        if state.dirty && last_publish.elapsed() >= Duration::from_millis(250) {
             state.publish();
+            state.dirty = false;
             last_publish = Instant::now();
         }
 
@@ -406,11 +564,27 @@ impl EngineState {
             }
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
-            Command::Remove(id) => self.remove(id),
+            Command::UpdateUrlAndResume { id, url } => self.update_url_and_resume(id, url),
+            Command::MoveRename { id, file_name, dir } => self.move_rename(id, file_name, dir),
+            Command::Remove(id) => self.remove(id, false),
+            Command::RemoveWithFile { id, delete_file } => self.remove(id, delete_file),
             Command::RemoveCompleted => self.remove_completed(),
             Command::PauseAll => self.pause_all(),
             Command::ResumeAll => self.resume_all(),
             Command::UpdateSettings(settings) => self.update_settings(settings),
+            Command::GetRules { reply } => {
+                let _ = reply.send((
+                    self.settings.excluded_domains.clone(),
+                    self.settings.captured_extensions.clone(),
+                ));
+            }
+            Command::MarkBrowserPaired => {
+                if !self.settings.browser_paired {
+                    self.settings.browser_paired = true;
+                    let _ = self.settings.save(&self.data_dir);
+                }
+            }
+            Command::GrabPageLinks { url, reply } => self.grab_page_links(url, reply),
             Command::VideoFormats { url, reply } => self.video_formats(url, reply),
             Command::UpdateTools => self.update_tools(),
             Command::ToolsInstalled(result) => {
@@ -429,18 +603,43 @@ impl EngineState {
         false
     }
 
+    fn check_duplicate_url(&mut self, url: &str) -> Result<DuplicateAction, StoreError> {
+        if self.settings.duplicate_policy == DuplicatePolicy::RenameNumbered {
+            return Ok(DuplicateAction::Proceed);
+        }
+        let Some(existing) = self.store.active_by_url(url)? else {
+            return Ok(DuplicateAction::Proceed);
+        };
+        if self.settings.duplicate_policy == DuplicatePolicy::ResumeExisting {
+            let message = if existing.status == DownloadStatus::Paused {
+                self.resume(existing.id);
+                format!("Resumed {}", existing.file_name)
+            } else {
+                format!("Already active: {}", existing.file_name)
+            };
+            return Ok(DuplicateAction::Handled {
+                id: existing.id,
+                file_name: existing.file_name,
+                size: existing.size,
+                message,
+            });
+        }
+        Ok(DuplicateAction::Rejected(Box::new(existing)))
+    }
+
     fn handle_add(&mut self, request: AddRequest) -> Option<String> {
-        let url = match Url::parse(&request.url) {
+        let url = match validate_http_url(&request.url) {
             Ok(url) => url,
             Err(error) => return Some(format!("Add failed: {error}")),
         };
         let normalized_url = url.to_string();
 
-        match self.store.active_by_url(&normalized_url) {
-            Ok(Some(existing)) => {
+        match self.check_duplicate_url(&normalized_url) {
+            Ok(DuplicateAction::Proceed) => {}
+            Ok(DuplicateAction::Handled { message, .. }) => return Some(message),
+            Ok(DuplicateAction::Rejected(existing)) => {
                 return Some(format!("Already in LajuFile: {}", existing.file_name));
             }
-            Ok(None) => {}
             Err(error) => return Some(format!("Add failed: {error}")),
         }
 
@@ -491,21 +690,34 @@ impl EngineState {
         request: BridgeAddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
     ) {
-        let url = match Url::parse(&request.url) {
+        let url = match validate_http_url(&request.url) {
             Ok(url) => url,
             Err(error) => {
-                let _ = reply.send(BridgeAddOutcome::Invalid(format!("invalid URL: {error}")));
+                let _ = reply.send(BridgeAddOutcome::Invalid(error));
                 return;
             }
         };
         let normalized_url = url.to_string();
 
-        match self.store.active_by_url(&normalized_url) {
-            Ok(Some(existing)) => {
+        match self.check_duplicate_url(&normalized_url) {
+            Ok(DuplicateAction::Proceed) => {}
+            Ok(DuplicateAction::Handled {
+                id,
+                file_name,
+                size,
+                ..
+            }) => {
+                let _ = reply.send(BridgeAddOutcome::Created {
+                    id,
+                    filename: file_name,
+                    size,
+                });
+                return;
+            }
+            Ok(DuplicateAction::Rejected(existing)) => {
                 let _ = reply.send(BridgeAddOutcome::Conflict { id: existing.id });
                 return;
             }
-            Ok(None) => {}
             Err(error) => {
                 let _ = reply.send(BridgeAddOutcome::Internal(error.to_string()));
                 return;
@@ -718,10 +930,12 @@ impl EngineState {
         request: AddRequest,
         result: ProbeResult,
     ) -> Result<Inserted, InsertError> {
-        match self.store.active_by_url(&request.url) {
-            Ok(Some(existing)) => return Err(InsertError::Duplicate(Box::new(existing))),
-            Ok(None) => {}
-            Err(error) => return Err(InsertError::Failed(error.to_string())),
+        if self.settings.duplicate_policy != DuplicatePolicy::RenameNumbered {
+            match self.store.active_by_url(&request.url) {
+                Ok(Some(existing)) => return Err(InsertError::Duplicate(Box::new(existing))),
+                Ok(None) => {}
+                Err(error) => return Err(InsertError::Failed(error.to_string())),
+            }
         }
 
         let dir = request
@@ -737,21 +951,8 @@ impl EngineState {
             result.content_disposition.as_deref(),
             &result.final_url,
         );
-        let mut final_path = dedupe_path(&dir, &base_name);
-        let temp_path = loop {
-            let candidate = temp_path_for(&final_path);
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(_) => break candidate,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    final_path = dedupe_path(&dir, &base_name);
-                }
-                Err(error) => return Err(InsertError::Failed(error.to_string())),
-            }
-        };
+        let (final_path, temp_path) =
+            reserve_download_paths(&dir, &base_name).map_err(InsertError::Failed)?;
         let reserved_temp = temp_path.clone();
         let file_name = final_path
             .file_name()
@@ -861,28 +1062,19 @@ impl EngineState {
         };
         // Reserve the temp name so two jobs queued before either file exists cannot
         // collide on one save path.
-        let mut save_path = dedupe_path(&dir, &base_name);
-        let temp_path = loop {
-            let candidate = temp_path_for(&save_path);
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(_) => break candidate,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    save_path = dedupe_path(&dir, &base_name);
-                }
-                Err(error) => return Err(InsertError::Failed(error.to_string())),
-            }
-        };
+        let (save_path, temp_path) =
+            reserve_download_paths(&dir, &base_name).map_err(InsertError::Failed)?;
+        let reserved_temp = temp_path.clone();
         let file_name = save_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or(base_name);
         let queue_order = match self.store.next_queue_order() {
             Ok(order) => order,
-            Err(error) => return Err(InsertError::Failed(error.to_string())),
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                return Err(InsertError::Failed(error.to_string()));
+            }
         };
         let status = if request.start_now {
             DownloadStatus::Queued
@@ -926,7 +1118,10 @@ impl EngineState {
                     size: None,
                 })
             }
-            Err(error) => Err(InsertError::Failed(error.to_string())),
+            Err(error) => {
+                let _ = std::fs::remove_file(&reserved_temp);
+                Err(InsertError::Failed(error.to_string()))
+            }
         }
     }
 
@@ -963,6 +1158,10 @@ impl EngineState {
         url: String,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     ) {
+        if let Err(error) = validate_http_url(&url) {
+            let _ = reply.send(Err(error));
+            return;
+        }
         let dir = tools::tools_dir();
         if !tools::tools_ready(&dir) {
             self.ensure_tools();
@@ -973,6 +1172,29 @@ impl EngineState {
         }
         thread::spawn(move || {
             let _ = reply.send(ytdlp_listing(&dir, &url));
+        });
+    }
+
+    fn grab_page_links(
+        &self,
+        raw_url: String,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    ) {
+        let parsed = match Url::parse(raw_url.trim()) {
+            Ok(url) => url,
+            Err(_) => {
+                let _ = reply.send(Err(
+                    "Enter a valid http:// or https:// web page URL".to_string()
+                ));
+                return;
+            }
+        };
+        if let Err(reason) = validate_public_page_url(&parsed) {
+            let _ = reply.send(Err(reason));
+            return;
+        }
+        self.runtime.spawn(async move {
+            let _ = reply.send(fetch_page_links(parsed).await);
         });
     }
 
@@ -1341,6 +1563,8 @@ impl EngineState {
                 &download.save_path,
                 &download.url,
                 &dir,
+                self.settings.video_subtitles,
+                self.settings.video_chapters,
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1403,7 +1627,7 @@ impl EngineState {
         true
     }
 
-    fn poll_videos(&mut self) {
+    fn poll_videos(&mut self) -> bool {
         let exited: Vec<(i64, bool)> = self
             .active
             .iter_mut()
@@ -1412,6 +1636,7 @@ impl EngineState {
                 Some((*id, status.success()))
             })
             .collect();
+        let changed = !exited.is_empty();
         for (id, success) in exited {
             let Some(mut active) = self.active.remove(&id) else {
                 continue;
@@ -1447,6 +1672,7 @@ impl EngineState {
             self.clear_pending(id);
             self.pump_queue();
         }
+        changed
     }
 
     fn reset_to_single(&mut self, id: i64, reason: &str) {
@@ -1524,7 +1750,74 @@ impl EngineState {
         self.pump_queue();
     }
 
-    fn remove(&mut self, id: i64) {
+    fn update_url_and_resume(&mut self, id: i64, raw_url: String) {
+        let Ok(parsed) = Url::parse(raw_url.trim()) else {
+            self.message = Some("Invalid URL".to_string());
+            return;
+        };
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            self.message = Some("Only HTTP/HTTPS URLs are supported".to_string());
+            return;
+        }
+        let Ok(download) = self.store.get_download(id) else {
+            return;
+        };
+        if !matches!(
+            download.status,
+            DownloadStatus::Paused | DownloadStatus::Error
+        ) {
+            return;
+        }
+        if let Err(error) = self.store.update_url(id, parsed.as_str()) {
+            self.message = Some(format!("Update URL failed: {error}"));
+            return;
+        }
+        self.message = Some("URL updated, resuming download".to_string());
+        self.resume(id);
+    }
+
+    fn move_rename(&mut self, id: i64, raw_name: String, target_dir: Option<PathBuf>) {
+        let Ok(download) = self.store.get_download(id) else {
+            return;
+        };
+        if download.status != DownloadStatus::Done {
+            self.message = Some("Only completed downloads can be moved or renamed".to_string());
+            return;
+        }
+        if !download.save_path.exists() {
+            self.message = Some("Source file no longer exists on disk".to_string());
+            return;
+        }
+        let clean_name = sanitize_file_name(raw_name.trim());
+        let dir = target_dir
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| download.save_path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| self.settings.download_dir.clone());
+        if let Err(error) = ensure_dir(&dir) {
+            self.message = Some(format!("Create folder failed: {error}"));
+            return;
+        }
+        let dest = dir.join(&clean_name);
+        if dest == download.save_path {
+            return;
+        }
+        if dest.exists() {
+            self.message = Some("Destination file already exists".to_string());
+            return;
+        }
+        if let Err(error) = move_file_safe(&download.save_path, &dest) {
+            self.message = Some(format!("Move failed: {error}"));
+            return;
+        }
+        let temp = temp_path_for(&dest);
+        if let Err(error) = self.store.update_location(id, &clean_name, &dest, &temp) {
+            self.message = Some(format!("Update record failed: {error}"));
+            return;
+        }
+        self.message = Some(format!("Moved to {}", dest.display()));
+    }
+
+    fn remove(&mut self, id: i64, delete_file: bool) {
         if let Some(mut active) = self.active.remove(&id) {
             stop_video(&mut active);
             if let Some(handle) = active.handle.take() {
@@ -1532,14 +1825,18 @@ impl EngineState {
                 let _ = self.runtime.block_on(handle);
             }
         }
-        let temp_path = self
+        let paths = self
             .store
             .get_download(id)
             .ok()
-            .map(|download| download.temp_path);
-        if self.store.delete_download(id).is_ok() {
-            if let Some(temp_path) = temp_path {
-                let _ = std::fs::remove_file(temp_path);
+            .map(|download| (download.temp_path, download.save_path));
+        if self.store.delete_download(id).is_ok()
+            && let Some((temp_path, save_path)) = paths
+        {
+            let _ = std::fs::remove_file(&temp_path);
+            remove_parts(&save_path);
+            if delete_file {
+                let _ = std::fs::remove_file(&save_path);
             }
         }
         self.speeds.remove(&id);
@@ -1603,6 +1900,7 @@ impl EngineState {
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
         settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+        settings.browser_paired |= self.settings.browser_paired;
         if !valid_bridge_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();
         }
@@ -1625,7 +1923,7 @@ impl EngineState {
         if let Some(bridge) = self.bridge.take() {
             bridge.shutdown();
         }
-        for (_, pending) in self.pending_captures.drain() {
+        for (_, pending) in std::mem::take(&mut self.pending_captures) {
             let _ = pending.reply.send(BridgeAddOutcome::Canceled);
         }
         let active: Vec<i64> = self.active.keys().copied().collect();
@@ -1646,15 +1944,12 @@ impl EngineState {
         let Ok(downloads) = self.store.list_downloads() else {
             return;
         };
-        let mut segments = HashMap::new();
-        for download in &downloads {
-            if let Ok(mut list) = self.store.segments(download.id) {
-                for segment in &mut list {
-                    if let Some(done) = self.pending_segments.get(&(download.id, segment.idx)) {
-                        segment.done = *done;
-                    }
-                }
-                segments.insert(download.id, list);
+        let mut segments = self.store.all_segments().unwrap_or_default();
+        for ((download_id, idx), done) in &self.pending_segments {
+            if let Some(list) = segments.get_mut(download_id)
+                && let Some(segment) = list.iter_mut().find(|seg| seg.idx == *idx)
+            {
+                segment.done = *done;
             }
         }
         let snapshot = Snapshot {
@@ -1670,11 +1965,13 @@ impl EngineState {
                     url: pending.request.url.clone(),
                     file_name: pending.file_name.clone(),
                     size: pending.size,
+                    ranged: pending.probe.as_ref().map(|probe| probe.ranged),
                 }
             }),
         };
         if let Ok(mut slot) = self.snapshots.lock() {
-            *slot = Some(snapshot);
+            slot.version = slot.version.saturating_add(1);
+            slot.snapshot = Some(Arc::new(snapshot));
         }
     }
 }
@@ -1764,9 +2061,101 @@ fn read_all<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<V
     })
 }
 
+async fn verify_public_dns(url: &Url) -> Result<(), String> {
+    validate_public_page_url(url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Web page URL is missing a host".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("Resolve failed: {error}"))?;
+    let mut saw_addr = false;
+    for addr in addrs {
+        saw_addr = true;
+        if !is_public_ip(addr.ip()) {
+            return Err("Refusing to scan private or local network address".to_string());
+        }
+    }
+    if !saw_addr {
+        return Err("Could not resolve host".to_string());
+    }
+    Ok(())
+}
+
+/// Fetches up to 2 MB of HTML from one public web page and extracts unique link targets.
+async fn fetch_page_links(url: Url) -> Result<Vec<String>, String> {
+    const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
+    verify_public_dns(&url).await?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            if let Err(msg) = validate_public_page_url(attempt.url()) {
+                return attempt.error(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    msg,
+                ));
+            }
+            attempt.follow()
+        }))
+        .build()
+        .map_err(|error| format!("Client failed: {error}"))?;
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT)
+        .send()
+        .await
+        .map_err(|error| format!("Fetch failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Fetch failed: {error}"))?;
+    verify_public_dns(response.url()).await?;
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let lower = content_type.to_ascii_lowercase();
+        if !lower.contains("html") && !lower.contains("text/plain") {
+            return Err(format!("Page is not HTML ({content_type})"));
+        }
+    }
+    let final_url = response.url().clone();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Read failed: {error}"))?
+    {
+        let remaining = MAX_PAGE_BYTES.saturating_sub(bytes.len());
+        if remaining == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() >= MAX_PAGE_BYTES {
+            break;
+        }
+    }
+    let html = String::from_utf8_lossy(&bytes);
+    Ok(crate::ui::extract_links_from_html(
+        final_url.as_str(),
+        &html,
+    ))
+}
+
 /// yt-dlp arguments for one video job: merge to mp4 next to the target path.
-fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> Vec<OsString> {
-    vec![
+fn video_args(
+    selector: &str,
+    save_path: &Path,
+    url: &str,
+    tools_dir: &Path,
+    subtitles: bool,
+    embed_chapters: bool,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
         "--no-playlist".into(),
         "--newline".into(),
         "--merge-output-format".into(),
@@ -1778,6 +2167,20 @@ fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> 
         "Merger+ffmpeg_o1:-c:a aac".into(),
         "--ffmpeg-location".into(),
         tools_dir.as_os_str().to_owned(),
+    ];
+    if subtitles {
+        args.extend([
+            "--write-subs".into(),
+            "--write-auto-subs".into(),
+            "--sub-format".into(),
+            "srt/best".into(),
+            "--embed-subs".into(),
+        ]);
+    }
+    if embed_chapters {
+        args.push("--embed-chapters".into());
+    }
+    args.extend([
         // Machine-readable progress, one line per update:
         // "LF <downloaded> <total> <estimate>", either total may be NA.
         "--progress-template".into(),
@@ -1787,7 +2190,8 @@ fn video_args(selector: &str, save_path: &Path, url: &str, tools_dir: &Path) -> 
         "-o".into(),
         save_path.as_os_str().to_owned(),
         url.into(),
-    ]
+    ]);
+    args
 }
 
 fn parse_progress(line: &str) -> Option<(u64, Option<u64>)> {
@@ -1811,6 +2215,23 @@ fn stop_video(active: &mut ActiveDownload) {
 
 /// Drops the temp files yt-dlp leaves behind: `name.part`, `name.part-Frag<N>`,
 /// `name.ytdl`, `name.f137.mp4.part-Frag<N>` and `name.temp.mp4`.
+fn move_file_safe(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            if std::fs::copy(from, to).is_ok() {
+                if let Err(rm_err) = std::fs::remove_file(from) {
+                    let _ = std::fs::remove_file(to);
+                    return Err(rm_err);
+                }
+                Ok(())
+            } else {
+                Err(rename_err)
+            }
+        }
+    }
+}
+
 fn remove_parts(save_path: &Path) {
     let (Some(dir), Some(name)) = (
         save_path.parent(),
@@ -1874,6 +2295,8 @@ mod tests {
             Path::new("C:/dl/clip.mp4"),
             "https://youtu.be/x",
             Path::new("C:/tools"),
+            false,
+            false,
         );
         let args: Vec<String> = args
             .iter()
@@ -1904,8 +2327,33 @@ mod tests {
             args[args.iter().position(|a| a == "--ppa").unwrap() + 1],
             "Merger+ffmpeg_o1:-c:a aac"
         );
+        assert!(!args.iter().any(|arg| arg == "--embed-subs"));
+        assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
         assert!(args.iter().any(|arg| arg == "--progress-template"));
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");
+    }
+
+    #[test]
+    fn video_args_include_subtitles_and_chapters_when_enabled() {
+        let args: Vec<String> = video_args(
+            "best",
+            Path::new("C:/dl/clip.mp4"),
+            "https://youtu.be/x",
+            Path::new("C:/tools"),
+            true,
+            true,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        for flag in [
+            "--write-subs",
+            "--write-auto-subs",
+            "--embed-subs",
+            "--embed-chapters",
+        ] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
     }
 
     #[test]
@@ -1944,5 +2392,38 @@ mod tests {
         for name in leftovers {
             assert!(!dir.path().join(name).exists(), "{name} should be removed");
         }
+    }
+
+    #[test]
+    fn ssrf_guard_blocks_loopback_private_and_metadata_urls() {
+        for bad in [
+            "http://127.0.0.1:53841/rules",
+            "http://localhost:8080/",
+            "http://sub.localhost/test",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://172.16.0.5/",
+            "http://100.64.0.1/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "file:///C:/Windows/System32/drivers/etc/hosts",
+        ] {
+            let parsed = Url::parse(bad).unwrap();
+            assert!(
+                validate_public_page_url(&parsed).is_err(),
+                "{bad} should be blocked"
+            );
+        }
+        let ok = Url::parse("https://example.com/downloads").unwrap();
+        assert!(validate_public_page_url(&ok).is_ok());
+    }
+
+    #[test]
+    fn validate_http_url_rejects_non_http_schemes() {
+        assert!(validate_http_url("https://example.com/a.zip").is_ok());
+        assert!(validate_http_url("http://example.com/a.zip").is_ok());
+        assert!(validate_http_url("file:///tmp/a.zip").is_err());
+        assert!(validate_http_url("javascript:alert(1)").is_err());
     }
 }

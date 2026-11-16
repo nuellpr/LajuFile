@@ -9,45 +9,100 @@
   <body>
     <main>
       <header>
-        <img src="icons/icon-48.png" alt="" width="40" height="40" />
-        <div>
-          <h1>LajuFile Capture</h1>
-          <p>Send downloads from Chrome, Brave, Edge, or any Chromium browser to the LajuFile desktop app.</p>
+        <div class="brand">
+          <img src="icons/icon-48.png" alt="" width="44" height="44" />
+          <div>
+            <h1>LajuFile Capture</h1>
+            <p>Catch downloads, PDFs, and videos directly in LajuFile Desktop from any Chromium browser.</p>
+          </div>
         </div>
+        <span id="connPill" class="pill pending">Not checked</span>
       </header>
 
       <section>
-        <h2>Pairing</h2>
+        <div class="section-head">
+          <h2>1-Click Quick-Pair</h2>
+          <span class="kicker">RECOMMENDED</span>
+        </div>
         <p class="hint">
-          In LajuFile, open <strong>Settings &rarr; Browser capture</strong> and copy
-          the port and token. Port changes apply after restarting LajuFile.
+          In LajuFile Desktop open <strong>Setup Wizard</strong> or <strong>Settings &rarr; Browser capture</strong>, click
+          <strong>Copy Quick-Pair</strong>, and paste it below.
         </p>
+        <div class="inline-row">
+          <input
+            id="quickPairInput"
+            type="text"
+            placeholder='Paste {"port":53841,"token":"..."}'
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="applyPair" type="button" class="secondary">Apply Quick-Pair</button>
+        </div>
+      </section>
 
-        <label for="port">Bridge port</label>
-        <input id="port" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+      <section>
+        <div class="section-head">
+          <h2>Bridge Pairing &amp; Filters</h2>
+          <span class="kicker">SYNCED WITH DESKTOP</span>
+        </div>
 
-        <label for="token">Bridge token</label>
-        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+        <div class="two-col">
+          <div>
+            <label for="port">Bridge port</label>
+            <input id="port" type="number" min="1024" max="65535" step="1" inputmode="numeric" />
+          </div>
+          <div>
+            <label for="token">Access token (64 hex chars)</label>
+            <input id="token" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
 
         <label class="check">
           <input id="autoCapture" type="checkbox" />
-          Capture browser downloads automatically
+          <span>Capture browser downloads, PDFs, and media links automatically</span>
         </label>
 
+        <label for="fileTypes">Captured file extensions (optional)</label>
+        <input
+          id="fileTypes"
+          type="text"
+          placeholder="Leave blank to catch all browser downloads (e.g. zip, exe, pdf, mp4)"
+          spellcheck="false"
+        />
+        <div id="extChips" class="chip-row" aria-label="Quick extension tags">
+          <button type="button" class="chip" data-ext="zip">+ zip</button>
+          <button type="button" class="chip" data-ext="exe">+ exe</button>
+          <button type="button" class="chip" data-ext="pdf">+ pdf</button>
+          <button type="button" class="chip" data-ext="mp4">+ mp4</button>
+          <button type="button" class="chip" data-ext="iso">+ iso</button>
+          <button type="button" class="chip" data-ext="gguf">+ gguf</button>
+          <button type="button" class="chip" data-ext="safetensors">+ safetensors</button>
+        </div>
+        <p class="hint">Comma or space separated. Blank catches all browser-initiated downloads.</p>
+
+        <label for="excludedDomains">Excluded domains</label>
+        <textarea id="excludedDomains" placeholder="example.com, *.internal.net" spellcheck="false"></textarea>
+        <p class="hint">
+          Automatically merged with <strong>Excluded domains</strong> configured in LajuFile Desktop.
+        </p>
+
         <div class="actions">
-          <button id="test" type="button" class="secondary">Test connection</button>
-          <button id="save" type="submit" class="primary">Save</button>
+          <button id="test" type="button" class="secondary">Test &amp; Pair</button>
+          <button id="save" type="submit" class="primary">Save changes</button>
         </div>
         <p id="status" class="status" role="status"></p>
       </section>
 
       <section>
-        <h2>How capture works</h2>
-        <p class="hint">
-          LajuFile captures normal HTTP/HTTPS downloads and link downloads. Forms,
-          browser-protected streams, and downloads started before LajuFile is running
-          stay in the browser. Cookies are sent only for the download URL.
-        </p>
+        <div class="section-head">
+          <h2>Shortcuts &amp; Capture Rules</h2>
+          <span class="kicker">GUIDE</span>
+        </div>
+        <ul class="tips-list">
+          <li><strong>Click any download / PDF / video link:</strong> opens <em>Download File Info</em> in LajuFile Desktop.</li>
+          <li><strong>Hold Alt + Click:</strong> keeps the file or PDF in the browser without LajuFile intercepting it.</li>
+          <li><strong>Right-click any link &rarr; Download with LajuFile:</strong> forces capture even for unlisted types or excluded domains.</li>
+        </ul>
       </section>
     </main>
     <script src="options.js"></script>

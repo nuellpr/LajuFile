@@ -1,14 +1,19 @@
 :root {
-  color-scheme: light;
-  --bg: #f4f7fb;
-  --surface: #ffffff;
-  --border: #dfe6ef;
-  --text: #17212b;
-  --muted: #637083;
-  --accent: #0b6bcb;
-  --accent-soft: #eaf3ff;
-  --ok: #157a5b;
-  --bad: #b23b34;
+  color-scheme: dark;
+  --bg: #0e1319;
+  --surface: #141a21;
+  --card: #161d26;
+  --field: #0b1016;
+  --border: #26303b;
+  --text: #e7edf5;
+  --muted: #94a3b8;
+  --faint: #64748b;
+  --accent: #4c9aff;
+  --accent-hover: #64a8ff;
+  --accent-soft: rgba(76, 154, 255, 0.14);
+  --ok: #3ddc97;
+  --warn: #f5b44a;
+  --bad: #ff6b6b;
 }
 
 * {
@@ -18,21 +23,30 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
+  background: radial-gradient(circle at 18% 0%, rgba(76, 154, 255, 0.14), transparent 46%),
+    radial-gradient(circle at 88% 12%, rgba(61, 220, 151, 0.08), transparent 42%),
+    var(--bg);
   color: var(--text);
   font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
 }
 
 main {
-  width: min(680px, calc(100% - 32px));
+  width: min(740px, calc(100% - 32px));
   margin: 32px auto;
 }
 
 header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
   gap: 14px;
-  margin-bottom: 20px;
 }
 
 header img {
@@ -48,40 +62,109 @@ h1 {
 header p {
   margin: 2px 0 0;
   color: var(--muted);
+  font-size: 13px;
+}
+
+.pill {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.pill.ok {
+  color: var(--ok);
+  background: rgba(61, 220, 151, 0.12);
+  border-color: rgba(61, 220, 151, 0.38);
+}
+
+.pill.pending {
+  color: var(--warn);
+  background: rgba(245, 180, 74, 0.12);
+  border-color: rgba(245, 180, 74, 0.35);
+}
+
+.pill.bad {
+  color: var(--bad);
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.35);
 }
 
 section {
-  padding: 20px;
+  padding: 20px 22px;
   margin-bottom: 16px;
-  background: var(--surface);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
 }
 
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
 h2 {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 15px;
+}
+
+.kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--faint);
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+}
+
+.inline-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.inline-row input {
+  flex: 1;
 }
 
 label {
   display: block;
-  margin: 12px 0 5px;
+  margin: 14px 0 5px;
   font-weight: 600;
+  font-size: 13px;
 }
 
 input[type="number"],
-input[type="password"] {
+input[type="password"],
+input[type="text"],
+textarea {
   width: 100%;
   height: 36px;
-  padding: 0 10px;
+  padding: 0 11px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--field);
   color: var(--text);
   font: inherit;
 }
 
+textarea {
+  height: auto;
+  min-height: 70px;
+  padding: 8px 11px;
+  resize: vertical;
+}
+
 input:focus-visible,
+textarea:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -92,12 +175,35 @@ button:focus-visible {
   align-items: center;
   gap: 9px;
   font-weight: 500;
+  margin-top: 16px;
+  cursor: pointer;
+}
+
+.check input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
 }
 
 .hint {
-  margin: 0;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.tips-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.tips-list li + li {
+  margin-top: 6px;
+}
+
+.tips-list strong {
+  color: var(--text);
 }
 
 .actions {
@@ -114,7 +220,9 @@ button {
   border: 1px solid transparent;
   font: inherit;
   font-weight: 600;
+  font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 button.primary {
@@ -123,17 +231,41 @@ button.primary {
 }
 
 button.primary:hover {
-  background: #095bac;
+  background: var(--accent-hover);
 }
 
 button.secondary {
   background: var(--accent-soft);
   color: var(--accent);
-  border-color: #c8defa;
+  border-color: rgba(76, 154, 255, 0.35);
 }
 
 button.secondary:hover {
-  background: #dcecff;
+  background: rgba(76, 154, 255, 0.22);
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chip {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--field);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.chip.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(76, 154, 255, 0.45);
 }
 
 .status {

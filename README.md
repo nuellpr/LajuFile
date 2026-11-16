@@ -1,159 +1,142 @@
-<p align="center">
-  <img src="assets/lajufile.jpg" alt="LajuFile" width="380">
-</p>
+<div align="center">
 
-<h1 align="center">LajuFile</h1>
+<img src="assets/icons/icon-128.png" alt="LajuFile Logo" width="88" />
 
-<p align="center">
-  <b>Manajer Unduhan Desktop Cepat & Native untuk Windows dan Linux — Dibangun dengan Rust</b><br>
-  <i>A fast, native desktop download manager for Windows and Linux — built in Rust.</i>
-</p>
+# LajuFile
 
-<p align="center">
-  <a href="https://github.com/nuellpr/LajuFile/actions/workflows/ci.yml"><img src="https://github.com/nuellpr/LajuFile/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/nuellpr/LajuFile/actions/workflows/release.yml"><img src="https://github.com/nuellpr/LajuFile/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <a href="https://github.com/nuellpr/LajuFile/releases/latest"><img src="https://img.shields.io/github/v/release/nuellpr/LajuFile?label=Release" alt="Latest Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/Platform-Windows%20x64%20%7C%20Linux%20x64-0078D6" alt="Platform">
-</p>
+**Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows & Linux.**  
+*Fast, lightweight, secure, multi-connection download manager built with Rust.*
 
-<p align="center">
-  <a href="#-bahasa-indonesia"><b>🇮🇩 Bahasa Indonesia</b></a> ·
-  <a href="#-english"><b>🇬🇧 English</b></a> ·
-  <a href="https://github.com/nuellpr/LajuFile/releases/latest"><b>⬇️ Unduh Rilis / Download Release</b></a>
-</p>
+[![Version](https://img.shields.io/badge/version-v1.0.0-3B82F6?style=flat-square)](#)
+[![Rust](https://img.shields.io/badge/Rust-2024%20%2F%20MSRV%201.85-orange?style=flat-square)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--installation)
+
+[🇮🇩 Bahasa Indonesia](#-bahasa-indonesia) · [🇬🇧 English](#-english) · [🔒 Security](#-keamanan--security-architecture) · [📜 Lisensi](LICENSE)
+
+</div>
 
 ---
 
-# 🇮🇩 Bahasa Indonesia
+## 🇮🇩 Bahasa Indonesia
 
-## Tentang LajuFile
+**LajuFile** adalah manajer unduhan desktop berbasis **Rust** untuk **Windows, macOS, dan Linux** yang membagi berkas HTTP/HTTPS menjadi beberapa segmen paralel secara otomatis, terintegrasi langsung dengan browser modern serta **yt-dlp / ffmpeg** untuk video hingga 4K, dan hadir dengan **Setup Installer executable** di setiap platform.
 
-**LajuFile** adalah aplikasi manajer unduhan (*download manager*) desktop native untuk **Windows** dan **Linux** yang dibangun menggunakan **Rust** oleh **Nuel Wallep**. Terinspirasi dari kemudahan alur kerja *Internet Download Manager (IDM)* namun ditulis sepenuhnya dengan kode dan desain orisinal yang ringan, aman, dan modern.
+### ✨ Fitur Utama
 
-## Fitur Utama
+| Kategori | Kemampuan |
+| --- | --- |
+| **Mesin Unduhan Cepat** | Hingga **32 koneksi paralel** per berkas (`Range` probing + prefix sanity check 64 KiB + resume otomatis), kontrol antrean serentak (`1–10`), pembatas kecepatan global cepat dari status bar, serta verifikasi **SHA-256** di jendela Properties. |
+| **Visual Progres Real-Time** | Peta Segmen (**Segment Map**) + grafik kecepatan **Sparkline**, estimasi ETA akurat, tema **Dark & Light**, dan skala antarmuka `80%–150%`. |
+| **Batch Smart Grabber (`Ctrl+B`)** | Antrekan banyak URL sekaligus, ekspansi pola angka otomatis (contoh `file-[01..20].zip`), dan **Fetch Links from Web Page** untuk mengekstrak tautan dari halaman web secara aman. |
+| **Integrasi Browser Lengkap** | Wizard Setup Ekstensi di menu `Browser` dengan deteksi otomatis **Chrome, Edge, Brave, Opera, Vivaldi, dan Firefox** di Windows, macOS, dan Linux, kode **Quick-Pair**, toggle per-situs, tombol `Alt+Click` bypass ke browser, penangkapan tautan PDF/media, dan tombol mengambang **"Download with LajuFile"** di YouTube. |
+| **Video & Audio (`yt-dlp` + `ffmpeg`)** | Unduh MP4 H.264 / Audio M4A terbaik otomatis untuk Windows, macOS, dan Linux (termasuk opsi menyematkan **Subtitles** & **Chapters** di Settings). Alat dipasang otomatis melalui HTTPS hanya saat dibutuhkan. |
+| **Multi-Bahasa & RTL (`View -> Language...`)** | Mendukung katalog **86 bahasa Windows**, deteksi bahasa OS otomatis (Windows, macOS, Linux), dukungan override terjemahan `.tsv`, tata letak **RTL** (Arab, Ibrani, Persia, Urdu), dan format angka lokal. |
+| **Aturan & Produktivitas** | Pencarian instan (`Ctrl+F`), sortir tabel, kebijakan duplikat (*Skip*, *Resume*, *Rename (#)*), daftar ekstensi tangkapan, daftar domain pengecualian (tersinkron ke ekstensi), drag-and-drop berkas `.url` / `.txt` / `.ef2`, serta **System Tray**. |
 
-### 🚀 Mesin Unduhan & Antrean
-- **Unduhan Tersegmen (Multi-Koneksi):** Memecah unduhan hingga **32 rentang byte paralel** sekaligus untuk memaksimalkan kecepatan.
-- **True Resume & Pemulihan Otomatis:** Melanjutkan unduhan yang dijeda atau terputus menggunakan validator `If-Range` (atau verifikasi 64 KiB). Jika aplikasi tertutup mendadak, unduhan otomatis dilanjutkan dari posisi terakhir.
-- **Manajemen Antrean & Batas Kecepatan:** Atur jumlah unduhan bersamaan (*simultaneous downloads*) dan batas kecepatan global dalam KB/s (`0` = tanpa batas).
-- **Penyimpanan Aman:** Menulis ke berkas sementara `<nama>.lajufile`, memeriksa ukuran byte akhir, melindungi dari penimpaan berkas, serta menyimpan progres tiap segmen di database SQLite (mode WAL).
+### 📦 Instalasi (Executable Setup Installer: Windows, macOS & Linux)
 
-### 🖥️ Antarmuka & Ikon Bergaya IDM
-- **Toolbar Lengkap:** Tombol cepat `Add URL`, `Batch`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, dan `Options`, ditambah menu `File`, `Tasks`, `View`, dan `Help`.
-- **Ikon Grafik Kustom (28 Ikon):** Ikon kategori (`All downloads`, `Unfinished`, `Finished`, `Video`, `Music`, `Documents`, `Programs`, `Compressed`, `Other`) di bilah samping, serta ikon tipe berkas otomatis (`MP4`, `MKV`, `MP3`, `PDF`, `DOCX`, `XLSX`, `PPTX`, `EXE`, `MSI`, `APK`, `ZIP`, `RAR`, `7Z`, `ISO`, `JPG`, `PNG`, `TXT`, `BIN`, dll.) pada daftar unduhan dan dialog.
-- **Dialog Informasi, Progres & Selesai:**
-  - **Download File Info:** Muncul saat menangkap unduhan dari browser, menampilkan ikon berkas, ukuran hasil *probe*, kategori, pengeditan nama/folder simpan, serta tombol `Start download` dan `Download later`.
-  - **Download Progress:** Klik dua kali pada baris unduhan aktif/dijeda untuk melihat grafik progres dan tabel status per-koneksi/segmen (`N.`, `Downloaded`, `Progress`, `Info`).
-  - **Download Complete:** Dialog penyelesaian dengan tombol cepat `Open`, `Open With`, dan `Open Folder`.
-- **Tema Gelap & Terang:** Pilihan tema `Dark`, `Light`, atau mengikuti sistem (`System`).
+Unduh installer sesuai sistem operasi dari halaman [Releases](../../releases):
 
-### 🌐 Integrasi Browser (Google Chrome, Brave, Microsoft Edge)
-- **Ekstensi LajuFile Capture (Manifest V3):** Menangkap unduhan langsung dari **Google Chrome**, **Brave**, **Microsoft Edge**, dan browser berbasis Chromium lainnya, lengkap dengan menu klik kanan **"Download with LajuFile"**.
-- **Jembatan Lokal Aman:** Berjalan di `127.0.0.1:53841` dengan autentikasi token 64-hex.
-- **Enkripsi Cookie:** Cookie sesi dari browser dienkripsi per-pengguna (menggunakan **Windows DPAPI** di Windows dan kunci khusus `0600` di Linux) dan tidak pernah disimpan sebagai teks biasa (*plaintext*).
+- **Windows:** Jalankan **`LajuFile-v1.0.0-windows-x64-setup.exe`**, setujui lisensi, dan klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
+- **macOS:** Buka **`LajuFile-v1.0.0-macos-arm64-setup.dmg`** dan jalankan **`LajuFile Setup.app`** (atau jalankan executable **`LajuFile-v1.0.0-macos-arm64-setup`** via terminal `chmod +x`), yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
+- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.0-linux-x64-setup.run && ./LajuFile-v1.0.0-linux-x64-setup.run`**, memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop` di menu aplikasi, dan symlink `~/.local/bin/lajufile`.
 
-### 🎬 Pengunduh Video YouTube
-- **Tombol Melayang "Unduh video ini" di YouTube:** Menampilkan tombol berikon **LajuFile** di sudut pemutar video YouTube lengkap dengan daftar kualitas (`1440p HD 60 fps`, `1080p HD 60 fps`, `720p HD 60 fps`, `720p HD`, `480p`, `360p`, `240p`, `144p`, hingga `Audio only` M4A).
-- **Audio & Video `.mp4` Kompatibel Penuh:** Mengelola `yt-dlp` dan `ffmpeg` secara otomatis serta memastikan penggabungan video H.264 + audio AAC agar setiap video `.mp4` yang diunduh selalu memiliki suara di pemutar bawaan Windows maupun Linux.
+Untuk menghubungkan browser, buka LajuFile -> **Browser -> Browser Extension Setup...** lalu salin kode **Quick-Pair**.
 
-### ⚡ Otomasi & Produktivitas
-- **Clipboard Monitor:** Menyalin (`Ctrl+C`) link unduhan atau link YouTube otomatis memunculkan dialog **Add Download**.
-- **Batch Download / Text Import:** Mengunduh banyak link sekaligus dari daftar URL, pola berurutan dengan *wildcard* `*` (angka `1–10` dengan *zero-padding* maupun huruf `a–z`), atau impor langsung dari berkas `.txt`.
-- **Berjalan di Latar Belakang (System Tray):** Menekan tombol **Close (`X`)** menyembunyikan jendela ke *System Tray* agar unduhan dan penangkap browser tetap berjalan di latar belakang hingga Anda memilih **Exit** pada ikon tray atau melalui Task Manager.
-- **Auto-Start Windows:** Opsi **Launch LajuFile on Windows startup** di menu **Options** untuk menjalankan aplikasi otomatis saat Windows menyala.
+> Catatan ekstensi browser: Folder `extension/` ikut terpasang otomatis bersama installer di setiap platform, siap dipasangkan menggunakan kode **Quick-Pair** satu klik.
 
----
+### 🛠️ Membangun dari Source & Membuat Installer
 
-## Unduh & Instalasi
+**Prasyarat:** Rust `>= 1.85` (Edition 2024).
 
-Unduh paket rilis terbaru di halaman **[GitHub Releases](https://github.com/nuellpr/LajuFile/releases/latest)**:
-
-| Sistem Operasi | Berkas Rilis | Cara Menjalankan |
-| :--- | :--- | :--- |
-| **Windows 10/11 (x64)** | `LajuFile-v0.1.0-windows-x64.zip` | Ekstrak `.zip`, lalu jalankan `lajufile.exe`. |
-| **Linux (x64)** | `LajuFile-v0.1.0-linux-x64.tar.gz` | Ekstrak dengan `tar -xzf LajuFile-v0.1.0-linux-x64.tar.gz`, lalu jalankan `./lajufile`. |
-
-Setiap paket rilis sudah menyertakan aplikasi utama (`lajufile.exe` / `lajufile`), folder ekstensi browser `extension/`, `README.md`, dan `LICENSE`.
-
----
-
-## Cara Memasang Ekstensi Browser (Chrome, Brave, Edge)
-
-1. Jalankan **LajuFile**, lalu klik tombol **Options** (atau **Manage** pada kartu *Browser Capture* di kiri bawah) dan salin **Port** serta **Token**.
-2. Buka halaman ekstensi di browser Anda:
-   - **Google Chrome:** `chrome://extensions`
-   - **Brave:** `brave://extensions`
-   - **Microsoft Edge:** `edge://extensions`
-3. Aktifkan **Mode pengembang (Developer mode)**, klik **Muat yang belum dikemas (Load unpacked)**, lalu pilih folder `extension/`.
-4. Buka pengaturan (*Options*) ekstensi **LajuFile Capture**, tempelkan **Port** dan **Token**, lalu klik **Save**.
-5. Klik **Test connection** hingga status menampilkan **Connected**.
-
----
-
-## Cara Mengunduh Video YouTube
-
-- **Langsung dari Browser:** Buka video YouTube apa saja, klik tombol **"Unduh video ini"** berikon LajuFile di pojok kanan atas pemutar video, lalu pilih resolusi yang diinginkan.
-- **Melalui Aplikasi LajuFile:** Klik **Add URL**, tempelkan link YouTube, klik **Load qualities** untuk memilih resolusi (atau biarkan *Best available*), lalu klik **Add**.
-
----
-
-## Kompilasi dari Kode Sumber (Build)
-
-### Prasyarat
-- **Windows 10/11 x64:** Rust stable (toolchain MSVC) dan *Visual Studio Build Tools* (beban kerja C++).
-- **Linux x64 (Ubuntu/Debian):** Rust stable dan paket dependensi sistem:
-  ```bash
-  sudo apt-get update
-  sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libayatana-appindicator3-dev libxdo-dev libwayland-dev libgl1-mesa-dev pkg-config
-  ```
-
-### Perintah Kompilasi
 ```powershell
+# Clone repository
+git clone https://github.com/nuellpr/LajuFile.git
+cd LajuFile
+
+# Jalankan seluruh pengujian & linter
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run -p lajufile-app
-cargo build --release -p lajufile-app
+
+# Jalankan aplikasi desktop langsung
+cargo run -p lajufile-app --bin lajufile
+
+# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.0-Windows-x64-Setup.exe
+powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
+```
+
+Di **macOS / Linux**, bangun installer native dengan:
+
+```bash
+chmod +x installer/build-unix-installer.sh
+./installer/build-unix-installer.sh
+```
+
+### ⌨️ Pintasan Keyboard
+
+- `Ctrl+N` — Tambah URL unduhan baru
+- `Ctrl+B` — Buka **Batch Smart Grabber**
+- `Ctrl+F` — Fokus kotak pencarian
+- `Ctrl+,` — Buka Pengaturan (**Settings**)
+- `Alt+Enter` — Buka detail **Properties** & verifikasi SHA-256
+- `Space` — Jeda / Lanjutkan (*Pause / Resume*) item terpilih
+- `Delete` — Hapus item terpilih
+- `Alt+Click` (di Browser) — Biarkan browser mengunduh langsung tanpa ditangkap LajuFile
+
+---
+
+## 🇬🇧 English
+
+**LajuFile** is a modern, lightweight desktop download manager built in **Rust** (`egui`/`eframe` + `tokio` + SQLite WAL) for **Windows, macOS, and Linux**. It accelerates HTTP/HTTPS downloads with parallel segmented connections, captures browser downloads & YouTube streams via a Manifest V3 extension, and ships with native executable Setup Installers on every desktop OS.
+
+### ✨ Highlights
+
+- **Segmented HTTP Engine:** Up to 32 parallel range streams per file, automatic `If-Range` fallback to single stream when needed, global token-bucket speed limiter, and built-in **SHA-256** verification.
+- **Browser Extension & Setup Wizard:** Local HTTP bridge on `127.0.0.1` protected by a 64-hex secret token (`x-lajufile-token`) with constant-time verification and strict extension/localhost CORS allowlist. Supports **Chrome, Edge, Brave, Opera, Vivaldi, and Firefox** on Windows, macOS & Linux with one-paste **Quick-Pair**, `Alt+Click` bypass, inline PDF/media interception, and a YouTube quality picker bar.
+- **Batch Smart Grabber:** Expand numeric ranges (`[01..20]`) or extract downloadable links directly from public web pages.
+- **Video & Audio Integration:** Auto-installs `yt-dlp` and `ffmpeg` over HTTPS on first video request across Windows, macOS, and Linux; supports H.264/AAC MP4 merging, M4A audio-only extraction, embedded subtitles, and chapters.
+- **86-Language Catalog & RTL:** OS display language auto-detection, built-in translations, runtime `.tsv` override support, locale number formatting, and automatic RTL layout mirroring.
+- **Cross-Platform Native Installers (`.exe`, `.dmg`, `.run`):** Self-contained setup wizard with SHA-256 payload integrity verification, desktop/menu launchers (Windows `.lnk` + Add/Remove Programs, macOS `.app` bundle + `.dmg`, Linux XDG `.desktop` + `~/.local/bin`), and built-in uninstaller (`v1.0.0`).
+
+---
+
+## 🔒 Keamanan & Arsitektur / Security Architecture
+
+LajuFile dirancang dengan prinsip *defense-in-depth* untuk penggunaan harian dan rilis open-source yang aman:
+
+1. **Enkripsi Cookie Lokal:** Cookie sesi dari browser dienkripsi di Windows menggunakan **Windows DPAPI** (`CryptProtectData` dengan `CRYPTPROTECT_UI_FORBIDDEN`) dan key-protected storage di Linux sebelum disimpan ke SQLite.
+2. **Bridge Autentikasi & CORS Ketat:** Bridge lokal hanya mendengar di `127.0.0.1`, mewajibkan header `x-lajufile-token` 64 karakter hex dengan perbandingan **constant-time**, memvalidasi skema `http`/`https`, dan hanya mengizinkan CORS dari origin ekstensi browser (`chrome-extension://`, `moz-extension://`, `extension://`, `safari-web-extension://`) serta localhost.
+3. **Proteksi SSRF pada Web Page Grabber:** Fitur ekstraksi tautan halaman web memvalidasi DNS dan menolak alamat IP loopback (`127.0.0.0/8`, `::1`), privat (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), CGNAT (`100.64.0.0/10`), link-local / cloud metadata (`169.254.169.254`), serta memblokir redirect ke host internal.
+4. **Keamanan Berkas & Installer:** Nama berkas disanitasi terhadap path traversal dan nama perangkat terlarang Windows; payload installer diverifikasi dengan **SHA-256** dan menolak path relatif tidak aman (`..`, path absolut, maupun drive prefix). Alat video diunduh dengan `curl --proto =https`.
+5. **Penyimpanan Lokal Aman:** SQLite berjalan dalam mode **WAL** dengan seluruh query menggunakan *parameterized bindings*. Berkas `.db`, `settings.json`, dan kunci lokal dikecualikan melalui `.gitignore`.
+
+### 🗂️ Struktur Repositori
+
+```
+LajuFile/
+├── crates/
+│   ├── lajufile-core/     # Mesin unduhan, segmen, HTTP probe, DPAPI cookie, SQLite store, SHA-256
+│   └── lajufile-app/      # GUI eframe/egui, engine thread, bridge HTTP, tray, i18n, & lajufile-setup
+├── extension/             # Ekstensi browser Manifest V3 (background, content, interceptor, popup, options)
+├── installer/             # Skrip build Setup Installer Windows (.exe), macOS (.dmg) & Linux (.run)
+├── assets/                # Ikon aplikasi & aset kategori/jenis berkas
+└── .github/workflows/     # Pipeline CI (Windows/macOS/Linux test) & Release (Setup Installers)
 ```
 
 ---
 
-# 🇬🇧 English
+## 🛡️ Code signing policy
 
-## About LajuFile
+* **Code Signing & Eligibility:** Intended for free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/) (once enrolled/approved; unsigned releases are noted in GitHub Releases until signing is active).
+* **Team Roles:**
+  * Committers, reviewers, and approvers: [nuellpr](https://github.com/nuellpr) (Repository Owner).
+* **Privacy Policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it (such as user-initiated file/web-page downloads or optional first-run HTTPS downloads of open-source `yt-dlp` and `ffmpeg` binaries on video requests).
 
-**LajuFile** is a fast, native desktop download manager for **Windows** and **Linux**, built in **Rust** by **Nuel Wallep**. Inspired by the classic *Internet Download Manager (IDM)* workflow, it combines segmented HTTP transfers, true resume, queues, speed limits, browser capture, and YouTube video downloads in a lightweight native application with original code and design.
+---
 
-## Key Features
+## 📜 Lisensi / License
 
-- **Segmented Download Engine:** Up to **32 parallel byte-range connections** per file, `If-Range` true resume (with 64 KiB prefix fallback), global speed limits, and automatic crash recovery backed by SQLite in WAL mode.
-- **IDM-Style Desktop UI & Custom Icons:** Full toolbar (`Add URL`, `Batch`, `Resume`, `Stop`, `Stop All`, `Delete`, `Delete Completed`, `Options`), 28 glossy category and file-type icons (`MP4`, `MKV`, `MP3`, `PDF`, `DOCX`, `XLSX`, `PPTX`, `EXE`, `MSI`, `APK`, `ZIP`, `RAR`, `7Z`, `ISO`, `JPG`, `PNG`, `TXT`, `BIN`, etc.), `Download File Info` capture dialog, per-segment `Download Progress` window, and `Download Complete` dialog.
-- **Multi-Browser Capture (Chrome, Brave, Edge):** Manifest V3 extension (`LajuFile Capture`) communicating with a token-authenticated localhost bridge (`127.0.0.1:53841`) and encrypted per-user cookie storage (Windows DPAPI on Windows, `0600` user key on Linux).
-- **YouTube Video Downloader:** Floating **"Unduh video ini"** button with the LajuFile icon and quality selector (`1440p HD 60 fps`, `1080p HD 60 fps`, `720p HD`, `Audio only`, etc.) on YouTube watch pages, powered by managed `yt-dlp` + `ffmpeg` with automatic H.264/AAC `.mp4` audio compatibility.
-- **Automation & System Integration:** Clipboard Monitor (`Ctrl+C` auto-prompts for downloadable links), Batch Download / Text Import (URL lists, wildcard `*` numeric/alphabetic ranges, `.txt` import), Close-to-Tray background mode, and `Launch LajuFile on Windows startup`.
-
-## Browser Extension Setup (Google Chrome, Brave, Microsoft Edge)
-
-1. Start **LajuFile** and open **Options** (or click **Manage** under *Browser Capture*). Copy the **Port** and **Token**.
-2. Open your browser's extensions page (`chrome://extensions`, `brave://extensions`, or `edge://extensions`).
-3. Enable **Developer mode**, click **Load unpacked**, and select the `extension/` folder.
-4. Open the **LajuFile Capture** extension options, paste the port and token, and click **Test connection** until it shows **Connected**.
-
-## Build & Release
-
-Pushing a version tag automatically builds and publishes portable archives for both **Windows** (`LajuFile-<tag>-windows-x64.zip`) and **Linux** (`LajuFile-<tag>-linux-x64.tar.gz`) via GitHub Actions:
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-## Design & Documentation
-
-- Figma: <https://www.figma.com/design/PASDzAEqJlF35dkv4L9eIx>
-- Spec: [`docs/superpowers/specs/2026-11-14-lajufile-design.md`](docs/superpowers/specs/2026-11-14-lajufile-design.md)
-- Milestone Plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
-
-## Lisensi / License
-
-Didistribusikan di bawah **Lisensi MIT** (Bahasa Inggris & Bahasa Indonesia) — lihat berkas [LICENSE](LICENSE).  
-Distributed under the **MIT License** (English & Indonesian) — see [LICENSE](LICENSE).
+Dirilis di bawah **MIT License** lengkap dengan bagian **TERMS AND CONDITIONS** dan **END TERMS AND CONDITIONS** — lihat berkas [LICENSE](LICENSE).  
+Hak Cipta © 2026 **Nuel Wallep**.

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lajufile_app::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
-use lajufile_core::settings::Settings;
+use lajufile_core::settings::{DuplicatePolicy, Settings};
 use lajufile_core::store::{Category, DownloadStatus, NewDownload, Segment, Store, now_millis};
 use support::{SEG_SIZE, seg_payload, start_server};
 
@@ -1132,5 +1132,257 @@ fn remove_completed_clears_done_rows_and_keeps_files() {
     assert_eq!(after.downloads[0].file_name, "later.bin");
     assert_eq!(after.downloads[0].status, DownloadStatus::Paused);
     assert!(done_path.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn remove_with_file_deletes_saved_file_when_requested() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(dir.path());
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("erase.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+    let saved = snap.downloads[0].save_path.clone();
+    assert!(saved.exists());
+
+    handle
+        .send(Command::RemoveWithFile {
+            id,
+            delete_file: true,
+        })
+        .unwrap();
+    wait_for(&handle, |s| s.downloads.is_empty(), Duration::from_secs(10));
+    assert!(!saved.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn move_rename_moves_completed_file_and_updates_store() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(dir.path());
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("orig.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+    let old_path = snap.downloads[0].save_path.clone();
+    let target_dir = dir.path().join("moved_folder");
+
+    handle
+        .send(Command::MoveRename {
+            id,
+            file_name: "renamed.bin".to_string(),
+            dir: Some(target_dir.clone()),
+        })
+        .unwrap();
+
+    let moved = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.file_name == "renamed.bin")
+        },
+        Duration::from_secs(10),
+    );
+    let new_path = target_dir.join("renamed.bin");
+    assert_eq!(moved.downloads[0].save_path, new_path);
+    assert!(!old_path.exists());
+    assert!(new_path.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn update_url_and_resume_completes_with_refreshed_url() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(dir.path());
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("refreshed.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+        }))
+        .unwrap();
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let id = snap.downloads[0].id;
+    let refreshed_url = format!("{}/file.bin?token=fresh", server.base);
+    handle
+        .send(Command::UpdateUrlAndResume {
+            id,
+            url: refreshed_url.clone(),
+        })
+        .unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(done.downloads[0].url, refreshed_url);
+    assert!(done.downloads[0].save_path.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn duplicate_policy_resume_and_numbered_behavior() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings {
+        duplicate_policy: DuplicatePolicy::ResumeExisting,
+        ..test_settings(dir.path())
+    };
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: settings.clone(),
+    })
+    .unwrap();
+
+    let add_req = |url: String, start_now: bool| AddRequest {
+        url,
+        file_name: None,
+        save_dir: None,
+        start_now,
+        connections: None,
+        referrer: None,
+        user_agent: None,
+        cookie: None,
+        video_format: None,
+    };
+
+    let first_url = format!("{}/file.bin", server.base);
+    handle
+        .send(Command::Add(add_req(first_url.clone(), false)))
+        .unwrap();
+    let paused = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let paused_id = paused.downloads[0].id;
+
+    // Adding the same URL again with ResumeExisting should resume the paused row.
+    handle
+        .send(Command::Add(add_req(first_url, false)))
+        .unwrap();
+    let resumed = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(resumed.downloads.len(), 1);
+    assert_eq!(resumed.downloads[0].id, paused_id);
+
+    // Switch to RenameNumbered and enqueue the same URL twice without waiting for completion.
+    settings.duplicate_policy = DuplicatePolicy::RenameNumbered;
+    handle.send(Command::UpdateSettings(settings)).unwrap();
+    let dup_url = format!("{}/slow-headers.bin", server.base);
+    handle
+        .send(Command::Add(add_req(dup_url.clone(), false)))
+        .unwrap();
+    let first_slow = wait_for(&handle, |s| s.downloads.len() == 2, Duration::from_secs(15));
+    assert_eq!(first_slow.downloads.len(), 2);
+
+    handle.send(Command::Add(add_req(dup_url, false))).unwrap();
+    let both_slow = wait_for(&handle, |s| s.downloads.len() == 3, Duration::from_secs(15));
+    let slow_rows: Vec<_> = both_slow
+        .downloads
+        .iter()
+        .filter(|d| d.url.ends_with("/slow-headers.bin"))
+        .collect();
+    assert_eq!(slow_rows.len(), 2);
+    assert_ne!(slow_rows[0].file_name, slow_rows[1].file_name);
+    assert_ne!(slow_rows[0].save_path, slow_rows[1].save_path);
     handle.shutdown();
 }

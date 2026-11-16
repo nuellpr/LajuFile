@@ -330,6 +330,43 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_url(&mut self, id: i64, url: &str) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE downloads
+             SET url = ?1, final_url = NULL, etag = NULL, last_modified = NULL, error = NULL
+             WHERE id = ?2",
+            params![url, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn update_location(
+        &mut self,
+        id: i64,
+        file_name: &str,
+        save_path: &Path,
+        temp_path: &Path,
+    ) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE downloads
+             SET file_name = ?1, save_path = ?2, temp_path = ?3
+             WHERE id = ?4",
+            params![
+                file_name,
+                save_path.to_string_lossy().as_ref(),
+                temp_path.to_string_lossy().as_ref(),
+                id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn delete_download(&mut self, id: i64) -> Result<(), StoreError> {
         let changed = self
             .conn
@@ -356,6 +393,26 @@ impl Store {
             });
         }
         Ok(segments)
+    }
+
+    pub fn all_segments(&self) -> Result<std::collections::HashMap<i64, Vec<Segment>>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT download_id, idx, start, end, done FROM segments
+             ORDER BY download_id, idx",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut grouped: std::collections::HashMap<i64, Vec<Segment>> =
+            std::collections::HashMap::new();
+        while let Some(row) = rows.next()? {
+            let download_id: i64 = row.get(0)?;
+            grouped.entry(download_id).or_default().push(Segment {
+                idx: row.get::<_, i64>(1)? as u32,
+                start: row.get::<_, i64>(2)? as u64,
+                end: row.get::<_, i64>(3)? as u64,
+                done: row.get::<_, i64>(4)? as u64,
+            });
+        }
+        Ok(grouped)
     }
 }
 
@@ -412,5 +469,70 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "http");
         assert_eq!(rows[0].video_format, None);
+    }
+
+    #[test]
+    fn all_segments_groups_by_download_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("seg.db")).unwrap();
+        let make = |name: &str, segs: Vec<Segment>| NewDownload {
+            url: format!("https://example.com/{name}"),
+            final_url: None,
+            file_name: name.to_string(),
+            save_path: dir.path().join(name),
+            temp_path: dir.path().join(format!("{name}.lajufile")),
+            size: Some(200),
+            status: DownloadStatus::Queued,
+            category: Category::Other,
+            kind: "http".to_string(),
+            video_format: None,
+            connections: segs.len() as u32,
+            ranged: true,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: None,
+            user_agent: None,
+            queue_order: 1,
+            created_at: 0,
+            segments: segs,
+        };
+        let id1 = store
+            .insert_download(&make(
+                "a.bin",
+                vec![
+                    Segment {
+                        idx: 0,
+                        start: 0,
+                        end: 99,
+                        done: 10,
+                    },
+                    Segment {
+                        idx: 1,
+                        start: 100,
+                        end: 199,
+                        done: 20,
+                    },
+                ],
+            ))
+            .unwrap();
+        let id2 = store
+            .insert_download(&make(
+                "b.bin",
+                vec![Segment {
+                    idx: 0,
+                    start: 0,
+                    end: 199,
+                    done: 5,
+                }],
+            ))
+            .unwrap();
+
+        let all = store.all_segments().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&id1].len(), 2);
+        assert_eq!(all[&id1][1].done, 20);
+        assert_eq!(all[&id2].len(), 1);
+        assert_eq!(all[&id2][0].done, 5);
     }
 }

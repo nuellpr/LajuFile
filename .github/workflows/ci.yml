@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,5 +28,8 @@ jobs:
         run: cargo test --workspace
       - name: Check extension scripts
         run: |
-          node --check extension/content.js
           node --check extension/background.js
+          node --check extension/content.js
+          node --check extension/interceptor.js
+          node --check extension/options.js
+          node --check extension/popup.js

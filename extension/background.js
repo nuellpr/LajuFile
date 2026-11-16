@@ -1,7 +1,36 @@
-const DEFAULTS = { port: 53841, token: "", autoCapture: true };
+const DEFAULTS = {
+  port: 53841,
+  token: "",
+  autoCapture: true,
+  excludedDomains: "",
+  fileTypes: "",
+};
 const HEALTH_TTL_MS = 5000;
+const RULES_TTL_MS = 5000;
+const BYPASS_TTL_MS = 10000;
 const handledIds = new Set();
+const bypassUrls = new Map();
 let healthCache = { port: null, ok: false, at: 0 };
+let rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
+
+function markBypass(url) {
+  if (!url) return;
+  const now = Date.now();
+  bypassUrls.set(String(url), now + BYPASS_TTL_MS);
+  for (const [key, exp] of bypassUrls.entries()) {
+    if (exp < now) bypassUrls.delete(key);
+  }
+}
+
+function isBypassed(url) {
+  const exp = bypassUrls.get(String(url || ""));
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    bypassUrls.delete(String(url));
+    return false;
+  }
+  return true;
+}
 
 async function getConfig() {
   const stored = await chrome.storage.local.get(DEFAULTS);
@@ -9,6 +38,8 @@ async function getConfig() {
     port: Number(stored.port) || DEFAULTS.port,
     token: String(stored.token || ""),
     autoCapture: stored.autoCapture !== false,
+    excludedDomains: String(stored.excludedDomains || ""),
+    fileTypes: String(stored.fileTypes || ""),
   };
 }
 
@@ -90,6 +121,110 @@ function basename(value) {
   return name || undefined;
 }
 
+function parseRuleTokens(raw) {
+  return String(raw || "")
+    .split(/[\s,;]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function hostMatchesExcluded(host, rulesRaw) {
+  if (!host) return false;
+  const normalizedHost = host.toLowerCase();
+  return parseRuleTokens(rulesRaw).some((token) => {
+    const domain = token.replace(/^\*\.|^\./, "");
+    return domain && (normalizedHost === domain || normalizedHost.endsWith(`.${domain}`));
+  });
+}
+
+function urlHost(rawUrl) {
+  try {
+    return rawUrl ? new URL(rawUrl).hostname.toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+function detectExtension(item, url) {
+  const candidates = [];
+  const fileBase = basename(item && item.filename);
+  if (fileBase) candidates.push(fileBase);
+  try {
+    const pathname = new URL(url).pathname;
+    const seg = basename(pathname);
+    if (seg) candidates.push(seg);
+  } catch {}
+  for (const name of candidates) {
+    const idx = name.lastIndexOf(".");
+    if (idx > 0 && idx < name.length - 1) {
+      return name.slice(idx + 1).toLowerCase();
+    }
+  }
+  return "";
+}
+
+async function fetchBridgeExcludedDomains(config) {
+  if (!config.token) return "";
+  const now = Date.now();
+  if (
+    rulesCache.port === config.port &&
+    rulesCache.token === config.token &&
+    now - rulesCache.at < RULES_TTL_MS
+  ) {
+    return rulesCache.excludedDomains;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+  try {
+    const response = await fetch(`http://127.0.0.1:${config.port}/rules`, {
+      headers: { "x-lajufile-token": config.token },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!response.ok) return "";
+    const body = await response.json();
+    const excludedDomains = String((body && body.excluded_domains) || "");
+    const capturedExtensions = String((body && body.captured_extensions) || "");
+    rulesCache = {
+      port: config.port,
+      token: config.token,
+      excludedDomains,
+      at: Date.now(),
+    };
+    chrome.storage.local
+      .set({
+        remoteExcludedDomains: excludedDomains,
+        remoteCapturedExtensions: capturedExtensions,
+      })
+      .catch(() => {});
+    return excludedDomains;
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function autoCaptureSkipReason(item, url, config, remoteExcluded) {
+  const combinedExcluded = `${config.excludedDomains || ""}\n${remoteExcluded || ""}`;
+  const downloadHost = urlHost(url);
+  const referrerHost = urlHost(item && item.referrer);
+  if (
+    hostMatchesExcluded(downloadHost, combinedExcluded) ||
+    hostMatchesExcluded(referrerHost, combinedExcluded)
+  ) {
+    return "excluded-domain";
+  }
+  const extRules = parseRuleTokens(config.fileTypes).map((t) => t.replace(/^\./, "")).filter(Boolean);
+  if (extRules.length > 0 && !extRules.includes("*")) {
+    const ext = detectExtension(item, url);
+    if (!ext || !extRules.includes(ext)) {
+      return "excluded-extension";
+    }
+  }
+  return null;
+}
+
 async function capture(item, allowBrowserFallback) {
   const config = await getConfig();
   if (allowBrowserFallback && !config.autoCapture) {
@@ -102,6 +237,16 @@ async function capture(item, allowBrowserFallback) {
   const url = item.url || item.finalUrl || item.linkUrl;
   if (!url || !/^https?:/i.test(url)) {
     return { status: 0, skipped: true, reason: "unsupported-url" };
+  }
+  if (allowBrowserFallback) {
+    if (isBypassed(url)) {
+      return { status: 0, skipped: true, reason: "alt-bypass" };
+    }
+    const remoteExcluded = await fetchBridgeExcludedDomains(config);
+    const reason = autoCaptureSkipReason(item, url, config, remoteExcluded);
+    if (reason) {
+      return { status: 0, skipped: true, reason };
+    }
   }
 
   const cookie = await cookieHeader(url);
@@ -155,9 +300,20 @@ async function resumeItem(id) {
   } catch {}
 }
 
+function isLiveDownload(item) {
+  if (!item || item.state !== "in_progress") return false;
+  if (item.startTime) {
+    const startedAt = Date.parse(item.startTime);
+    if (Number.isFinite(startedAt) && Date.now() - startedAt > 10000) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function markHandled(id) {
   handledIds.add(id);
-  setTimeout(() => handledIds.delete(id), 60000);
+  setTimeout(() => handledIds.delete(id), 75000);
 }
 
 if (chrome.downloads.onDeterminingFilename) {
@@ -170,7 +326,12 @@ if (chrome.downloads.onDeterminingFilename) {
       }
     };
 
-    if (!item.url || !/^https?:/i.test(item.url)) {
+    if (
+      handledIds.has(item.id) ||
+      !isLiveDownload(item) ||
+      !item.url ||
+      !/^https?:/i.test(item.url)
+    ) {
       finish();
       return false;
     }
@@ -192,14 +353,17 @@ if (chrome.downloads.onDeterminingFilename) {
 }
 
 chrome.downloads.onCreated.addListener((item) => {
+  if (handledIds.has(item.id) || !isLiveDownload(item)) return;
   const id = item.id;
   setTimeout(async () => {
     if (handledIds.has(id)) return;
-    const url = item.finalUrl || item.url;
+    const [current] = await chrome.downloads.search({ id }).catch(() => []);
+    if (!current || current.state !== "in_progress") return;
+    const url = current.finalUrl || current.url || item.finalUrl || item.url;
     if (!url || !/^https?:/i.test(url)) return;
     markHandled(id);
     await pauseItem(id);
-    const result = await capture({ ...item, url }, true);
+    const result = await capture({ ...current, url }, true);
     if (result.status === 201 || result.status === 409) {
       await cancelAndErase(id);
     } else {
@@ -277,7 +441,39 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "config-updated") {
     healthCache = { port: null, ok: false, at: 0 };
+    rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
+    getConfig()
+      .then((config) => fetchBridgeExcludedDomains(config))
+      .catch(() => {});
     return;
+  }
+  if (message && message.type === "bypass-url") {
+    markBypass(message.url);
+    sendResponse({ ok: true });
+    return;
+  }
+  if (message && message.type === "intercept-link") {
+    capture(
+      {
+        url: message.url,
+        referrer: message.referrer,
+        filename: message.filename,
+      },
+      true,
+    )
+      .then((result) => {
+        if (result.status === 201 || result.status === 409) {
+          sendResponse({ captured: true, status: result.status });
+        } else {
+          markBypass(message.url);
+          sendResponse({ fallback: true, reason: result.reason || "error" });
+        }
+      })
+      .catch(() => {
+        markBypass(message.url);
+        sendResponse({ fallback: true, reason: "error" });
+      });
+    return true;
   }
   if (message && message.type === "video-formats") {
     post("video/formats", { url: message.url })
