@@ -8,3 +8,4 @@ pub mod installer;
 pub mod tools;
 pub mod tray;
 pub mod ui;
+pub mod updater;

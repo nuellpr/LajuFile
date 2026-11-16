@@ -1,86 +1,84 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LajuFile Capture</title>
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <main>
-      <div class="hero-glow"></div>
-      <header>
-        <div class="brand">
-          <div class="logo-ring">
-            <img src="icons/icon-32.png" alt="" width="28" height="28" />
-          </div>
-          <div>
-            <h1>LajuFile</h1>
-            <p>Browser integration</p>
-          </div>
-        </div>
-        <span id="pairBadge" class="badge pending">Unpaired</span>
-      </header>
 
-      <section class="card status-card">
-        <div class="status-row">
-          <div class="status-line">
-            <span id="dot" class="dot"></span>
-            <div>
-              <strong id="state">Checking bridge…</strong>
-              <p id="detail">127.0.0.1:53841</p>
-            </div>
-          </div>
-          <button id="test" class="ghost-btn" type="button">Test</button>
-        </div>
-      </section>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LajuFile Capture</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
 
-      <label class="card toggle">
-        <span>
-          <strong>Capture browser downloads</strong>
-          <small>Auto-catches links, PDFs &amp; videos</small>
-        </span>
-        <span class="switch">
-          <input id="autoCapture" type="checkbox" />
-          <span class="slider"></span>
-        </span>
-      </label>
-
-      <section id="siteCard" class="card site-card hidden">
-        <div class="site-row">
-          <div>
-            <span class="mini-kicker">THIS WEBSITE</span>
-            <strong id="siteHost" class="site-host">example.com</strong>
-          </div>
-          <button id="siteToggle" class="ghost-btn" type="button">Pause on site</button>
+<body>
+  <main>
+    <div class="hero-glow"></div>
+    <header>
+      <div class="brand">
+        <div class="logo-ring">
+          <img src="icons/icon-32.png" alt="" width="28" height="28" />
         </div>
-      </section>
-
-      <section id="quickPairBox" class="card pair-card hidden">
-        <div class="pair-head">
-          <strong>Quick-Pair with Desktop</strong>
-          <span class="mini-hint">Paste JSON code</span>
+        <div>
+          <h1>LajuFile</h1>
+          <p>Browser integration</p>
         </div>
-        <div class="pair-row">
-          <input
-            id="pairCode"
-            type="text"
-            placeholder='{"port":53841,"token":"..."}'
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <button id="pairApply" class="mini-primary" type="button">Pair</button>
-        </div>
-        <p id="pairFeedback" class="pair-feedback"></p>
-      </section>
-
-      <div class="tip-card">
-        <span>Hold <kbd>Alt</kbd> + <strong>Click</strong> on any link to keep the download inside your browser.</span>
       </div>
+      <span id="pairBadge" class="badge pending">Unpaired</span>
+    </header>
 
-      <button id="options" class="primary" type="button">Extension Options &amp; Filters</button>
-      <footer>LajuFile Capture · v1.0.0</footer>
-    </main>
-    <script src="popup.js"></script>
-  </body>
+    <section class="card status-card">
+      <div class="status-row">
+        <div class="status-line">
+          <span id="dot" class="dot"></span>
+          <div>
+            <strong id="state">Checking bridge…</strong>
+            <p id="detail">127.0.0.1:53841</p>
+          </div>
+        </div>
+        <button id="test" class="ghost-btn" type="button">Test</button>
+      </div>
+    </section>
+
+    <label class="card toggle">
+      <span>
+        <strong>Capture browser downloads</strong>
+        <small>Auto-catches links, PDFs &amp; videos</small>
+      </span>
+      <span class="switch">
+        <input id="autoCapture" type="checkbox" />
+        <span class="slider"></span>
+      </span>
+    </label>
+
+    <section id="siteCard" class="card site-card hidden">
+      <div class="site-row">
+        <div>
+          <span class="mini-kicker">THIS WEBSITE</span>
+          <strong id="siteHost" class="site-host">example.com</strong>
+        </div>
+        <button id="siteToggle" class="ghost-btn" type="button">Pause on site</button>
+      </div>
+    </section>
+
+    <section id="quickPairBox" class="card pair-card hidden">
+      <div class="pair-head">
+        <strong>Quick-Pair with Desktop</strong>
+        <span class="mini-hint">Paste JSON code</span>
+      </div>
+      <div class="pair-row">
+        <input id="pairCode" type="text" placeholder='{"port":53841,"token":"..."}' autocomplete="off"
+          spellcheck="false" />
+        <button id="pairApply" class="mini-primary" type="button">Pair</button>
+      </div>
+      <p id="pairFeedback" class="pair-feedback"></p>
+    </section>
+
+    <div class="tip-card">
+      <span>Hold <kbd>Alt</kbd> + <strong>Click</strong> on any link to keep the download inside your browser.</span>
+    </div>
+
+    <button id="options" class="primary" type="button">Extension Options &amp; Filters</button>
+    <footer>LajuFile Capture · v1.0.1</footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+
 </html>

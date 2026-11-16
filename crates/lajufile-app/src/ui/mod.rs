@@ -291,6 +291,13 @@ pub enum Action {
     },
     RemoveCompleted,
     ShowProgress(i64),
+    HideProgress(i64),
+    OpenUpdateChecker,
+    CheckUpdatesNow,
+    StartSelfUpdate {
+        url: String,
+        file_name: String,
+    },
     OpenProperties(i64),
     Redownload(i64),
     Open(i64),

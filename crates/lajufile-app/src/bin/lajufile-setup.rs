@@ -361,6 +361,7 @@ fn main() -> ExitCode {
 
     let uninstall_mode = args.iter().any(|a| a == "--uninstall");
     let silent = args.iter().any(|a| a == "--silent");
+    let relaunch = args.iter().any(|a| a == "--relaunch");
     let install_dir = parse_arg_value(&args, "--dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -374,17 +375,26 @@ fn main() -> ExitCode {
         });
 
     if silent {
+        if relaunch {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+        }
         let result = if uninstall_mode {
             perform_uninstall(&install_dir)
         } else {
             perform_install(&InstallOptions {
-                install_dir,
-                desktop_shortcut: true,
+                install_dir: install_dir.clone(),
+                desktop_shortcut: !relaunch,
                 start_menu_shortcut: true,
             })
         };
         return match result {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) => {
+                if relaunch && !uninstall_mode {
+                    let exe = launch_installed_path(&install_dir);
+                    let _ = std::process::Command::new(exe).spawn();
+                }
+                ExitCode::SUCCESS
+            }
             Err(err) => {
                 eprintln!("{err}");
                 ExitCode::FAILURE

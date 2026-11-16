@@ -13,13 +13,15 @@ use crate::bridge;
 use crate::engine::{AddRequest, Command, EngineConfig, EngineHandle, Snapshot};
 use crate::tray::{self, Tray, TrayEvent};
 use crate::ui::dialogs::{
-    AddDraft, BatchDraft, BatchMode, PropertiesDraft, clipboard_download_url_with_rules,
+    AddDraft, BatchDraft, BatchMode, PropertiesDraft, UpdateUiState,
+    clipboard_download_url_with_rules,
 };
 use crate::ui::download_info::{DownloadInfoChoice, DownloadInfoDraft, category_label};
 use crate::ui::folder_picker::{FolderChoice, FolderPicker};
 use crate::ui::format::format_speed;
 use crate::ui::theme::apply_theme;
 use crate::ui::{self, Action, Filter, SortOrder, extract_urls_from_text};
+use crate::updater;
 
 #[derive(Debug, Clone)]
 pub(crate) enum FolderTarget {
@@ -49,6 +51,9 @@ pub struct LajuFileApp {
     pub(crate) show_settings: bool,
     pub(crate) show_browser_wizard: bool,
     pub(crate) show_language_picker: bool,
+    pub(crate) show_update_dialog: bool,
+    pub(crate) update_state: UpdateUiState,
+    pub(crate) update_rx: Option<mpsc::Receiver<updater::UpdateEvent>>,
     pub(crate) language: String,
     pub(crate) add_draft: AddDraft,
     pub(crate) batch_draft: BatchDraft,
@@ -70,6 +75,7 @@ pub struct LajuFileApp {
     pub(crate) capture_info: Option<(u64, DownloadInfoDraft)>,
     pub(crate) dismissed_capture: Option<u64>,
     pub(crate) progress_id: Option<i64>,
+    pub(crate) hidden_progress_id: Option<i64>,
     pub(crate) progress_details: bool,
     pub(crate) speed_history: HashMap<i64, Vec<u64>>,
     pub(crate) last_speed_sample: Instant,
@@ -140,6 +146,9 @@ impl LajuFileApp {
             show_settings: false,
             show_browser_wizard,
             show_language_picker: false,
+            show_update_dialog: false,
+            update_state: UpdateUiState::Idle,
+            update_rx: None,
             language,
             add_draft,
             batch_draft,
@@ -161,6 +170,7 @@ impl LajuFileApp {
             capture_info: None,
             dismissed_capture: None,
             progress_id: None,
+            hidden_progress_id: None,
             progress_details: true,
             speed_history: HashMap::new(),
             last_speed_sample: Instant::now(),
@@ -226,6 +236,9 @@ impl LajuFileApp {
                 if !seen.contains(id) {
                     if self.progress_id == Some(*id) {
                         self.progress_id = None;
+                    }
+                    if self.hidden_progress_id == Some(*id) {
+                        self.hidden_progress_id = None;
                     }
                     if snapshot.settings.show_complete_dialog {
                         self.completed_id = Some(*id);
@@ -494,6 +507,77 @@ impl LajuFileApp {
         }
         if self.checksum_rx.as_ref().is_some_and(|(cid, _)| *cid != id) {
             self.checksum_rx = None;
+        }
+    }
+
+    fn start_update_check(&mut self) {
+        self.update_state = UpdateUiState::Checking;
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        updater::spawn_check(tx);
+    }
+
+    fn poll_updater(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.update_rx else {
+            return;
+        };
+        let mut clear_rx = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                updater::UpdateEvent::Checked(Ok(check)) => {
+                    self.update_state = if check.has_update {
+                        UpdateUiState::Available(check.latest)
+                    } else {
+                        UpdateUiState::UpToDate(check)
+                    };
+                    clear_rx = true;
+                }
+                updater::UpdateEvent::Checked(Err(err)) => {
+                    self.update_state = UpdateUiState::Failed(err);
+                    clear_rx = true;
+                }
+                updater::UpdateEvent::DownloadProgress { downloaded, total } => {
+                    if let UpdateUiState::Downloading {
+                        downloaded: slot_dl,
+                        total: slot_total,
+                        ..
+                    } = &mut self.update_state
+                    {
+                        *slot_dl = downloaded;
+                        if total.is_some() {
+                            *slot_total = total;
+                        }
+                    }
+                    ctx.request_repaint_after(Duration::from_millis(60));
+                }
+                updater::UpdateEvent::ReadyToApply(Ok(path)) => {
+                    clear_rx = true;
+                    match updater::launch_installer_and_update(&path) {
+                        Ok(true) => {
+                            self.allow_exit = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Ok(false) => {
+                            self.show_update_dialog = false;
+                            self.toast = Some((
+                                "Update installer opened — follow the installer window."
+                                    .to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                        Err(err) => {
+                            self.update_state = UpdateUiState::Failed(err);
+                        }
+                    }
+                }
+                updater::UpdateEvent::ReadyToApply(Err(err)) => {
+                    self.update_state = UpdateUiState::Failed(err);
+                    clear_rx = true;
+                }
+            }
+        }
+        if clear_rx {
+            self.update_rx = None;
         }
     }
 
@@ -781,6 +865,39 @@ impl LajuFileApp {
                 }
                 Action::ShowProgress(id) => {
                     self.progress_id = Some(id);
+                    if self.hidden_progress_id == Some(id) {
+                        self.hidden_progress_id = None;
+                    }
+                }
+                Action::HideProgress(id) => {
+                    if self.progress_id == Some(id) {
+                        self.progress_id = None;
+                    }
+                    self.hidden_progress_id = Some(id);
+                }
+                Action::OpenUpdateChecker => {
+                    self.show_update_dialog = true;
+                    if matches!(
+                        self.update_state,
+                        UpdateUiState::Idle | UpdateUiState::UpToDate(_) | UpdateUiState::Failed(_)
+                    ) {
+                        self.start_update_check();
+                    }
+                }
+                Action::CheckUpdatesNow => {
+                    self.start_update_check();
+                }
+                Action::StartSelfUpdate { url, file_name } => {
+                    if let UpdateUiState::Available(info) = &self.update_state {
+                        self.update_state = UpdateUiState::Downloading {
+                            info: info.clone(),
+                            downloaded: 0,
+                            total: info.asset_size,
+                        };
+                        let (tx, rx) = mpsc::channel();
+                        self.update_rx = Some(rx);
+                        updater::spawn_download(url, file_name, tx);
+                    }
                 }
                 Action::OpenProperties(id) => {
                     self.open_properties(id);
@@ -1306,6 +1423,7 @@ impl eframe::App for LajuFileApp {
         self.poll_formats();
         self.poll_page_links();
         self.poll_checksum();
+        self.poll_updater(ctx);
         self.update_tray_tooltip();
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -1382,6 +1500,16 @@ impl eframe::App for LajuFileApp {
                 &ctx,
                 &mut self.show_language_picker,
                 &self.language,
+                dark,
+            )
+        {
+            self.handle_actions(&ctx, vec![action]);
+        }
+        if self.show_update_dialog
+            && let Some(action) = ui::dialogs::update_dialog(
+                &ctx,
+                &mut self.show_update_dialog,
+                &self.update_state,
                 dark,
             )
         {

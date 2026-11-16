@@ -517,6 +517,7 @@ fn engine_loop(
         }
 
         if state.dirty && last_publish.elapsed() >= Duration::from_millis(250) {
+            state.decay_stalled_speeds();
             state.publish();
             state.dirty = false;
             last_publish = Instant::now();
@@ -1354,14 +1355,35 @@ impl EngineState {
 
     fn record_speed(&mut self, id: i64, done: u64) {
         let now = Instant::now();
-        if let Some((previous, previous_time)) = self.progress.get(&id) {
-            let seconds = now.duration_since(*previous_time).as_secs_f64();
-            if seconds >= 0.1 && done >= *previous {
-                self.speeds
-                    .insert(id, ((done - *previous) as f64 / seconds) as u64);
+        match self.progress.get(&id).copied() {
+            None => {
+                self.progress.insert(id, (done, now));
+            }
+            Some((previous, _)) if done < previous => {
+                self.progress.insert(id, (done, now));
+            }
+            Some((previous, previous_time)) => {
+                let seconds = now.duration_since(previous_time).as_secs_f64();
+                if seconds >= 0.5 {
+                    let instant = ((done - previous) as f64 / seconds).round() as u64;
+                    let smoothed = compute_smoothed_speed(self.speeds.get(&id).copied(), instant);
+                    self.speeds.insert(id, smoothed);
+                    self.progress.insert(id, (done, now));
+                }
             }
         }
-        self.progress.insert(id, (done, now));
+    }
+
+    fn decay_stalled_speeds(&mut self) {
+        let now = Instant::now();
+        for (&id, (_, at)) in &self.progress {
+            if now.duration_since(*at) >= Duration::from_secs(2)
+                && let Some(speed) = self.speeds.get_mut(&id)
+                && *speed > 0
+            {
+                *speed = if *speed < 1024 { 0 } else { *speed / 2 };
+            }
+        }
     }
 
     fn flush_segment_progress(&mut self, id: i64) {
@@ -2181,6 +2203,11 @@ fn video_args(
         args.push("--embed-chapters".into());
     }
     args.extend([
+        // Speed up fragmented/DASH streams and work around single-stream server throttling.
+        "-N".into(),
+        "8".into(),
+        "--http-chunk-size".into(),
+        "10M".into(),
         // Machine-readable progress, one line per update:
         // "LF <downloaded> <total> <estimate>", either total may be NA.
         "--progress-template".into(),
@@ -2192,6 +2219,13 @@ fn video_args(
         url.into(),
     ]);
     args
+}
+
+fn compute_smoothed_speed(previous: Option<u64>, instant: u64) -> u64 {
+    match previous {
+        Some(prev) if prev > 0 => ((prev as f64 * 0.6) + (instant as f64 * 0.4)).round() as u64,
+        _ => instant,
+    }
 }
 
 fn parse_progress(line: &str) -> Option<(u64, Option<u64>)> {
@@ -2329,8 +2363,18 @@ mod tests {
         );
         assert!(!args.iter().any(|arg| arg == "--embed-subs"));
         assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
+        assert!(args.iter().any(|arg| arg == "--http-chunk-size"));
         assert!(args.iter().any(|arg| arg == "--progress-template"));
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");
+    }
+
+    #[test]
+    fn smoothed_speed_blends_samples_without_wild_spikes() {
+        assert_eq!(compute_smoothed_speed(None, 10_000_000), 10_000_000);
+        assert_eq!(
+            compute_smoothed_speed(Some(10_000_000), 20_000_000),
+            14_000_000
+        );
     }
 
     #[test]

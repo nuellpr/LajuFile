@@ -301,6 +301,10 @@ fn draw_menu_bar(ui: &mut egui::Ui, lang: &str, palette: &Palette, actions: &mut
                     }
                 });
                 ui.menu_button(t("Help"), |ui| {
+                    if ui.button(t("Check for updates...")).clicked() {
+                        actions.push(Action::OpenUpdateChecker);
+                        ui.close();
+                    }
                     if ui.button(t("Browser extension wizard...")).clicked() {
                         actions.push(Action::OpenBrowserWizard);
                         ui.close();
@@ -2210,6 +2214,37 @@ fn draw_status_bar(
             toggled = true;
             if app.show_speed_popover {
                 app.custom_speed_kbps = limit_kbps.to_string();
+            }
+        }
+
+        if app.progress_id.is_none()
+            && let Some(target) = app
+                .hidden_progress_id
+                .and_then(|id| downloads.iter().find(|d| d.id == id))
+                .or_else(|| {
+                    downloads
+                        .iter()
+                        .find(|d| d.status == DownloadStatus::Downloading)
+                })
+        {
+            ui.add_space(8.0);
+            let show_label = crate::i18n::translate(lang, "Show progress").into_owned();
+            let pct = progress_fraction(target.size, target.downloaded, target.status) * 100.0;
+            let btn = egui::Button::new(
+                RichText::new(format!("{show_label} ({pct:.0}%)"))
+                    .size(10.5)
+                    .color(palette.sky),
+            )
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.sky.gamma_multiply(0.4)))
+            .corner_radius(10);
+            if ui
+                .add_sized([124.0, 20.0], btn)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                app.progress_id = Some(target.id);
+                app.hidden_progress_id = None;
             }
         }
 

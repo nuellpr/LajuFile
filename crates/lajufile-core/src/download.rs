@@ -125,23 +125,48 @@ where
         expected = Some(length);
     }
 
+    const WRITE_BUF_CAP: usize = 256 * 1024;
     let mut downloaded = 0_u64;
+    let mut write_buf: Vec<u8> = Vec::with_capacity(WRITE_BUF_CAP);
+    let mut last_notify = std::time::Instant::now();
     let mut response = response;
     while let Some(chunk) = response.chunk().await? {
         let length = chunk.len() as u64;
-        downloaded = downloaded.saturating_add(length);
-        if let Some(known) = expected {
-            if downloaded > known {
-                return Err(DownloadError::SizeMismatch {
-                    expected: known,
-                    actual: downloaded,
-                });
-            }
+        let next_total = downloaded
+            .saturating_add(write_buf.len() as u64)
+            .saturating_add(length);
+        if let Some(known) = expected
+            && next_total > known
+        {
+            return Err(DownloadError::SizeMismatch {
+                expected: known,
+                actual: next_total,
+            });
         }
         if let Some(limiter) = &limiter {
             limiter.throttle(length).await;
         }
-        file.write_all(&chunk).await?;
+        write_buf.extend_from_slice(&chunk);
+        if write_buf.len() >= WRITE_BUF_CAP
+            || last_notify.elapsed() >= std::time::Duration::from_millis(80)
+        {
+            let flushed = write_buf.len() as u64;
+            file.write_all(&write_buf).await?;
+            write_buf.clear();
+            downloaded = downloaded.saturating_add(flushed);
+            if last_notify.elapsed() >= std::time::Duration::from_millis(50)
+                || expected.is_some_and(|known| downloaded == known)
+            {
+                on_progress(downloaded);
+                last_notify = std::time::Instant::now();
+            }
+        }
+    }
+    if !write_buf.is_empty() {
+        let flushed = write_buf.len() as u64;
+        file.write_all(&write_buf).await?;
+        write_buf.clear();
+        downloaded = downloaded.saturating_add(flushed);
         on_progress(downloaded);
     }
 

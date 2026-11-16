@@ -19,6 +19,8 @@ pub fn build_client(
 ) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
+        .tcp_nodelay(true)
+        .pool_max_idle_per_host(16)
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
         .build()

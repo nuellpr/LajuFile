@@ -4,10 +4,10 @@
 
 # LajuFile
 
-**Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows & Linux.**  
+**Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows, macOS & Linux.**  
 *Fast, lightweight, secure, multi-connection download manager built with Rust.*
 
-[![Version](https://img.shields.io/badge/version-v1.0.0-3B82F6?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.0.1-3B82F6?style=flat-square)](#)
 [![Rust](https://img.shields.io/badge/Rust-2024%20%2F%20MSRV%201.85-orange?style=flat-square)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--installation)
@@ -27,20 +27,24 @@
 | Kategori | Kemampuan |
 | --- | --- |
 | **Mesin Unduhan Cepat** | Hingga **32 koneksi paralel** per berkas (`Range` probing + prefix sanity check 64 KiB + resume otomatis), kontrol antrean serentak (`1–10`), pembatas kecepatan global cepat dari status bar, serta verifikasi **SHA-256** di jendela Properties. |
-| **Visual Progres Real-Time** | Peta Segmen (**Segment Map**) + grafik kecepatan **Sparkline**, estimasi ETA akurat, tema **Dark & Light**, dan skala antarmuka `80%–150%`. |
+| **Visual Progres Real-Time** | Peta Segmen (**Segment Map**) + grafik kecepatan **Sparkline**, jendela progres yang **bebas diseret/dipindahkan ke mana saja** serta tombol **Hide / Sembunyikan** ke background, estimasi ETA akurat, tema **Dark & Light**, dan skala antarmuka `80%–150%`. |
 | **Batch Smart Grabber (`Ctrl+B`)** | Antrekan banyak URL sekaligus, ekspansi pola angka otomatis (contoh `file-[01..20].zip`), dan **Fetch Links from Web Page** untuk mengekstrak tautan dari halaman web secara aman. |
 | **Integrasi Browser Lengkap** | Wizard Setup Ekstensi di menu `Browser` dengan deteksi otomatis **Chrome, Edge, Brave, Opera, Vivaldi, dan Firefox** di Windows, macOS, dan Linux, kode **Quick-Pair**, toggle per-situs, tombol `Alt+Click` bypass ke browser, penangkapan tautan PDF/media, dan tombol mengambang **"Download with LajuFile"** di YouTube. |
-| **Video & Audio (`yt-dlp` + `ffmpeg`)** | Unduh MP4 H.264 / Audio M4A terbaik otomatis untuk Windows, macOS, dan Linux (termasuk opsi menyematkan **Subtitles** & **Chapters** di Settings). Alat dipasang otomatis melalui HTTPS hanya saat dibutuhkan. |
+| **Video & Audio (`yt-dlp` + `ffmpeg`)** | Unduh MP4 H.264 / Audio M4A terbaik otomatis untuk Windows, macOS, dan Linux dengan fragmen paralel (`-N 8` + chunking) dan dukungan **Subtitles** & **Chapters** di Settings. |
 | **Multi-Bahasa & RTL (`View -> Language...`)** | Mendukung katalog **86 bahasa Windows**, deteksi bahasa OS otomatis (Windows, macOS, Linux), dukungan override terjemahan `.tsv`, tata letak **RTL** (Arab, Ibrani, Persia, Urdu), dan format angka lokal. |
-| **Aturan & Produktivitas** | Pencarian instan (`Ctrl+F`), sortir tabel, kebijakan duplikat (*Skip*, *Resume*, *Rename (#)*), daftar ekstensi tangkapan, daftar domain pengecualian (tersinkron ke ekstensi), drag-and-drop berkas `.url` / `.txt` / `.ef2`, serta **System Tray**. |
+| **Aturan & Pembaruan Otomatis** | Pencarian instan (`Ctrl+F`), sortir tabel, kebijakan duplikat (*Skip*, *Resume*, *Rename (#)*), **Periksa pembaruan** langsung dari menu **Bantuan (Help)** via GitHub Releases, drag-and-drop berkas `.url` / `.txt` / `.ef2`, serta **System Tray**. |
 
-### 📦 Instalasi (Executable Setup Installer: Windows, macOS & Linux)
+### 📦 Instalasi & Pembaruan (Windows, macOS & Linux)
 
 Unduh installer sesuai sistem operasi dari halaman [Releases](../../releases):
 
-- **Windows:** Jalankan **`LajuFile-v1.0.0-windows-x64-setup.exe`**, setujui lisensi, dan klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
-- **macOS:** Buka **`LajuFile-v1.0.0-macos-arm64-setup.dmg`** dan jalankan **`LajuFile Setup.app`** (atau jalankan executable **`LajuFile-v1.0.0-macos-arm64-setup`** via terminal `chmod +x`), yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
-- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.0-linux-x64-setup.run && ./LajuFile-v1.0.0-linux-x64-setup.run`**, memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop` di menu aplikasi, dan symlink `~/.local/bin/lajufile`.
+- **Windows:** Jalankan **`LajuFile-v1.0.1-windows-x64-setup.exe`**, setujui lisensi, dan klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
+- **macOS:** Buka **`LajuFile-v1.0.1-macos-arm64-setup.dmg`** dan jalankan **`LajuFile Setup.app`** (atau jalankan executable **`LajuFile-v1.0.1-macos-arm64-setup`** via terminal `chmod +x`), yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
+- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.1-linux-x64-setup.run && ./LajuFile-v1.0.1-linux-x64-setup.run`**, memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop` di menu aplikasi, dan symlink `~/.local/bin/lajufile`.
+
+**Memperbarui versi terpasang:**
+- **Langsung dari aplikasi (`v1.0.1+`):** Buka **Bantuan -> Periksa pembaruan...** (`Help -> Check for updates...`), lalu klik **Update now** — LajuFile mengunduh installer resmi dari GitHub Releases, memasangnya otomatis, dan memulai ulang aplikasi (antrean & pengaturan tetap aman di `%APPDATA%\LajuFile`).
+- **Secara manual (`v1.0.0` atau sebelumnya):** Unduh installer `.exe` terbaru di halaman [Releases](../../releases) lalu jalankan langsung (menimpa program secara bersih tanpa menghapus daftar unduhan atau pengaturan Anda).
 
 Untuk menghubungkan browser, buka LajuFile -> **Browser -> Browser Extension Setup...** lalu salin kode **Quick-Pair**.
 
@@ -63,7 +67,7 @@ cargo test --workspace
 # Jalankan aplikasi desktop langsung
 cargo run -p lajufile-app --bin lajufile
 
-# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.0-Windows-x64-Setup.exe
+# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.1-Windows-x64-Setup.exe
 powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 
@@ -98,7 +102,7 @@ chmod +x installer/build-unix-installer.sh
 - **Batch Smart Grabber:** Expand numeric ranges (`[01..20]`) or extract downloadable links directly from public web pages.
 - **Video & Audio Integration:** Auto-installs `yt-dlp` and `ffmpeg` over HTTPS on first video request across Windows, macOS, and Linux; supports H.264/AAC MP4 merging, M4A audio-only extraction, embedded subtitles, and chapters.
 - **86-Language Catalog & RTL:** OS display language auto-detection, built-in translations, runtime `.tsv` override support, locale number formatting, and automatic RTL layout mirroring.
-- **Cross-Platform Native Installers (`.exe`, `.dmg`, `.run`):** Self-contained setup wizard with SHA-256 payload integrity verification, desktop/menu launchers (Windows `.lnk` + Add/Remove Programs, macOS `.app` bundle + `.dmg`, Linux XDG `.desktop` + `~/.local/bin`), and built-in uninstaller (`v1.0.0`).
+- **Cross-Platform Native Installers (`.exe`, `.dmg`, `.run`):** Self-contained setup wizard with SHA-256 payload integrity verification, desktop/menu launchers (Windows `.lnk` + Add/Remove Programs, macOS `.app` bundle + `.dmg`, Linux XDG `.desktop` + `~/.local/bin`), in-app **Help -> Check for updates...** self-updater, and built-in uninstaller (`v1.0.1`).
 
 ---
 

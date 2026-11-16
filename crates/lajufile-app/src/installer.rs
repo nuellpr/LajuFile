@@ -282,7 +282,18 @@ pub fn write_install_files(
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, &entry.bytes)?;
+        fs::write(&dest, &entry.bytes).or_else(|err| {
+            // Brief retry after stopping the running binary so Windows releases the file lock.
+            if err.kind() == io::ErrorKind::PermissionDenied {
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if fs::write(&dest, &entry.bytes).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(err)
+        })?;
         if entry.rel_path == "lajufile" || entry.rel_path == "lajufile.exe" {
             make_executable(&dest);
         }
@@ -341,7 +352,18 @@ fn write_macos_bundle(
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, &entry.bytes)?;
+        fs::write(&dest, &entry.bytes).or_else(|err| {
+            // Brief retry after stopping the running binary so Windows releases the file lock.
+            if err.kind() == io::ErrorKind::PermissionDenied {
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if fs::write(&dest, &entry.bytes).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(err)
+        })?;
         if is_main_bin {
             make_executable(&dest);
         }
