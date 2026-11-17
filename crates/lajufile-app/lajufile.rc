@@ -1,10 +1,21 @@
 #pragma code_page(65001)
 
+#define LF_STR_HELPER(x) #x
+#define LF_STR(x) LF_STR_HELPER(x)
+#ifndef LAJUFILE_VER_MAJOR
+#define LAJUFILE_VER_MAJOR 1
+#define LAJUFILE_VER_MINOR 0
+#define LAJUFILE_VER_PATCH 5
+#endif
+#define LAJUFILE_VER_NUM LAJUFILE_VER_MAJOR,LAJUFILE_VER_MINOR,LAJUFILE_VER_PATCH,0
+#define LAJUFILE_VER_STR LF_STR(LAJUFILE_VER_MAJOR) "." LF_STR(LAJUFILE_VER_MINOR) "." LF_STR(LAJUFILE_VER_PATCH) ".0\0"
+
 1 ICON "../../assets/lajufile.ico"
+1 24 "lajufile.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,0,4,0
-PRODUCTVERSION 1,0,4,0
+FILEVERSION LAJUFILE_VER_NUM
+PRODUCTVERSION LAJUFILE_VER_NUM
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -17,12 +28,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Nuel Wallep\0"
             VALUE "FileDescription", "LajuFile\0"
-            VALUE "FileVersion", "1.0.4.0\0"
+            VALUE "FileVersion", LAJUFILE_VER_STR
             VALUE "InternalName", "LajuFile\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Nuel Wallep\0"
             VALUE "OriginalFilename", "LajuFile.exe\0"
             VALUE "ProductName", "LajuFile\0"
-            VALUE "ProductVersion", "1.0.4.0\0"
+            VALUE "ProductVersion", LAJUFILE_VER_STR
         END
     END
     BLOCK "VarFileInfo"

@@ -40,7 +40,7 @@ function loadBackgroundHarness() {
     fetch: async (url, init) => {
       fetchCalls.push({ url: String(url), init });
       if (String(url).endsWith("/health")) {
-        return { ok: true, status: 200, json: async () => ({ version: "1.0.4" }) };
+        return { ok: true, status: 200, json: async () => ({ version: "1.0.5" }) };
       }
       if (String(url).endsWith("/rules")) {
         return {
