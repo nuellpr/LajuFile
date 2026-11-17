@@ -13,7 +13,7 @@ rust-version = "1.85"
 arboard = "3"
 content_disposition = "0.4"
 directories = "6"
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links", "x11", "wayland"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "clipboard", "links", "x11", "wayland"] }
 egui = "0.37"
 egui_extras = "0.37"
 hex = "0.4"
@@ -28,4 +28,9 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread
 tower-http = { version = "0.6", features = ["cors"] }
 tray-icon = "0.26"
 url = "2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
