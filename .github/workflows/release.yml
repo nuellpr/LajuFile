@@ -29,7 +29,7 @@ jobs:
           $signTool = $null
           try {
             if ($env:WINDOWS_PFX_BASE64) {
-              $pfx = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".pfx")
+              $pfx = Join-Path ([System.IO.Path]::GetTempPath()) "lajufile-sign-$([guid]::NewGuid().ToString('N')).pfx"
               [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
               $kitsRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
               $signTool = Get-ChildItem -Path $kitsRoot -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
@@ -42,6 +42,8 @@ jobs:
               if ($env:WINDOWS_PFX_PASSWORD) { $signArgs += @("/p", $env:WINDOWS_PFX_PASSWORD) }
               & $signTool @signArgs "target/release/lajufile.exe"
               if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for lajufile.exe" }
+              & $signTool verify /pa "target/release/lajufile.exe"
+              if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for lajufile.exe" }
             }
 
             $proc = Start-Process -FilePath "./target/release/lajufile-setup.exe" `

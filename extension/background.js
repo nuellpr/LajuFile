@@ -619,7 +619,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         video_format: message.selector,
         filename: typeof message.filename === "string" ? message.filename : undefined,
         size:
-          typeof message.size === "number" && message.size > 0
+          typeof message.size === "number" &&
+          Number.isFinite(message.size) &&
+          message.size > 0 &&
+          Number.isSafeInteger(Math.round(message.size))
             ? Math.round(message.size)
             : undefined,
         cookie: cookie || undefined,

@@ -801,6 +801,28 @@ async fn bridge_rejects_dns_rebinding_host_headers() {
         "expected 403 for missing Host header, got: {buf:?}"
     );
 
+    let plus_port = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .header("host", "127.0.0.1:+80")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plus_port.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let mut dup_raw = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    dup_raw
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    dup_raw
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut dup_buf = String::new();
+    dup_raw.read_to_string(&mut dup_buf).unwrap();
+    assert!(
+        dup_buf.starts_with("HTTP/1.1 403"),
+        "expected 403 for duplicate Host headers, got: {dup_buf:?}"
+    );
+
     handle.shutdown();
 }
 

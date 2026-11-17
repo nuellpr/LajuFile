@@ -207,3 +207,19 @@ test("intercept-link and bypass-url reject unsafe URL schemes and require valid 
   );
   assert.equal(validBypass.reply?.ok, true);
 });
+
+test("video-download omits non-finite size instead of serializing Infinity/null", async () => {
+  const { onMessage, fetchCalls } = loadBackgroundHarness();
+  const ytUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const res = await dispatch(
+    onMessage,
+    { type: "video-download", url: ytUrl, selector: "137", size: Infinity },
+    { id: EXT_ID, tab: { id: 6, url: ytUrl }, url: ytUrl, frameId: 0 },
+  );
+  assert.equal(res.ret, true);
+  assert.equal(res.reply.status, 201);
+  const videoCall = fetchCalls.find((c) => c.url.endsWith("/video"));
+  assert.ok(videoCall, "expected POST /video call");
+  const body = JSON.parse(videoCall.init.body);
+  assert.equal("size" in body, false);
+});

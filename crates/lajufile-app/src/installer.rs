@@ -134,7 +134,7 @@ fn effective_payload_end(exe_bytes: &[u8]) -> usize {
     pe_security_directory_end(exe_bytes).unwrap_or(exe_bytes.len())
 }
 
-fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
+fn pe_security_dir_offsets(bytes: &[u8]) -> Option<(usize, usize)> {
     if bytes.len() < 0x40 || !bytes.starts_with(b"MZ") {
         return None;
     }
@@ -144,7 +144,8 @@ fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < opt || &bytes[e_lfanew..coff_start] != b"PE\0\0" {
         return None;
     }
-    let size_of_opt = u16::from_le_bytes(bytes[coff_start + 16..coff_start + 18].try_into().ok()?) as usize;
+    let size_of_opt =
+        u16::from_le_bytes(bytes[coff_start + 16..coff_start + 18].try_into().ok()?) as usize;
     let opt_end = opt.checked_add(size_of_opt)?;
     if size_of_opt < 112 || bytes.len() < opt_end {
         return None;
@@ -162,9 +163,19 @@ fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
     if rva_count <= 4 {
         return None;
     }
-    let cert_offset = u32::from_le_bytes(bytes[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
-    let cert_size = u32::from_le_bytes(bytes[sec_dir_off + 4..sec_dir_off + 8].try_into().ok()?) as usize;
-    if cert_offset < FOOTER_LEN || cert_size == 0 || cert_offset.checked_add(cert_size)? > bytes.len() {
+    Some((opt + 64, sec_dir_off))
+}
+
+fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
+    let (_, sec_dir_off) = pe_security_dir_offsets(bytes)?;
+    let cert_offset =
+        u32::from_le_bytes(bytes[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
+    let cert_size =
+        u32::from_le_bytes(bytes[sec_dir_off + 4..sec_dir_off + 8].try_into().ok()?) as usize;
+    if cert_offset < FOOTER_LEN
+        || cert_size == 0
+        || cert_offset.checked_add(cert_size)? > bytes.len()
+    {
         return None;
     }
     let before_cert = &bytes[..cert_offset];
@@ -173,7 +184,9 @@ fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
     }
     for pad in 1..=7usize {
         if before_cert.len() >= FOOTER_LEN + pad
-            && before_cert[before_cert.len() - pad..].iter().all(|&b| b == 0)
+            && before_cert[before_cert.len() - pad..]
+                .iter()
+                .all(|&b| b == 0)
             && &before_cert[before_cert.len() - pad - MAGIC.len()..before_cert.len() - pad] == MAGIC
         {
             return Some(before_cert.len() - pad);
@@ -324,6 +337,20 @@ fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) -> Re
 }
 
 /// Extracts payload files and writes clean uninstaller stub when provided.
+// Clear inherited DataDirectory[4] + CheckSum so uninstall.exe never points past EOF if Setup.exe was signed.
+fn strip_pe_security_directory(stub: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let Some((checksum_off, sec_dir_off)) = pe_security_dir_offsets(stub) else {
+        return std::borrow::Cow::Borrowed(stub);
+    };
+    if stub[sec_dir_off..sec_dir_off + 8] == [0u8; 8] {
+        return std::borrow::Cow::Borrowed(stub);
+    }
+    let mut stripped = stub.to_vec();
+    stripped[checksum_off..checksum_off + 4].fill(0);
+    stripped[sec_dir_off..sec_dir_off + 8].fill(0);
+    std::borrow::Cow::Owned(stripped)
+}
+
 pub fn write_install_files(
     install_dir: &Path,
     entries: &[PayloadEntry],
@@ -355,7 +382,8 @@ pub fn write_install_files(
     }
     if let Some(stub) = uninstaller_stub {
         let uninst = install_dir.join(UNINSTALL_BIN);
-        fs::write(&uninst, stub)?;
+        let clean_stub = strip_pe_security_directory(stub);
+        fs::write(&uninst, clean_stub.as_ref())?;
         make_executable(&uninst);
     }
     Ok(())
@@ -874,5 +902,25 @@ mod tests {
         bad_pad[sec_off..sec_off + 4].copy_from_slice(&pad_cert_off.to_le_bytes());
         bad_pad[sec_off + 4..sec_off + 8].copy_from_slice(&16u32.to_le_bytes());
         assert!(parse_payload(&bad_pad).is_err());
+    }
+
+    #[test]
+    fn write_install_files_strips_inherited_security_directory_from_uninstaller() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut stub, security_dir_off) = build_synthetic_pe32_plus_stub();
+        let checksum_off = security_dir_off - 80;
+        stub[checksum_off..checksum_off + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        stub[security_dir_off..security_dir_off + 4].copy_from_slice(&9999u32.to_le_bytes());
+        stub[security_dir_off + 4..security_dir_off + 8].copy_from_slice(&64u32.to_le_bytes());
+
+        let entries = vec![PayloadEntry {
+            rel_path: APP_BIN.to_string(),
+            bytes: b"app".to_vec(),
+        }];
+        write_install_files(dir.path(), &entries, Some(&stub)).unwrap();
+
+        let written = fs::read(dir.path().join(UNINSTALL_BIN)).unwrap();
+        assert_eq!(&written[checksum_off..checksum_off + 4], &[0u8; 4]);
+        assert_eq!(&written[security_dir_off..security_dir_off + 8], &[0u8; 8]);
     }
 }

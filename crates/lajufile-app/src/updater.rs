@@ -125,13 +125,14 @@ pub fn parse_sha256_manifest_entry(manifest: &str, asset_name: &str) -> Option<S
             continue;
         }
         let mut parts = trimmed.splitn(2, char::is_whitespace);
-        let digest = parts.next()?.trim();
-        let file = parts.next()?.trim_start();
+        let (Some(digest), Some(file)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let digest = digest.trim();
+        let file = file.trim_start();
         let file = file.strip_prefix('*').unwrap_or(file);
         let file = file.strip_prefix("./").unwrap_or(file);
-        if digest.len() == 64
-            && digest.bytes().all(|b| b.is_ascii_hexdigit())
-            && file == asset_name
+        if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) && file == asset_name
         {
             return Some(digest.to_ascii_lowercase());
         }
@@ -465,6 +466,7 @@ mod tests {
     fn sha256_manifest_parser_handles_standard_binary_and_dot_slash_formats() {
         let manifest = "\
 # Release checksums
+malformed-single-token
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  LajuFile-v1.0.5-windows-x64-setup.exe
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *./LajuFile-v1.0.5-linux-x64-setup.run
 invalidhash  broken.exe

@@ -42,7 +42,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
 
     if (-not $PfxPath -and $env:WINDOWS_PFX_BASE64) {
-        $tempPfx = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".pfx")
+        $tempPfx = Join-Path ([System.IO.Path]::GetTempPath()) "lajufile-sign-$([guid]::NewGuid().ToString('N')).pfx"
         [System.IO.File]::WriteAllBytes($tempPfx, [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64))
         $PfxPath = $tempPfx
     }

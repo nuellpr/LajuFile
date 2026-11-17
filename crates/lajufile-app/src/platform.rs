@@ -27,6 +27,9 @@ impl SingleInstanceGuard {
             }
             if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
                 unsafe { CloseHandle(handle) };
+                if let Some(settings) = load_existing_settings() {
+                    let _ = signal_existing_instance(&settings);
+                }
                 return None;
             }
             Some(Self { handle })
@@ -60,12 +63,6 @@ fn load_existing_settings() -> Option<Settings> {
     let path = paths::settings_path(&dir);
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
-}
-
-pub fn wake_existing_from_disk() {
-    if let Some(settings) = load_existing_settings() {
-        let _ = signal_existing_instance(&settings);
-    }
 }
 
 /// Grants foreground activation (on Windows) and posts an authenticated `/wake`
@@ -108,24 +105,62 @@ fn probe_wake(settings: &Settings) -> bool {
         .is_some_and(|code| code == "200")
 }
 
-/// Restores and activates an existing window matching `title` on Windows.
+#[cfg(windows)]
+struct FindOwnWindowCtx<'a> {
+    pid: u32,
+    title: &'a [u16],
+    found: windows_sys::Win32::Foundation::HWND,
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_own_window(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowTextW, GetWindowThreadProcessId};
+    let ctx = unsafe { &mut *(lparam as *mut FindOwnWindowCtx<'_>) };
+    let mut win_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut win_pid) };
+    if win_pid != ctx.pid {
+        return 1;
+    }
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len > 0 && &buf[..len as usize] == ctx.title {
+        ctx.found = hwnd;
+        return 0;
+    }
+    1
+}
+
+/// Restores and activates this process's window matching `title` on Windows.
 pub fn focus_window_by_title(title: &str) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+            EnumWindows, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow,
             ShowWindow,
         };
-        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-        let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-        if !hwnd.is_null() {
+        let title_utf16: Vec<u16> = title.encode_utf16().collect();
+        let mut ctx = FindOwnWindowCtx {
+            pid: std::process::id(),
+            title: &title_utf16,
+            found: std::ptr::null_mut(),
+        };
+        unsafe {
+            EnumWindows(
+                Some(enum_own_window),
+                (&mut ctx as *mut FindOwnWindowCtx<'_>) as isize,
+            );
+        }
+        if !ctx.found.is_null() {
             unsafe {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                } else if IsWindowVisible(hwnd) == 0 {
-                    ShowWindow(hwnd, SW_SHOW);
+                if IsIconic(ctx.found) != 0 {
+                    ShowWindow(ctx.found, SW_RESTORE);
+                } else if IsWindowVisible(ctx.found) == 0 {
+                    ShowWindow(ctx.found, SW_SHOW);
                 }
-                SetForegroundWindow(hwnd);
+                SetForegroundWindow(ctx.found);
             }
         }
     }

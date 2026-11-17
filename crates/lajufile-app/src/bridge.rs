@@ -170,6 +170,10 @@ fn is_allowed_origin(origin: &HeaderValue) -> bool {
         || s.starts_with("safari-web-extension://")
 }
 
+fn is_valid_port(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+}
+
 fn is_loopback_host_header(value: &HeaderValue) -> bool {
     let Ok(raw) = value.to_str() else {
         return false;
@@ -182,25 +186,19 @@ fn is_loopback_host_header(value: &HeaderValue) -> bool {
         if addr != "::1" {
             return false;
         }
-        return rest.is_empty()
-            || rest
-                .strip_prefix(':')
-                .is_some_and(|port| port.parse::<u16>().is_ok());
+        return rest.is_empty() || rest.strip_prefix(':').is_some_and(is_valid_port);
     }
     let (name, port_opt) = match host.rsplit_once(':') {
         Some((name, port)) => (name, Some(port)),
         None => (host, None),
     };
-    let port_ok = port_opt.is_none_or(|port| port.parse::<u16>().is_ok());
+    let port_ok = port_opt.is_none_or(is_valid_port);
     port_ok && (name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1")
 }
 
 async fn require_loopback_host(req: Request, next: Next) -> Response {
-    if !req
-        .headers()
-        .get(header::HOST)
-        .is_some_and(is_loopback_host_header)
-    {
+    let mut hosts = req.headers().get_all(header::HOST).iter();
+    if !matches!((hosts.next(), hosts.next()), (Some(h), None) if is_loopback_host_header(h)) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "forbidden host" })),

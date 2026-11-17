@@ -127,7 +127,6 @@ impl LajuFileApp {
                 wake_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 wake_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 wake_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                crate::platform::focus_window_by_title("LajuFile");
                 wake_ctx.request_repaint();
             }));
         }
