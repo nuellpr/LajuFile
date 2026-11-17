@@ -128,13 +128,68 @@ pub fn pack_entries(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+/// Returns the raw payload slice end before any trailing PE Authenticode certificate table
+/// (including up to 7 trailing `0x00` 8-byte alignment bytes placed before `WIN_CERTIFICATE`).
+fn effective_payload_end(exe_bytes: &[u8]) -> usize {
+    pe_security_directory_end(exe_bytes).unwrap_or(exe_bytes.len())
+}
+
+fn pe_security_directory_end(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 0x40 || !bytes.starts_with(b"MZ") {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(bytes[0x3c..0x40].try_into().ok()?) as usize;
+    let coff_start = e_lfanew.checked_add(4)?;
+    let opt = coff_start.checked_add(20)?;
+    if bytes.len() < opt || &bytes[e_lfanew..coff_start] != b"PE\0\0" {
+        return None;
+    }
+    let size_of_opt = u16::from_le_bytes(bytes[coff_start + 16..coff_start + 18].try_into().ok()?) as usize;
+    let opt_end = opt.checked_add(size_of_opt)?;
+    if size_of_opt < 112 || bytes.len() < opt_end {
+        return None;
+    }
+    let magic = u16::from_le_bytes(bytes[opt..opt + 2].try_into().ok()?);
+    let (rva_count_off, sec_dir_off) = match magic {
+        0x010B => (opt + 92, opt + 128),  // PE32
+        0x020B => (opt + 108, opt + 144), // PE32+
+        _ => return None,
+    };
+    if sec_dir_off + 8 > opt_end {
+        return None;
+    }
+    let rva_count = u32::from_le_bytes(bytes[rva_count_off..rva_count_off + 4].try_into().ok()?);
+    if rva_count <= 4 {
+        return None;
+    }
+    let cert_offset = u32::from_le_bytes(bytes[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
+    let cert_size = u32::from_le_bytes(bytes[sec_dir_off + 4..sec_dir_off + 8].try_into().ok()?) as usize;
+    if cert_offset < FOOTER_LEN || cert_size == 0 || cert_offset.checked_add(cert_size)? > bytes.len() {
+        return None;
+    }
+    let before_cert = &bytes[..cert_offset];
+    if before_cert.ends_with(MAGIC) {
+        return Some(cert_offset);
+    }
+    for pad in 1..=7usize {
+        if before_cert.len() >= FOOTER_LEN + pad
+            && before_cert[before_cert.len() - pad..].iter().all(|&b| b == 0)
+            && &before_cert[before_cert.len() - pad - MAGIC.len()..before_cert.len() - pad] == MAGIC
+        {
+            return Some(before_cert.len() - pad);
+        }
+    }
+    Some(cert_offset)
+}
+
 /// Parses an embedded payload trailer and returns `(stub_end_offset, entries)`.
 pub fn parse_payload(exe_bytes: &[u8]) -> Result<(usize, Vec<PayloadEntry>), String> {
-    if exe_bytes.len() < FOOTER_LEN {
+    let payload_end = effective_payload_end(exe_bytes);
+    if payload_end < FOOTER_LEN {
         return Err("installer payload is missing (run setup builder first)".to_string());
     }
-    let footer_start = exe_bytes.len() - FOOTER_LEN;
-    let footer = &exe_bytes[footer_start..];
+    let footer_start = payload_end - FOOTER_LEN;
+    let footer = &exe_bytes[footer_start..payload_end];
     if &footer[72..84] != MAGIC {
         return Err("installer payload magic not found".to_string());
     }
@@ -750,5 +805,74 @@ mod tests {
             fs::read(bundle.join("Contents/Resources/extension/manifest.json")).unwrap(),
             b"{}"
         );
+    }
+
+    fn build_synthetic_pe32_plus_stub() -> (Vec<u8>, usize) {
+        // Minimal valid DOS + PE32+ header (e_lfanew = 0x40, SizeOfOptionalHeader = 240).
+        let e_lfanew = 0x40usize;
+        let opt = e_lfanew + 4 + 20;
+        let total_hdr = opt + 240;
+        let mut stub = vec![0u8; total_hdr];
+        stub[0..2].copy_from_slice(b"MZ");
+        stub[0x3c..0x40].copy_from_slice(&(e_lfanew as u32).to_le_bytes());
+        stub[e_lfanew..e_lfanew + 4].copy_from_slice(b"PE\0\0");
+        stub[e_lfanew + 4 + 16..e_lfanew + 4 + 18].copy_from_slice(&240u16.to_le_bytes());
+        stub[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes());
+        stub[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+        let security_dir_off = opt + 144;
+        (stub, security_dir_off)
+    }
+
+    #[test]
+    fn parse_payload_reads_authenticode_signed_pe_with_alignment_padding() {
+        let (mut image, security_dir_off) = build_synthetic_pe32_plus_stub();
+        let stub_len = image.len();
+        let payload = pack_entries(&[
+            ("lajufile.exe", b"signed-app-binary"),
+            ("extension/manifest.json", br#"{"manifest_version":3}"#),
+        ])
+        .unwrap();
+        image.extend_from_slice(&payload);
+        // Authenticode pads the packed payload with up to 7 zero bytes to align WIN_CERTIFICATE.
+        image.extend_from_slice(&[0u8; 5]);
+
+        let cert_offset = image.len() as u32;
+        let fake_cert = [0x30u8; 24];
+        let cert_size = fake_cert.len() as u32;
+        image.extend_from_slice(&fake_cert);
+        image[security_dir_off..security_dir_off + 4].copy_from_slice(&cert_offset.to_le_bytes());
+        image[security_dir_off + 4..security_dir_off + 8].copy_from_slice(&cert_size.to_le_bytes());
+
+        let (parsed_stub_end, entries) = parse_payload(&image).unwrap();
+        assert_eq!(parsed_stub_end, stub_len);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].rel_path, "lajufile.exe");
+        assert_eq!(entries[1].rel_path, "extension/manifest.json");
+
+        let mut corrupted = image;
+        corrupted[stub_len + 10] ^= 0xff;
+        assert!(parse_payload(&corrupted).is_err());
+    }
+
+    #[test]
+    fn parse_payload_rejects_malformed_or_oob_security_directory_safely() {
+        let (mut image, security_dir_off) = build_synthetic_pe32_plus_stub();
+        let payload = pack_entries(&[("lajufile.exe", b"binary")]).unwrap();
+        image.extend_from_slice(&payload);
+        let cert_offset = (image.len() + 16) as u32;
+        image[security_dir_off..security_dir_off + 4].copy_from_slice(&cert_offset.to_le_bytes());
+        image[security_dir_off + 4..security_dir_off + 8].copy_from_slice(&64u32.to_le_bytes());
+        image.extend_from_slice(&[0xaa; 32]);
+        assert!(parse_payload(&image).is_err());
+
+        // Non-zero garbage byte between trailer and certificate directory must not be skipped.
+        let (mut bad_pad, sec_off) = build_synthetic_pe32_plus_stub();
+        bad_pad.extend_from_slice(&payload);
+        bad_pad.push(0x01);
+        let pad_cert_off = bad_pad.len() as u32;
+        bad_pad.extend_from_slice(&[0x30u8; 16]);
+        bad_pad[sec_off..sec_off + 4].copy_from_slice(&pad_cert_off.to_le_bytes());
+        bad_pad[sec_off + 4..sec_off + 8].copy_from_slice(&16u32.to_le_bytes());
+        assert!(parse_payload(&bad_pad).is_err());
     }
 }
