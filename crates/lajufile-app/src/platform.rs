@@ -246,7 +246,7 @@ pub fn ensure_writable_cwd() {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn protected_windows_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for key in ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)"] {
