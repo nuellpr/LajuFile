@@ -755,3 +755,83 @@ async fn rules_requires_token_and_returns_settings_filters() {
     let persisted = Settings::load_or_create(dir.path()).unwrap();
     assert!(persisted.browser_paired);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_rejects_dns_rebinding_host_headers() {
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let client = reqwest::Client::new();
+
+    let rebound_health = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .header("host", format!("evil.example:{port}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound_health.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let (name, value) = token_header();
+    let rebound_post = client
+        .post(format!("http://127.0.0.1:{port}/downloads"))
+        .header(name, value)
+        .header("host", format!("evil.example:{port}"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound_post.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let valid_localhost = client
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .header("host", format!("localhost:{port}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid_localhost.status(), reqwest::StatusCode::OK);
+
+    let mut raw = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    raw.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut buf = String::new();
+    raw.read_to_string(&mut buf).unwrap();
+    assert!(
+        buf.starts_with("HTTP/1.1 403"),
+        "expected 403 for missing Host header, got: {buf:?}"
+    );
+
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_cors_allows_extensions_only_and_blocks_localhost_web_origins() {
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let url = format!("http://127.0.0.1:{port}/downloads");
+    let client = reqwest::Client::new();
+
+    for blocked_origin in [
+        "http://localhost:3000",
+        "http://127.0.0.1:8080",
+        "http://[::1]:5173",
+    ] {
+        let resp = client
+            .request(reqwest::Method::OPTIONS, &url)
+            .header("Origin", blocked_origin)
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                "content-type,x-lajufile-token",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            !resp.headers().contains_key("access-control-allow-origin"),
+            "unexpected CORS allow for web origin {blocked_origin}"
+        );
+    }
+
+    handle.shutdown();
+}

@@ -7,8 +7,10 @@ use std::time::Duration;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -158,14 +160,6 @@ pub async fn start(
     }
 }
 
-fn is_local_origin(origin: &str, prefix: &str) -> bool {
-    match origin.strip_prefix(prefix) {
-        Some("") => true,
-        Some(rest) => rest.starts_with(':'),
-        None => false,
-    }
-}
-
 fn is_allowed_origin(origin: &HeaderValue) -> bool {
     let Ok(s) = origin.to_str() else {
         return false;
@@ -174,9 +168,46 @@ fn is_allowed_origin(origin: &HeaderValue) -> bool {
         || s.starts_with("moz-extension://")
         || s.starts_with("extension://")
         || s.starts_with("safari-web-extension://")
-        || is_local_origin(s, "http://127.0.0.1")
-        || is_local_origin(s, "http://localhost")
-        || is_local_origin(s, "http://[::1]")
+}
+
+fn is_loopback_host_header(value: &HeaderValue) -> bool {
+    let Ok(raw) = value.to_str() else {
+        return false;
+    };
+    let host = raw.trim();
+    if let Some(after_open) = host.strip_prefix('[') {
+        let Some((addr, rest)) = after_open.split_once(']') else {
+            return false;
+        };
+        if addr != "::1" {
+            return false;
+        }
+        return rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|port| port.parse::<u16>().is_ok());
+    }
+    let (name, port_opt) = match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    };
+    let port_ok = port_opt.is_none_or(|port| port.parse::<u16>().is_ok());
+    port_ok && (name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1")
+}
+
+async fn require_loopback_host(req: Request, next: Next) -> Response {
+    if !req
+        .headers()
+        .get(header::HOST)
+        .is_some_and(is_loopback_host_header)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "forbidden host" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 fn router(state: BridgeAppState) -> Router {
@@ -195,6 +226,7 @@ fn router(state: BridgeAppState) -> Router {
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([header::CONTENT_TYPE, HeaderName::from_static(BRIDGE_HEADER)]),
         )
+        .layer(middleware::from_fn(require_loopback_host))
         .with_state(state)
 }
 

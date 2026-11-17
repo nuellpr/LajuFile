@@ -8,6 +8,7 @@ const DEFAULTS = {
 const HEALTH_TTL_MS = 5000;
 const RULES_TTL_MS = 5000;
 const BYPASS_TTL_MS = 10000;
+const MAX_CACHE_ENTRIES = 512;
 const handledIds = new Set();
 const bypassUrls = new Map();
 let healthCache = { port: null, ok: false, at: 0 };
@@ -16,9 +17,16 @@ let rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
 function markBypass(url) {
   if (!url) return;
   const now = Date.now();
-  bypassUrls.set(String(url), now + BYPASS_TTL_MS);
-  for (const [key, exp] of bypassUrls.entries()) {
-    if (exp < now) bypassUrls.delete(key);
+  const key = String(url);
+  bypassUrls.delete(key);
+  bypassUrls.set(key, now + BYPASS_TTL_MS);
+  for (const [entry, exp] of bypassUrls.entries()) {
+    if (exp < now) bypassUrls.delete(entry);
+  }
+  while (bypassUrls.size > MAX_CACHE_ENTRIES) {
+    const oldest = bypassUrls.keys().next().value;
+    if (oldest === undefined) break;
+    bypassUrls.delete(oldest);
   }
 }
 
@@ -353,7 +361,13 @@ function isLiveDownload(item) {
 }
 
 function markHandled(id) {
+  handledIds.delete(id);
   handledIds.add(id);
+  while (handledIds.size > MAX_CACHE_ENTRIES) {
+    const oldest = handledIds.values().next().value;
+    if (oldest === undefined) break;
+    handledIds.delete(oldest);
+  }
   setTimeout(() => handledIds.delete(id), 75000);
 }
 
@@ -423,14 +437,48 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+function isHttpUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isYouTubeHost(host) {
+  return host === "youtube.com" || host === "www.youtube.com" || host === "m.youtube.com";
+}
+
+function isYouTubePageUrl(rawUrl) {
+  if (!isHttpUrl(rawUrl)) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return isYouTubeHost(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isOwnExtensionPage(sender) {
+  const ownPrefix = chrome.runtime.getURL("");
+  return (
+    typeof sender.url === "string" &&
+    sender.url.startsWith(ownPrefix) &&
+    (sender.frameId === undefined || sender.frameId === 0)
+  );
+}
+
 function isYouTubeVideoUrl(rawUrl) {
+  if (!isHttpUrl(rawUrl)) return false;
   try {
     const parsed = new URL(rawUrl);
     const host = parsed.hostname.toLowerCase();
     if (host === "youtu.be") {
       return parsed.pathname.length > 1;
     }
-    if (host === "youtube.com" || host === "www.youtube.com" || host === "m.youtube.com") {
+    if (isYouTubeHost(host)) {
       return parsed.pathname === "/watch" && parsed.searchParams.has("v");
     }
     return false;
@@ -481,26 +529,45 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message && message.type === "config-updated") {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    !message ||
+    typeof message.type !== "string" ||
+    !sender ||
+    sender.id !== chrome.runtime.id
+  ) {
+    return false;
+  }
+
+  const ownPage = isOwnExtensionPage(sender);
+  const fromPage = Boolean(sender.tab) && !ownPage;
+  const senderUrl = String(sender.url || (sender.tab && sender.tab.url) || "");
+  const topFrame = sender.frameId === undefined || sender.frameId === 0;
+
+  if (message.type === "config-updated") {
+    if (!ownPage) return false;
     healthCache = { port: null, ok: false, at: 0 };
     rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
     getConfig()
       .then((config) => fetchBridgeExcludedDomains(config))
       .catch(() => { });
-    return;
+    sendResponse({ ok: true });
+    return false;
   }
-  if (message && message.type === "bypass-url") {
+  if (message.type === "bypass-url") {
+    if (!(fromPage || ownPage) || !isHttpUrl(message.url)) return false;
     markBypass(message.url);
     sendResponse({ ok: true });
-    return;
+    return false;
   }
-  if (message && message.type === "intercept-link") {
+  if (message.type === "intercept-link") {
+    if (!fromPage || !isHttpUrl(senderUrl) || !isHttpUrl(message.url)) return false;
+    const safeReferrer = isHttpUrl(message.referrer) ? message.referrer : undefined;
     capture(
       {
         url: message.url,
-        referrer: message.referrer,
-        filename: message.filename,
+        referrer: safeReferrer,
+        filename: typeof message.filename === "string" ? message.filename : undefined,
       },
       true,
     )
@@ -518,7 +585,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     return true;
   }
-  if (message && message.type === "video-formats") {
+  if (message.type === "video-formats") {
+    if (
+      !(ownPage || (fromPage && topFrame && isYouTubePageUrl(senderUrl))) ||
+      !isYouTubeVideoUrl(message.url)
+    ) {
+      return false;
+    }
     (async () => {
       const cookie = await netscapeCookies(message.url);
       return post("video/formats", {
@@ -530,13 +603,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;
   }
-  if (message && message.type === "video-download") {
+  if (message.type === "video-download") {
+    if (
+      !(ownPage || (fromPage && topFrame && isYouTubePageUrl(senderUrl))) ||
+      !isYouTubeVideoUrl(message.url) ||
+      typeof message.selector !== "string" ||
+      !message.selector.trim()
+    ) {
+      return false;
+    }
     (async () => {
       const cookie = await netscapeCookies(message.url);
       return post("video", {
         url: message.url,
         video_format: message.selector,
-        filename: message.filename,
+        filename: typeof message.filename === "string" ? message.filename : undefined,
         size:
           typeof message.size === "number" && message.size > 0
             ? Math.round(message.size)
@@ -548,5 +629,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;
   }
-  return undefined;
+  return false;
 });

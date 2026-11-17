@@ -33,3 +33,4 @@ jobs:
           node --check extension/interceptor.js
           node --check extension/options.js
           node --check extension/popup.js
+          node --test crates/lajufile-app/tests/extension_sender.mjs
