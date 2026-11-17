@@ -52,6 +52,7 @@ pub struct LajuFileApp {
     pub(crate) show_browser_wizard: bool,
     pub(crate) show_language_picker: bool,
     pub(crate) show_update_dialog: bool,
+    pub(crate) startup_update_checked: bool,
     pub(crate) update_state: UpdateUiState,
     pub(crate) update_rx: Option<mpsc::Receiver<updater::UpdateEvent>>,
     pub(crate) language: String,
@@ -157,6 +158,7 @@ impl LajuFileApp {
             show_browser_wizard: false,
             show_language_picker: false,
             show_update_dialog: false,
+            startup_update_checked: false,
             update_state: UpdateUiState::Idle,
             update_rx: None,
             language,
@@ -315,6 +317,18 @@ impl LajuFileApp {
         }
 
         self.settings_draft.browser_paired |= snapshot.settings.browser_paired;
+        if !self.startup_update_checked {
+            self.startup_update_checked = true;
+            if matches!(self.update_state, UpdateUiState::Idle)
+                && should_auto_check_updates(
+                    snapshot.settings.auto_check_updates,
+                    snapshot.settings.last_update_check_ms,
+                    lajufile_core::store::now_millis(),
+                )
+            {
+                self.start_update_check();
+            }
+        }
         let pending = snapshot.pending_capture.clone();
         self.snapshot = Some(snapshot);
         match pending {
@@ -553,6 +567,9 @@ impl LajuFileApp {
                     } else {
                         UpdateUiState::UpToDate(check)
                     };
+                    self.send(Command::RecordUpdateCheck(
+                        lajufile_core::store::now_millis(),
+                    ));
                     clear_rx = true;
                 }
                 updater::UpdateEvent::Checked(Err(err)) => {
@@ -1852,6 +1869,13 @@ fn should_prompt_for_folder(settings: &Settings, manual: bool) -> bool {
     manual && settings.ask_where_to_save
 }
 
+const AUTO_UPDATE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn should_auto_check_updates(enabled: bool, last_check_ms: i64, now_ms: i64) -> bool {
+    enabled
+        && (last_check_ms <= 0 || now_ms.saturating_sub(last_check_ms) >= AUTO_UPDATE_INTERVAL_MS)
+}
+
 fn normalize_settings(settings: &mut Settings) {
     if settings.download_dir.as_os_str().is_empty() {
         settings.download_dir = paths::default_download_dir();
@@ -1861,6 +1885,7 @@ fn normalize_settings(settings: &mut Settings) {
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
     settings.ui_scale_pct = settings.ui_scale_pct.clamp(80, 150);
     settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+    settings.proxy_url = settings.proxy_url.trim().to_string();
     if settings.bridge_token.len() != 64
         || !settings
             .bridge_token
@@ -1897,12 +1922,27 @@ mod tests {
             max_concurrent: 0,
             max_connections: 99,
             global_speed_limit_kbps: 2_000_000,
+            proxy_url: " http://127.0.0.1:7890 ".into(),
             ..Settings::default()
         };
         normalize_settings(&mut settings);
         assert_eq!(settings.max_concurrent, 1);
         assert_eq!(settings.max_connections, 32);
         assert_eq!(settings.global_speed_limit_kbps, 1_000_000);
+        assert_eq!(settings.proxy_url, "http://127.0.0.1:7890");
+    }
+
+    #[test]
+    fn should_auto_check_updates_respects_flag_and_24h_cooldown() {
+        let now = 2_000_000_000_000i64;
+        assert!(!should_auto_check_updates(false, 0, now));
+        assert!(should_auto_check_updates(true, 0, now));
+        assert!(!should_auto_check_updates(true, now - 60_000, now));
+        assert!(should_auto_check_updates(
+            true,
+            now - 24 * 60 * 60 * 1000 - 1,
+            now
+        ));
     }
 
     #[test]

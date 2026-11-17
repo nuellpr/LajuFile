@@ -176,6 +176,7 @@ pub enum Command {
     },
     UpdateTools,
     ToolsInstalled(Result<(), String>),
+    RecordUpdateCheck(i64),
     WakeWindow,
     Shutdown,
 }
@@ -720,6 +721,10 @@ impl EngineState {
                     Err(error) => format!("Tools failed: {error}"),
                 });
                 self.pump_queue();
+            }
+            Command::RecordUpdateCheck(ts) => {
+                self.settings.last_update_check_ms = self.settings.last_update_check_ms.max(ts);
+                let _ = self.settings.save(&self.data_dir);
             }
             Command::WakeWindow => self.trigger_wake(),
             Command::Shutdown => {
@@ -2113,6 +2118,9 @@ impl EngineState {
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
         settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
         settings.proxy_url = settings.proxy_url.trim().to_string();
+        settings.last_update_check_ms = settings
+            .last_update_check_ms
+            .max(self.settings.last_update_check_ms);
         settings.browser_paired |= self.settings.browser_paired;
         if !valid_bridge_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();

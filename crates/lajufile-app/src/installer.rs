@@ -513,17 +513,40 @@ fn make_executable(_path: &Path) {}
 #[cfg(windows)]
 fn stop_running_lajufile() {
     use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("taskkill")
-        .args(["/IM", "lajufile.exe", "/F"])
+    let gentle = std::process::Command::new("taskkill")
+        .args(["/IM", "lajufile.exe"])
         .creation_flags(0x0800_0000)
         .output();
+    if gentle.is_ok_and(|out| out.status.success()) {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "lajufile.exe", "/F"])
+            .creation_flags(0x0800_0000)
+            .output();
+    }
 }
 
 #[cfg(not(windows))]
 fn stop_running_lajufile() {
-    let _ = std::process::Command::new("pkill")
-        .args(["-x", "lajufile"])
-        .output();
+    if std::process::Command::new("pkill")
+        .args(["-TERM", "-x", "lajufile"])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let alive = std::process::Command::new("pkill")
+                .args(["-0", "-x", "lajufile"])
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                return;
+            }
+        }
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-x", "lajufile"])
+            .output();
+    }
 }
 
 #[cfg(windows)]

@@ -1220,6 +1220,7 @@ fn builtin_lookup(code: &str, en: &str) -> Option<&'static str> {
             "Choose language" => Some("Pilih bahasa"),
             "Windows' language" => Some("Bahasa Windows"),
             "Apply" => Some("Terapkan"),
+            "Update available" => Some("Pembaruan tersedia"),
             _ => None,
         },
         "ms" => match en {

@@ -113,7 +113,17 @@ pub fn draw(app: &mut LajuFileApp, ui: &mut egui::Ui) -> Vec<Action> {
     ui.painter().rect_filled(ui.max_rect(), 0.0, palette.window);
     ui.spacing_mut().item_spacing = Vec2::ZERO;
 
-    draw_menu_bar(ui, &lang, &palette, &mut actions);
+    let available_update = match &app.update_state {
+        crate::ui::dialogs::UpdateUiState::Available(info) => Some(info.tag.clone()),
+        _ => None,
+    };
+    draw_menu_bar(
+        ui,
+        &lang,
+        &palette,
+        available_update.as_deref(),
+        &mut actions,
+    );
     draw_toolbar(
         ui,
         app.selected,
@@ -201,7 +211,13 @@ pub fn draw(app: &mut LajuFileApp, ui: &mut egui::Ui) -> Vec<Action> {
     actions
 }
 
-fn draw_menu_bar(ui: &mut egui::Ui, lang: &str, palette: &Palette, actions: &mut Vec<Action>) {
+fn draw_menu_bar(
+    ui: &mut egui::Ui,
+    lang: &str,
+    palette: &Palette,
+    available_update: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
     let t = |en: &str| crate::i18n::translate(lang, en).into_owned();
     let rtl = crate::i18n::is_rtl(lang);
     egui::Frame::new()
@@ -324,6 +340,19 @@ fn draw_menu_bar(ui: &mut egui::Ui, lang: &str, palette: &Palette, actions: &mut
                             .size(10.0)
                             .color(palette.faint),
                     );
+                    if let Some(tag) = available_update {
+                        ui.add_space(8.0);
+                        let badge = egui::Button::new(
+                            RichText::new(format!("{} {tag}", t("Update available")))
+                                .size(10.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(palette.accent)
+                        .corner_radius(4);
+                        if ui.add(badge).clicked() {
+                            actions.push(Action::OpenUpdateChecker);
+                        }
+                    }
                 });
             });
         });

@@ -45,6 +45,12 @@ impl Default for AddDraft {
     }
 }
 
+fn is_audio_selector(selector: &str) -> bool {
+    let lower = selector.to_ascii_lowercase();
+    (lower.contains("ba") || lower.contains("bestaudio"))
+        && !(lower.contains("bv") || lower.contains("bestvideo"))
+}
+
 impl AddDraft {
     pub fn for_settings(settings: &Settings) -> Self {
         Self {
@@ -60,11 +66,7 @@ impl AddDraft {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
         });
-        let audio_only = video_format.as_deref().is_some_and(|sel| {
-            let lower = sel.to_ascii_lowercase();
-            (lower.contains("ba") || lower.contains("bestaudio"))
-                && !(lower.contains("bv") || lower.contains("bestvideo"))
-        });
+        let audio_only = video_format.as_deref().is_some_and(is_audio_selector);
         let mut file_name = non_empty(self.file_name);
         if audio_only
             && let Some(ref mut name) = file_name
@@ -200,11 +202,7 @@ pub fn add_dialog(
                         .then(|| draft.formats[selected - 1].size)
                         .flatten();
                     if selected != chosen {
-                        let audio_sel = draft.quality.as_deref().is_some_and(|s| {
-                            let lower = s.to_ascii_lowercase();
-                            (lower.contains("ba") || lower.contains("bestaudio"))
-                                && !(lower.contains("bv") || lower.contains("bestvideo"))
-                        });
+                        let audio_sel = draft.quality.as_deref().is_some_and(is_audio_selector);
                         let trimmed = draft.file_name.trim().to_string();
                         if audio_sel && trimmed.to_ascii_lowercase().ends_with(".mp4") {
                             draft.file_name = format!("{}.m4a", &trimmed[..trimmed.len() - 4]);
@@ -1621,6 +1619,25 @@ fn draw_performance_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPale
                     });
                 });
         });
+
+        ui.add_space(12.0);
+        card_kicker(ui, "PROXY URL (HTTP / HTTPS / SOCKS5)", sp);
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(sp.field_bg)
+            .stroke(Stroke::new(1.0, sp.border))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width((ui.available_width() - 22.0).max(160.0));
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut settings.proxy_url)
+                        .frame(egui::Frame::NONE)
+                        .background_color(Color32::TRANSPARENT)
+                        .hint_text("http://127.0.0.1:7890 or socks5://127.0.0.1:1080"),
+                );
+            });
     });
 }
 
@@ -1831,6 +1848,14 @@ fn draw_behavior_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPalette
             "Auto-resume on startup",
             "settings_autoresume",
             &mut settings.auto_resume,
+            sp,
+        );
+        ui.add_space(8.0);
+        toggle_row(
+            ui,
+            "Check for updates on startup",
+            "settings_auto_updates",
+            &mut settings.auto_check_updates,
             sp,
         );
         ui.add_space(8.0);
