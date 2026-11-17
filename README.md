@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--installation)
 
-[🇮🇩 Bahasa Indonesia](#-bahasa-indonesia) · [🇬🇧 English](#-english) · [🔒 Security](#-keamanan--security-architecture) · [📜 Lisensi](LICENSE)
+[🇮🇩 Bahasa Indonesia](#-bahasa-indonesia) · [🇬🇧 English](#-english) · [🔒 Security](#-keamanan--security-architecture) · [🛡️ Privacy](PRIVACY.md) · [📜 Lisensi](LICENSE)
 
 </div>
 
@@ -136,7 +136,7 @@ LajuFile/
 * **Code Signing & Eligibility:** Intended for free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/) (once enrolled/approved; unsigned releases are noted in GitHub Releases until signing is active).
 * **Team Roles:**
   * Committers, reviewers, and approvers: [nuellpr](https://github.com/nuellpr) (Repository Owner).
-* **Privacy Policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it (such as user-initiated file/web-page downloads or optional first-run HTTPS downloads of open-source `yt-dlp` and `ffmpeg` binaries on video requests).
+* **Privacy Policy:** See [PRIVACY.md](PRIVACY.md). This program and the LajuFile Capture browser extension will not collect telemetry or transfer information to developer-operated servers; network connections happen only as initiated or configured by the user (local `127.0.0.1` extension bridge, target downloads, optional first-run HTTPS downloads of open-source `yt-dlp`/`deno`/`ffmpeg`, and release update checks).
 
 ---
 
