@@ -1407,3 +1407,29 @@ fn duplicate_policy_resume_and_numbered_behavior() {
     assert_ne!(slow_rows[0].save_path, slow_rows[1].save_path);
     handle.shutdown();
 }
+
+#[test]
+fn wake_window_invokes_callback_and_updates_wake_seq() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let wakes_cb = Arc::clone(&wakes);
+    handle.set_wake_callback(Arc::new(move || {
+        wakes_cb.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    handle.send(Command::WakeWindow).unwrap();
+    let snap = wait_for(&handle, |s| s.wake_seq >= 1, Duration::from_secs(5));
+    assert!(snap.wake_seq >= 1);
+    assert!(wakes.load(Ordering::SeqCst) >= 1);
+    handle.shutdown();
+}

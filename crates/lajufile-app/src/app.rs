@@ -85,6 +85,8 @@ pub struct LajuFileApp {
     pub(crate) last_clipboard: Option<String>,
     pub(crate) clipboard_initialized: bool,
     pub(crate) last_clipboard_poll: Instant,
+    pub(crate) last_wake_seq: u64,
+    pub(crate) sleep_guard: crate::platform::SleepGuard,
 }
 
 impl LajuFileApp {
@@ -119,6 +121,16 @@ impl LajuFileApp {
             settings,
         })
         .ok();
+        if let Some(engine) = &engine {
+            let wake_ctx = cc.egui_ctx.clone();
+            engine.set_wake_callback(Arc::new(move || {
+                wake_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                wake_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                wake_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                crate::platform::focus_window_by_title("LajuFile");
+                wake_ctx.request_repaint();
+            }));
+        }
         let toast = engine
             .is_none()
             .then(|| ("Engine failed to start".to_string(), Instant::now()));
@@ -179,6 +191,8 @@ impl LajuFileApp {
             last_clipboard: None,
             clipboard_initialized: false,
             last_clipboard_poll: Instant::now(),
+            last_wake_seq: 0,
+            sleep_guard: crate::platform::SleepGuard::new(),
         }
     }
 
@@ -203,6 +217,16 @@ impl LajuFileApp {
         let Some(snapshot) = engine.latest_snapshot_if_changed(&mut self.snapshot_version) else {
             return;
         };
+
+        if snapshot.wake_seq > self.last_wake_seq {
+            self.last_wake_seq = snapshot.wake_seq;
+            self.show_window(ctx);
+        }
+        let any_downloading = snapshot
+            .downloads
+            .iter()
+            .any(|download| download.status == DownloadStatus::Downloading);
+        self.sleep_guard.sync(any_downloading);
 
         if let Some(message) = snapshot.message.as_ref()
             && self.last_message.as_deref() != Some(message.as_str())
@@ -427,6 +451,7 @@ impl LajuFileApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        crate::platform::focus_window_by_title("LajuFile");
     }
 
     fn update_tray_tooltip(&mut self) {
@@ -1647,6 +1672,7 @@ impl eframe::App for LajuFileApp {
 
 impl Drop for LajuFileApp {
     fn drop(&mut self) {
+        self.sleep_guard.sync(false);
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
         }

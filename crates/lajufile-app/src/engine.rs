@@ -44,9 +44,12 @@ struct SnapshotSlot {
     snapshot: Option<Arc<Snapshot>>,
 }
 
+pub type WakeCallback = Arc<dyn Fn() + Send + Sync>;
+
 pub struct EngineHandle {
     commands: Sender<Command>,
     snapshots: Arc<Mutex<SnapshotSlot>>,
+    wake_callback: Arc<RwLock<Option<WakeCallback>>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -57,18 +60,34 @@ impl EngineHandle {
         let bridge_commands = command_tx.clone();
         let snapshots = Arc::new(Mutex::new(SnapshotSlot::default()));
         let engine_snapshots = Arc::clone(&snapshots);
+        let wake_callback: Arc<RwLock<Option<WakeCallback>>> = Arc::new(RwLock::new(None));
+        let engine_wake = Arc::clone(&wake_callback);
 
         let join = thread::Builder::new()
             .name("lajufile-engine".to_string())
             .spawn(move || {
-                engine_loop(store, config, command_rx, bridge_commands, engine_snapshots)
+                engine_loop(
+                    store,
+                    config,
+                    command_rx,
+                    bridge_commands,
+                    engine_snapshots,
+                    engine_wake,
+                )
             })?;
 
         Ok(Self {
             commands: command_tx,
             snapshots,
+            wake_callback,
             join: Some(join),
         })
+    }
+
+    pub fn set_wake_callback(&self, callback: WakeCallback) {
+        if let Ok(mut guard) = self.wake_callback.write() {
+            *guard = Some(callback);
+        }
     }
 
     pub fn send(&self, command: Command) -> Result<(), EngineError> {
@@ -155,6 +174,7 @@ pub enum Command {
     },
     UpdateTools,
     ToolsInstalled(Result<(), String>),
+    WakeWindow,
     Shutdown,
 }
 
@@ -192,6 +212,7 @@ pub struct Snapshot {
     pub message: Option<String>,
     pub bridge: BridgeStatus,
     pub pending_capture: Option<CapturePrompt>,
+    pub wake_seq: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -411,6 +432,9 @@ struct EngineState {
     message: Option<String>,
     pending_captures: BTreeMap<u64, PendingCapture>,
     next_capture_key: u64,
+    wake_seq: u64,
+    immediate_publish: bool,
+    wake_callback: Arc<RwLock<Option<WakeCallback>>>,
     dirty: bool,
 }
 
@@ -490,6 +514,7 @@ fn engine_loop(
     commands: Receiver<Command>,
     bridge_commands: Sender<Command>,
     snapshots: Arc<Mutex<SnapshotSlot>>,
+    wake_callback: Arc<RwLock<Option<WakeCallback>>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -508,6 +533,7 @@ fn engine_loop(
                     message: Some(format!("Engine failed: {error}")),
                     bridge: BridgeStatus::starting(config.settings.bridge_port),
                     pending_capture: None,
+                    wake_seq: 0,
                 }));
             }
             return;
@@ -556,6 +582,9 @@ fn engine_loop(
         message: None,
         pending_captures: BTreeMap::new(),
         next_capture_key: 0,
+        wake_seq: 0,
+        immediate_publish: false,
+        wake_callback,
         dirty: false,
     };
 
@@ -586,9 +615,12 @@ fn engine_loop(
             state.dirty = true;
         }
 
-        if state.dirty && last_publish.elapsed() >= Duration::from_millis(250) {
+        if state.immediate_publish
+            || (state.dirty && last_publish.elapsed() >= Duration::from_millis(250))
+        {
             state.decay_stalled_speeds();
             state.publish();
+            state.immediate_publish = false;
             state.dirty = false;
             last_publish = Instant::now();
         }
@@ -668,12 +700,23 @@ impl EngineState {
                 });
                 self.pump_queue();
             }
+            Command::WakeWindow => self.trigger_wake(),
             Command::Shutdown => {
                 self.shutdown();
                 return true;
             }
         }
         false
+    }
+
+    fn trigger_wake(&mut self) {
+        self.wake_seq = self.wake_seq.saturating_add(1);
+        self.immediate_publish = true;
+        if let Ok(guard) = self.wake_callback.read()
+            && let Some(cb) = guard.as_ref()
+        {
+            cb();
+        }
     }
 
     fn check_duplicate_url(&mut self, url: &str) -> Result<DuplicateAction, StoreError> {
@@ -831,6 +874,7 @@ impl EngineState {
                 },
             );
             self.message = Some("Waiting for a save folder".to_string());
+            self.trigger_wake();
             if add.video_format.is_none() {
                 let probe_request = ProbeRequest {
                     url,
@@ -2102,6 +2146,7 @@ impl EngineState {
                     ranged: pending.probe.as_ref().map(|probe| probe.ranged),
                 }
             }),
+            wake_seq: self.wake_seq,
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             slot.version = slot.version.saturating_add(1);

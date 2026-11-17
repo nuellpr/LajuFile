@@ -835,3 +835,29 @@ async fn bridge_cors_allows_extensions_only_and_blocks_localhost_web_origins() {
 
     handle.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_requires_token_and_preserves_browser_paired_false() {
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let url = format!("http://127.0.0.1:{port}/wake");
+    let client = reqwest::Client::new();
+
+    let unauthorized = client.post(&url).send().await.unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let (name, value) = token_header();
+    let authorized = client.post(&url).header(name, value).send().await.unwrap();
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&authorized.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["ok"], true);
+
+    let woken = wait_for(
+        &handle,
+        |snapshot| snapshot.wake_seq >= 1,
+        Duration::from_secs(5),
+    );
+    assert!(!woken.settings.browser_paired);
+    handle.shutdown();
+}

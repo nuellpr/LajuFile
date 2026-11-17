@@ -3,6 +3,11 @@
 use lajufile_app::app::LajuFileApp;
 
 fn main() -> eframe::Result {
+    let Some(_instance_guard) = lajufile_app::platform::SingleInstanceGuard::acquire() else {
+        lajufile_app::platform::wake_existing_from_disk();
+        return Ok(());
+    };
+
     let icon =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/icon-32.png"))
             .expect("valid app icon");

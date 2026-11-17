@@ -217,6 +217,7 @@ fn router(state: BridgeAppState) -> Router {
         .route("/downloads", post(downloads))
         .route("/video", post(video))
         .route("/video/formats", post(video_formats))
+        .route("/wake", post(wake))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(
             CorsLayer::new()
@@ -232,6 +233,17 @@ fn router(state: BridgeAppState) -> Router {
 
 async fn health() -> Json<Value> {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
+async fn wake(
+    State(state): State<BridgeAppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&headers, &state.token)?;
+    if state.commands.send(Command::WakeWindow).is_err() {
+        return Err(internal("engine stopped"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn authorize_and_pair(
