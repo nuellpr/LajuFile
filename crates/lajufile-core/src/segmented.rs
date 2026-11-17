@@ -126,8 +126,10 @@ where
     }
 
     validate_segments(spec.size, &spec.segments)?;
+    let initial_done: u64 = spec.segments.iter().map(|segment| segment.done).sum();
+    crate::download::ensure_disk_space(&spec.temp_path, spec.size.saturating_sub(initial_done))?;
 
-    if spec.segments.iter().any(|segment| segment.done > 0)
+    if initial_done > 0
         && spec.if_range.is_none()
         && !prefix_matches(client, &spec.url, &spec.temp_path, spec.size, &spec.options).await
     {
@@ -149,7 +151,6 @@ where
     file.set_len(spec.size).await.map_err(DownloadError::Io)?;
     drop(file);
 
-    let initial_done: u64 = spec.segments.iter().map(|segment| segment.done).sum();
     let total_done = Arc::new(AtomicU64::new(initial_done));
     let on_progress = Arc::new(Mutex::new(on_progress));
     let mut tasks = JoinSet::new();

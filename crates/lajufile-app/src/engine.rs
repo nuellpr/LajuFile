@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 
 use lajufile_core::cookie::{protect_cookie, unprotect_cookie};
 use lajufile_core::download::{
-    DownloadError, DownloadOutcome, DownloadSpec, download_single_with_limiter,
+    DownloadError, DownloadOutcome, DownloadSpec, download_single_with_retry,
 };
-use lajufile_core::http::{DEFAULT_USER_AGENT, RequestOptions, build_client};
+use lajufile_core::http::{
+    DEFAULT_USER_AGENT, RequestOptions, build_client, build_client_with_proxy,
+};
 use lajufile_core::naming::{dedupe_path, resolve_file_name, sanitize_file_name, temp_path_for};
 use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
@@ -520,7 +522,26 @@ fn engine_loop(
         .enable_all()
         .build()
         .expect("build engine runtime");
-    let client = match build_client(Duration::from_secs(10), Duration::from_secs(30)) {
+    let proxy_trimmed = config.settings.proxy_url.trim().to_string();
+    let (client, mut startup_message) = if proxy_trimmed.is_empty() {
+        (
+            build_client(Duration::from_secs(10), Duration::from_secs(30)),
+            None,
+        )
+    } else {
+        match build_client_with_proxy(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(&proxy_trimmed),
+        ) {
+            Ok(client) => (Ok(client), None),
+            Err(err) => (
+                build_client(Duration::from_secs(10), Duration::from_secs(30)),
+                Some(format!("Proxy ignored ({err})")),
+            ),
+        }
+    };
+    let client = match client {
         Ok(client) => client,
         Err(error) => {
             if let Ok(mut slot) = snapshots.lock() {
@@ -579,7 +600,7 @@ fn engine_loop(
         video_streams: HashMap::new(),
         pending_segments: HashMap::new(),
         last_persist: HashMap::new(),
-        message: None,
+        message: startup_message.take(),
         pending_captures: BTreeMap::new(),
         next_capture_key: 0,
         wake_seq: 0,
@@ -1313,8 +1334,10 @@ impl EngineState {
             let _ = reply.send(Err(reason));
             return;
         }
+        let proxy = (!self.settings.proxy_url.trim().is_empty())
+            .then(|| self.settings.proxy_url.trim().to_string());
         self.runtime.spawn(async move {
-            let _ = reply.send(fetch_page_links(parsed).await);
+            let _ = reply.send(fetch_page_links(parsed, proxy).await);
         });
     }
 
@@ -1663,14 +1686,25 @@ impl EngineState {
                 options,
             };
             let client = self.client.clone();
+            let retry_delays = [
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            ];
             self.runtime.spawn(async move {
-                let result = download_single_with_limiter(&client, &spec, Some(limiter), |done| {
-                    let _ = events.send(Event::Progress {
-                        id,
-                        generation,
-                        done,
-                    });
-                })
+                let result = download_single_with_retry(
+                    &client,
+                    &spec,
+                    Some(limiter),
+                    &retry_delays,
+                    |done| {
+                        let _ = events.send(Event::Progress {
+                            id,
+                            generation,
+                            done,
+                        });
+                    },
+                )
                 .await;
                 let _ = events.send(Event::Finished {
                     id,
@@ -2078,9 +2112,23 @@ impl EngineState {
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
         settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
+        settings.proxy_url = settings.proxy_url.trim().to_string();
         settings.browser_paired |= self.settings.browser_paired;
         if !valid_bridge_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();
+        }
+        if settings.proxy_url != self.settings.proxy_url {
+            match build_client_with_proxy(
+                Duration::from_secs(10),
+                Duration::from_secs(30),
+                (!settings.proxy_url.is_empty()).then_some(settings.proxy_url.as_str()),
+            ) {
+                Ok(client) => self.client = client,
+                Err(error) => {
+                    self.message = Some(format!("Settings save failed: {error}"));
+                    return;
+                }
+            }
         }
         match settings.save(&self.data_dir) {
             Ok(()) => {
@@ -2358,10 +2406,10 @@ async fn verify_public_dns(url: &Url) -> Result<(), String> {
 }
 
 /// Fetches up to 2 MB of HTML from one public web page and extracts unique link targets.
-async fn fetch_page_links(url: Url) -> Result<Vec<String>, String> {
+async fn fetch_page_links(url: Url, proxy_url: Option<String>) -> Result<Vec<String>, String> {
     const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
     verify_public_dns(&url).await?;
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -2375,7 +2423,13 @@ async fn fetch_page_links(url: Url) -> Result<Vec<String>, String> {
                 ));
             }
             attempt.follow()
-        }))
+        }));
+    if let Some(proxy) =
+        lajufile_core::http::validate_proxy_url(proxy_url.as_deref().unwrap_or(""))?
+    {
+        builder = builder.proxy(reqwest::Proxy::all(&proxy).map_err(|e| format!("Proxy: {e}"))?);
+    }
+    let client = builder
         .build()
         .map_err(|error| format!("Client failed: {error}"))?;
     let mut response = client

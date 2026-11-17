@@ -57,6 +57,7 @@ pub async fn start_server_with_ranges() -> (String, Arc<Mutex<Vec<u64>>>) {
         .route("/seg-ignore", get(seg_ignore))
         .route("/seg-bad-range", get(seg_bad_range))
         .route("/seg-flaky", get(seg_flaky))
+        .route("/plain-flaky", get(plain_flaky))
         .route("/seg-always-500", get(seg_always_500))
         .with_state(SegState {
             flaky_failed: Arc::new(AtomicBool::new(false)),
@@ -359,6 +360,13 @@ async fn seg_flaky(State(state): State<SegState>, headers: HeaderMap) -> Respons
         return response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty(), &[]);
     }
     seg_range(&headers, start, end)
+}
+
+async fn plain_flaky(State(state): State<SegState>) -> Response {
+    if !state.flaky_failed.swap(true, Ordering::SeqCst) {
+        return response(StatusCode::SERVICE_UNAVAILABLE, Body::empty(), &[]);
+    }
+    plain().await
 }
 
 async fn seg_always_500() -> Response {

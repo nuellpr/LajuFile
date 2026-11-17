@@ -4,7 +4,7 @@ use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, COOKIE, HeaderMap, REFERER, USER_AGENT,
 };
 
-pub const DEFAULT_USER_AGENT: &str = "LajuFile/0.1";
+pub const DEFAULT_USER_AGENT: &str = concat!("LajuFile/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestOptions {
@@ -13,17 +13,58 @@ pub struct RequestOptions {
     pub cookie: Option<String>,
 }
 
-pub fn build_client(
+pub fn validate_proxy_url(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = url::Url::parse(trimmed).map_err(|e| format!("Invalid proxy URL: {e}"))?;
+    if !matches!(
+        parsed.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return Err(format!(
+            "Unsupported proxy scheme '{}' (use http, https, or socks5)",
+            parsed.scheme()
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err("Proxy URL is missing a host".to_string());
+    }
+    Ok(Some(parsed.to_string()))
+}
+
+fn base_client_builder(
     connect_timeout: Duration,
     read_timeout: Duration,
-) -> Result<reqwest::Client, reqwest::Error> {
+) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .tcp_nodelay(true)
         .pool_max_idle_per_host(16)
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
+}
+
+pub fn build_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    base_client_builder(connect_timeout, read_timeout).build()
+}
+
+pub fn build_client_with_proxy(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    proxy_url: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = base_client_builder(connect_timeout, read_timeout);
+    if let Some(proxy) = validate_proxy_url(proxy_url.unwrap_or(""))? {
+        builder = builder.proxy(reqwest::Proxy::all(&proxy).map_err(|e| format!("Proxy: {e}"))?);
+    }
+    builder
         .build()
+        .map_err(|e| format!("HTTP client error: {e}"))
 }
 
 pub fn apply_headers(
@@ -205,5 +246,31 @@ mod tests {
             reqwest::header::HeaderValue::from_static("gzip"),
         );
         assert_eq!(ensure_identity_encoding(&headers), Err("gzip".to_string()));
+    }
+
+    #[test]
+    fn default_user_agent_matches_package_version() {
+        assert_eq!(
+            DEFAULT_USER_AGENT,
+            concat!("LajuFile/", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn validate_proxy_url_checks_schemes_and_build_client() {
+        assert!(validate_proxy_url("").unwrap().is_none());
+        assert!(validate_proxy_url("http://127.0.0.1:7890").is_ok());
+        assert!(validate_proxy_url("https://proxy.example:8443").is_ok());
+        assert!(validate_proxy_url("socks5://127.0.0.1:1080").is_ok());
+        assert!(validate_proxy_url("ftp://127.0.0.1:21").is_err());
+        assert!(validate_proxy_url("not a url").is_err());
+        assert!(
+            build_client_with_proxy(
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                Some("socks5://127.0.0.1:1080")
+            )
+            .is_ok()
+        );
     }
 }

@@ -63,6 +63,12 @@ pub struct Settings {
     pub suppress_browser_wizard: bool,
     #[serde(default = "default_language")]
     pub language: String,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    #[serde(default)]
+    pub last_update_check_ms: i64,
 }
 
 fn default_true() -> bool {
@@ -108,6 +114,9 @@ impl Default for Settings {
             browser_paired: false,
             suppress_browser_wizard: false,
             language: default_language(),
+            proxy_url: String::new(),
+            auto_check_updates: true,
+            last_update_check_ms: 0,
         }
     }
 }
@@ -265,6 +274,9 @@ mod tests {
         assert!(!settings.browser_paired);
         assert!(!settings.suppress_browser_wizard);
         assert_eq!(settings.language, "system");
+        assert!(settings.proxy_url.is_empty());
+        assert!(settings.auto_check_updates);
+        assert_eq!(settings.last_update_check_ms, 0);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::header::CONTENT_RANGE;
 use tokio::io::AsyncWriteExt;
@@ -41,6 +42,69 @@ pub enum DownloadError {
     UnsupportedEncoding(String),
     #[error("unsupported URL scheme: {0}")]
     UnsupportedScheme(String),
+    #[error("insufficient disk space: need {required} bytes, {available} bytes available")]
+    InsufficientDiskSpace { required: u64, available: u64 },
+}
+
+pub(crate) fn ensure_disk_space(target: &Path, required: u64) -> Result<(), DownloadError> {
+    if required == 0 {
+        return Ok(());
+    }
+    let mut probe = target.parent().unwrap_or(target);
+    while !probe.exists() {
+        match probe.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => probe = parent,
+            _ => break,
+        }
+    }
+    if !probe.exists() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = probe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut free_avail = 0u64;
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_avail,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 && free_avail < required {
+            return Err(DownloadError::InsufficientDiskSpace {
+                required,
+                available: free_avail,
+            });
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(out) = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(probe)
+            .output()
+            && out.status.success()
+            && let Some(line) = String::from_utf8_lossy(&out.stdout).lines().nth(1)
+            && let Some(kib_str) = line.split_whitespace().nth(3)
+            && let Ok(kib) = kib_str.parse::<u64>()
+        {
+            let free_avail = kib.saturating_mul(1024);
+            if free_avail < required {
+                return Err(DownloadError::InsufficientDiskSpace {
+                    required,
+                    available: free_avail,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn download_single<F>(
@@ -52,6 +116,39 @@ where
     F: FnMut(u64) + Send,
 {
     download_single_with_limiter(client, spec, None, on_progress).await
+}
+
+fn is_retryable_single_error(err: &DownloadError) -> bool {
+    match err {
+        DownloadError::Request(_) | DownloadError::SizeMismatch { .. } => true,
+        DownloadError::Status(status) => *status == 429 || (500..600).contains(status),
+        _ => false,
+    }
+}
+
+pub async fn download_single_with_retry<F>(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    retry_delays: &[Duration],
+    mut on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    for attempt in 0..=retry_delays.len() {
+        match download_single_with_limiter(client, spec, limiter.clone(), &mut on_progress).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) if attempt < retry_delays.len() && is_retryable_single_error(&err) => {
+                let delay = retry_delays[attempt];
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(DownloadError::Status(0))
 }
 
 pub async fn download_single_with_limiter<F>(
@@ -70,6 +167,9 @@ where
 
     if spec.final_path.exists() {
         return Err(DownloadError::DestinationExists(spec.final_path.clone()));
+    }
+    if let Some(expected) = spec.expected_size {
+        ensure_disk_space(&spec.temp_path, expected)?;
     }
 
     if let Some(parent) = spec.temp_path.parent() {
@@ -195,18 +295,80 @@ where
     })
 }
 
+pub(crate) fn finalize_copy_new(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {
+    let mut dst = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(DownloadError::DestinationExists(final_path.to_path_buf()));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let copy_res = (|| -> std::io::Result<()> {
+        let mut src = std::fs::File::open(temp)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        Ok(())
+    })();
+    drop(dst);
+    if let Err(err) = copy_res {
+        let _ = std::fs::remove_file(final_path);
+        return Err(err.into());
+    }
+    let _ = std::fs::remove_file(temp);
+    Ok(())
+}
+
 pub(crate) fn finalize_temp(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {
-    // shortcut: hard links need NTFS-like support; exFAT/FAT32 destinations fail
-    // with Io instead of overwriting. Upgrade to MoveFileExW without REPLACE_EXISTING.
-    match std::fs::hard_link(temp, final_path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(temp);
-            Ok(())
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let src: Vec<u16> = temp
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dst: Vec<u16> = final_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(src.as_ptr(), dst.as_ptr(), 0)
+        };
+        if ok != 0 {
+            return Ok(());
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(DownloadError::DestinationExists(final_path.to_path_buf()))
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(80 | 183) => Err(DownloadError::DestinationExists(final_path.to_path_buf())),
+            Some(17) => finalize_copy_new(temp, final_path),
+            _ => Err(err.into()),
         }
-        Err(error) => Err(error.into()),
+    }
+    #[cfg(not(windows))]
+    {
+        match std::fs::hard_link(temp, final_path) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(temp);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(DownloadError::DestinationExists(final_path.to_path_buf()))
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::Unsupported
+                ) || matches!(error.raw_os_error(), Some(1 | 18 | 95)) =>
+            {
+                finalize_copy_new(temp, final_path)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -243,5 +405,31 @@ mod tests {
 
         assert_eq!(std::fs::read(&final_path).unwrap(), b"new");
         assert!(!temp.exists());
+    }
+
+    #[test]
+    fn fallback_copy_moves_without_overwriting_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("file.bin.lajufile");
+        let final_path = dir.path().join("file.bin");
+        std::fs::write(&temp, b"fresh-data").unwrap();
+        finalize_copy_new(&temp, &final_path).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"fresh-data");
+        assert!(!temp.exists());
+
+        std::fs::write(&temp, b"second").unwrap();
+        let err = finalize_copy_new(&temp, &final_path).unwrap_err();
+        assert!(matches!(err, DownloadError::DestinationExists(_)));
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"fresh-data");
+        assert!(temp.exists());
+    }
+
+    #[test]
+    fn ensure_disk_space_rejects_excessive_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            ensure_disk_space(&dir.path().join("missing-sub/file.bin"), u64::MAX).unwrap_err();
+        assert!(matches!(err, DownloadError::InsufficientDiskSpace { .. }));
+        ensure_disk_space(&dir.path().join("file.bin"), 1024).unwrap();
     }
 }

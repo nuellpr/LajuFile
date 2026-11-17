@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use lajufile_core::download::{DownloadError, DownloadSpec, download_single};
+use lajufile_core::download::{
+    DownloadError, DownloadSpec, download_single, download_single_with_retry,
+};
 use lajufile_core::http::{RequestOptions, build_client};
 use lajufile_core::naming::temp_path_for;
 use url::Url;
@@ -315,4 +317,28 @@ async fn long_stream_is_size_mismatch() {
     }
     assert!(temp_path.exists());
     assert!(!final_path.exists());
+}
+
+#[tokio::test]
+async fn download_single_with_retry_recovers_from_transient_503() {
+    let base = support::start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let final_path = dir.path().join("flaky.bin");
+    let temp_path = temp_path_for(&final_path);
+    let spec = DownloadSpec {
+        url: Url::parse(&format!("{base}/plain-flaky")).unwrap(),
+        temp_path: temp_path.clone(),
+        final_path: final_path.clone(),
+        expected_size: Some(support::SIZE as u64),
+        options: RequestOptions::default(),
+    };
+
+    let out =
+        download_single_with_retry(&client(), &spec, None, &[Duration::from_millis(10)], |_| {})
+            .await
+            .unwrap();
+
+    assert_eq!(out.bytes, support::SIZE as u64);
+    assert_eq!(std::fs::read(&final_path).unwrap(), support::payload());
+    assert!(!temp_path.exists());
 }
