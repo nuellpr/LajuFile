@@ -1179,19 +1179,15 @@ impl EngineState {
             return Err(InsertError::Failed(error.to_string()));
         }
 
-        let base_name = sanitize_file_name(
-            &request
-                .file_name
-                .clone()
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| video_file_name(&request.url)),
+        let audio_only = request
+            .video_format
+            .as_deref()
+            .is_some_and(is_audio_only_selector);
+        let base_name = resolve_video_file_name(
+            request.file_name.as_deref(),
+            &request.url,
+            request.video_format.as_deref(),
         );
-        let base_name = if base_name.to_ascii_lowercase().ends_with(".mp4") {
-            base_name
-        } else {
-            format!("{base_name}.mp4")
-        };
         // Reserve the temp name so two jobs queued before either file exists cannot
         // collide on one save path.
         let (save_path, temp_path) =
@@ -1228,7 +1224,11 @@ impl EngineState {
             save_path,
             size: request.video_size.filter(|s| *s > 0),
             status,
-            category: Category::Video,
+            category: if audio_only {
+                Category::Music
+            } else {
+                Category::Video
+            },
             kind: "video".to_string(),
             video_format: request.video_format,
             connections: 1,
@@ -2235,6 +2235,41 @@ fn video_file_name(url: &str) -> String {
     }
 }
 
+fn is_audio_only_selector(selector: &str) -> bool {
+    let lower = selector.to_ascii_lowercase();
+    (lower.contains("ba") || lower.contains("bestaudio"))
+        && !(lower.contains("bv") || lower.contains("bestvideo"))
+}
+
+fn resolve_video_file_name(requested: Option<&str>, url: &str, selector: Option<&str>) -> String {
+    let audio_only = selector.is_some_and(is_audio_only_selector);
+    let raw = requested
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| video_file_name(url));
+    let clean = sanitize_file_name(&raw);
+    let lower = clean.to_ascii_lowercase();
+    if audio_only {
+        if [".m4a", ".mp3", ".opus", ".aac", ".flac", ".ogg", ".wav"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+        {
+            return clean;
+        }
+        let stem = if lower.ends_with(".mp4") {
+            &clean[..clean.len() - 4]
+        } else {
+            clean.as_str()
+        };
+        format!("{stem}.m4a")
+    } else if lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".webm") {
+        clean
+    } else {
+        format!("{clean}.mp4")
+    }
+}
+
 fn encrypt_cookie(raw: Option<&str>) -> Result<Option<Vec<u8>>, String> {
     match raw.map(str::trim).filter(|cookie| !cookie.is_empty()) {
         Some(cookie) => protect_cookie(cookie)
@@ -2486,19 +2521,22 @@ fn video_args(
     js_runtime: Option<&str>,
     cookie_file: Option<&Path>,
 ) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![
-        "--no-playlist".into(),
-        "--newline".into(),
-        "--merge-output-format".into(),
-        "mp4".into(),
-        // Prefer H.264 MP4 + AAC M4A and transcode non-AAC audio so Windows players have sound.
-        "-S".into(),
-        "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
-        "--ppa".into(),
-        "Merger+ffmpeg_o1:-c:a aac".into(),
-        "--ffmpeg-location".into(),
-        tools_dir.as_os_str().to_owned(),
-    ];
+    let audio_only = is_audio_only_selector(selector);
+    let mut args: Vec<OsString> = vec!["--no-playlist".into(), "--newline".into()];
+    if audio_only {
+        args.extend(["-x".into(), "--audio-format".into(), "m4a".into()]);
+    } else {
+        args.extend([
+            "--merge-output-format".into(),
+            "mp4".into(),
+            // Prefer H.264 MP4 + AAC M4A and transcode non-AAC audio so Windows players have sound.
+            "-S".into(),
+            "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
+            "--ppa".into(),
+            "Merger+ffmpeg_o1:-c:a aac".into(),
+        ]);
+    }
+    args.extend(["--ffmpeg-location".into(), tools_dir.as_os_str().to_owned()]);
     if let Some(runtime) = js_runtime {
         args.push("--js-runtimes".into());
         args.push(runtime.into());
@@ -2507,7 +2545,7 @@ fn video_args(
         args.push("--cookies".into());
         args.push(cookies.as_os_str().to_owned());
     }
-    if subtitles {
+    if subtitles && !audio_only {
         args.extend([
             "--write-subs".into(),
             "--write-auto-subs".into(),
@@ -2818,6 +2856,52 @@ mod tests {
         );
         assert_eq!(video_file_name("https://youtu.be/abc123"), "abc123.mp4");
         assert_eq!(video_file_name("not a url"), "video.mp4");
+        assert_eq!(
+            resolve_video_file_name(
+                Some("Song.m4a"),
+                "https://youtu.be/abc123",
+                Some("ba[ext=m4a]/ba")
+            ),
+            "Song.m4a"
+        );
+        assert_eq!(
+            resolve_video_file_name(
+                Some("Song.mp4"),
+                "https://youtu.be/abc123",
+                Some("ba[ext=m4a]/ba")
+            ),
+            "Song.m4a"
+        );
+        assert_eq!(
+            resolve_video_file_name(None, "https://youtu.be/abc123", Some("ba[ext=m4a]/ba")),
+            "abc123.m4a"
+        );
+    }
+
+    #[test]
+    fn video_args_audio_only_extracts_m4a_without_mp4_merge() {
+        assert!(is_audio_only_selector("ba[ext=m4a]/ba"));
+        assert!(!is_audio_only_selector("bv*[height<=1080]+ba/b"));
+
+        let args: Vec<String> = video_args(
+            "ba[ext=m4a]/ba",
+            Path::new("C:/dl/song.m4a"),
+            "https://youtu.be/x",
+            Path::new("C:/tools"),
+            true,
+            true,
+            None,
+            None,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+        assert!(!args.iter().any(|arg| arg == "--merge-output-format"));
+        assert!(!args.iter().any(|arg| arg == "--write-subs"));
+        assert!(args.windows(2).any(|w| w == ["-x", "--audio-format"]));
+        assert!(args.windows(2).any(|w| w == ["--audio-format", "m4a"]));
+        assert!(args.windows(2).any(|w| w == ["-o", "C:/dl/song.m4a"]));
     }
 
     #[test]

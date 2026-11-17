@@ -25,44 +25,95 @@ pub const NODE: &str = "node";
 #[cfg(all(windows, target_arch = "aarch64"))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-pc-windows-msvc.zip";
+#[cfg(all(windows, target_arch = "aarch64"))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-pc-windows-msvc.zip.sha256sum";
+
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
+#[cfg(all(windows, not(target_arch = "aarch64")))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip.sha256sum";
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip.sha256sum";
+
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip.sha256sum";
+
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip.sha256sum";
+
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 pub const DENO_ZIP_URL: &str =
     "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
+pub const DENO_SHA256_URL: &str = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip.sha256sum";
+
+pub const YTDLP_SHA256SUMS_URL: &str =
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
 
 #[cfg(windows)]
 pub const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+#[cfg(windows)]
+const YTDLP_ASSET: &str = "yt-dlp.exe";
+
 #[cfg(target_os = "macos")]
 pub const YTDLP_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+#[cfg(target_os = "macos")]
+const YTDLP_ASSET: &str = "yt-dlp_macos";
+
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
 pub const YTDLP_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+const YTDLP_ASSET: &str = "yt-dlp_linux_aarch64";
+
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 pub const YTDLP_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
+const YTDLP_ASSET: &str = "yt-dlp_linux";
 
 #[cfg(windows)]
 pub const FFMPEG_ZIP_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+#[cfg(windows)]
+const FFMPEG_SHA256_URL: Option<&str> =
+    Some("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256");
+#[cfg(windows)]
+const FFMPEG_ASSET: Option<&str> = None;
+
 #[cfg(target_os = "macos")]
 pub const FFMPEG_ZIP_URL: &str = "https://evermeet.cx/ffmpeg/getrelease/zip";
+#[cfg(target_os = "macos")]
+const FFMPEG_SHA256_URL: Option<&str> = None;
+#[cfg(target_os = "macos")]
+const FFMPEG_ASSET: Option<&str> = None;
+
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
-pub const FFMPEG_ZIP_URL: &str =
-    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz";
+pub const FFMPEG_ZIP_URL: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz";
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+const FFMPEG_SHA256_URL: Option<&str> =
+    Some("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256");
+#[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
+const FFMPEG_ASSET: Option<&str> = Some("ffmpeg-master-latest-linuxarm64-gpl.tar.xz");
+
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
-pub const FFMPEG_ZIP_URL: &str =
-    "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
+pub const FFMPEG_ZIP_URL: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz";
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
+const FFMPEG_SHA256_URL: Option<&str> =
+    Some("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256");
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
+const FFMPEG_ASSET: Option<&str> = Some("ffmpeg-master-latest-linux64-gpl.tar.xz");
 
 #[cfg(windows)]
 const CURL_BIN: &str = "curl.exe";
@@ -329,17 +380,23 @@ pub fn js_runtime_arg(dir: &Path) -> Option<String> {
     None
 }
 
-/// Downloads yt-dlp, ffmpeg (if missing), and deno (when no JS runtime is installed yet).
+/// Downloads yt-dlp, ffmpeg (if missing), and deno (when no JS runtime is installed yet),
+/// verifying SHA-256 checksums wherever upstream publishes checksum manifests.
 pub fn install_tools(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create {dir:?}: {error}"))?;
 
     let ytdlp = tool_path(dir, YTDLP);
-    download(&ytdlp, YTDLP_URL)?;
+    download_verified(
+        &ytdlp,
+        YTDLP_URL,
+        Some(YTDLP_SHA256SUMS_URL),
+        Some(YTDLP_ASSET),
+    )?;
     make_executable(&ytdlp);
 
     if !tool_path(dir, FFMPEG).is_file() {
         let archive = dir.join("ffmpeg-archive");
-        download(&archive, FFMPEG_ZIP_URL)?;
+        download_verified(&archive, FFMPEG_ZIP_URL, FFMPEG_SHA256_URL, FFMPEG_ASSET)?;
 
         let extract = dir.join("ffmpeg-extract");
         let _ = std::fs::remove_dir_all(&extract);
@@ -373,7 +430,7 @@ pub fn install_tools(dir: &Path) -> Result<(), String> {
 
 fn install_deno(dir: &Path) -> Result<(), String> {
     let archive = dir.join("deno-archive.zip");
-    download(&archive, DENO_ZIP_URL)?;
+    download_verified(&archive, DENO_ZIP_URL, Some(DENO_SHA256_URL), None)?;
 
     let extract = dir.join("deno-extract");
     let _ = std::fs::remove_dir_all(&extract);
@@ -431,9 +488,88 @@ fn path_arg(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("path is not valid UTF-8: {path:?}"))
 }
 
-/// Downloads to `<target>.part` and renames on success, so a truncated file never
-/// passes `tools_ready`.
-fn download(target: &Path, url: &str) -> Result<(), String> {
+pub fn parse_tool_sha256(raw: &str, asset_name: Option<&str>) -> Option<String> {
+    if let Some(name) = asset_name
+        && let Some(found) = crate::updater::parse_sha256_manifest_entry(raw, name)
+    {
+        return Some(found);
+    }
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    if lines.len() == 1
+        && let Some(token) = lines[0].split_whitespace().next()
+        && token.len() == 64
+        && token.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Some(token.to_ascii_lowercase());
+    }
+    None
+}
+
+pub fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
+    let actual = lajufile_core::checksum::sha256_file(path)
+        .map_err(|e| format!("checksum read {path:?}: {e}"))?;
+    if !actual.eq_ignore_ascii_case(expected_hex.trim()) {
+        return Err(format!(
+            "SHA-256 mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_hex.trim(),
+            actual
+        ));
+    }
+    Ok(())
+}
+
+fn fetch_https_text(url: &str) -> Result<String, String> {
+    let mut command = std::process::Command::new(CURL_BIN);
+    command.args([
+        "-L",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--proto",
+        "=https",
+        "--max-time",
+        "20",
+        "--",
+        url,
+    ]);
+    no_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("{CURL_BIN}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{CURL_BIN} checksum fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "checksum manifest is not valid UTF-8".to_string())
+}
+
+/// Downloads to `<target>.part`, verifies SHA-256 when available, and atomically renames on success.
+fn download_verified(
+    target: &Path,
+    url: &str,
+    checksum_url: Option<&str>,
+    asset_name: Option<&str>,
+) -> Result<(), String> {
+    let expected = match checksum_url {
+        Some(cs_url) => {
+            let text = fetch_https_text(cs_url)?;
+            Some(parse_tool_sha256(&text, asset_name).ok_or_else(|| {
+                format!(
+                    "SHA-256 digest for {} missing from checksum manifest",
+                    asset_name.unwrap_or(url)
+                )
+            })?)
+        }
+        None => None,
+    };
+
     let mut part = target.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
@@ -450,6 +586,12 @@ fn download(target: &Path, url: &str) -> Result<(), String> {
             url,
         ],
     )?;
+    if let Some(expected_hex) = expected
+        && let Err(err) = verify_file_sha256(&part, &expected_hex)
+    {
+        let _ = std::fs::remove_file(&part);
+        return Err(err);
+    }
     std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))
 }
 
@@ -575,5 +717,46 @@ mod tests {
         std::fs::write(&bundled, b"deno").unwrap();
         let runtime = js_runtime_arg(dir.path()).expect("bundled deno detected");
         assert_eq!(runtime, format!("deno:{}", bundled.display()));
+    }
+
+    #[test]
+    fn parses_multi_file_and_single_hash_manifests_and_verifies_files() {
+        let multi = "\
+# Checksums
+bad-line-no-sep
+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  yt-dlp.exe
+fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *deno-x86_64-pc-windows-msvc.zip
+";
+        assert_eq!(
+            parse_tool_sha256(multi, Some("yt-dlp.exe")).as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            parse_tool_sha256(
+                "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899\n",
+                None
+            )
+            .as_deref(),
+            Some("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+        );
+        assert_eq!(parse_tool_sha256("not-a-hash", None), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bin.part");
+        std::fs::write(&file, b"abc").unwrap();
+        assert!(
+            verify_file_sha256(
+                &file,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_file_sha256(
+                &file,
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .is_err()
+        );
     }
 }

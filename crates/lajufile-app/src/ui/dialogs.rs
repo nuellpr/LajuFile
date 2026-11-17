@@ -60,6 +60,19 @@ impl AddDraft {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
         });
+        let audio_only = video_format.as_deref().is_some_and(|sel| {
+            let lower = sel.to_ascii_lowercase();
+            (lower.contains("ba") || lower.contains("bestaudio"))
+                && !(lower.contains("bv") || lower.contains("bestvideo"))
+        });
+        let mut file_name = non_empty(self.file_name);
+        if audio_only
+            && let Some(ref mut name) = file_name
+            && name.to_ascii_lowercase().ends_with(".mp4")
+        {
+            let stem = &name[..name.len() - 4];
+            *name = format!("{stem}.m4a");
+        }
         let video_size = is_youtube
             .then(|| {
                 self.quality_size
@@ -68,7 +81,7 @@ impl AddDraft {
             .flatten();
         AddRequest {
             url: self.url.trim().to_string(),
-            file_name: non_empty(self.file_name),
+            file_name,
             save_dir: non_empty(self.folder).map(PathBuf::from),
             start_now: self.start_now,
             connections: Some(self.connections.clamp(1, 32)),
@@ -186,6 +199,19 @@ pub fn add_dialog(
                     draft.quality_size = (selected > 0)
                         .then(|| draft.formats[selected - 1].size)
                         .flatten();
+                    if selected != chosen {
+                        let audio_sel = draft.quality.as_deref().is_some_and(|s| {
+                            let lower = s.to_ascii_lowercase();
+                            (lower.contains("ba") || lower.contains("bestaudio"))
+                                && !(lower.contains("bv") || lower.contains("bestvideo"))
+                        });
+                        let trimmed = draft.file_name.trim().to_string();
+                        if audio_sel && trimmed.to_ascii_lowercase().ends_with(".mp4") {
+                            draft.file_name = format!("{}.m4a", &trimmed[..trimmed.len() - 4]);
+                        } else if !audio_sel && trimmed.to_ascii_lowercase().ends_with(".m4a") {
+                            draft.file_name = format!("{}.mp4", &trimmed[..trimmed.len() - 4]);
+                        }
+                    }
                 }
             }
 
