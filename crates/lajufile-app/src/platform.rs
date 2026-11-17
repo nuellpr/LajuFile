@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+#[cfg(any(windows, test))]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
