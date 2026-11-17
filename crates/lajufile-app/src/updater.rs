@@ -43,6 +43,7 @@ pub struct UpdateInfo {
     pub asset_name: Option<String>,
     pub asset_url: Option<String>,
     pub asset_size: Option<u64>,
+    pub checksums_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +114,46 @@ pub fn select_asset_for_platform(assets: &[ReleaseAsset]) -> Option<&ReleaseAsse
     assets.iter().find(|a| matches(a))
 }
 
+pub fn select_checksums_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
+    assets.iter().find(|a| a.name == "SHA256SUMS.txt")
+}
+
+pub fn parse_sha256_manifest_entry(manifest: &str, asset_name: &str) -> Option<String> {
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let digest = parts.next()?.trim();
+        let file = parts.next()?.trim_start();
+        let file = file.strip_prefix('*').unwrap_or(file);
+        let file = file.strip_prefix("./").unwrap_or(file);
+        if digest.len() == 64
+            && digest.bytes().all(|b| b.is_ascii_hexdigit())
+            && file == asset_name
+        {
+            return Some(digest.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+pub fn verify_downloaded_installer(path: &Path, expected_sha256: &str) -> Result<(), String> {
+    let actual_sha256 =
+        lajufile_core::checksum::sha256_file(path).map_err(|e| format!("Checksum error: {e}"))?;
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err("Downloaded installer failed SHA-256 verification".to_string());
+    }
+    if cfg!(windows) {
+        let bytes = fs::read(path).map_err(|e| format!("Read installer failed: {e}"))?;
+        if !bytes.starts_with(b"MZ") || crate::installer::parse_payload(&bytes).is_err() {
+            return Err("Downloaded file failed Windows installer verification".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn build_update_client(total_timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -175,6 +216,9 @@ async fn fetch_latest_release() -> Result<UpdateCheck, String> {
         .to_string();
     let has_update = is_newer_version(&current, &release.tag_name);
     let asset = select_asset_for_platform(&release.assets);
+    let checksums_url = select_checksums_asset(&release.assets)
+        .and_then(|a| validate_update_download_url(&a.browser_download_url).ok())
+        .map(|u| u.to_string());
     let release_url = if release.html_url.is_empty() {
         GITHUB_RELEASES_PAGE.to_string()
     } else {
@@ -198,12 +242,18 @@ async fn fetch_latest_release() -> Result<UpdateCheck, String> {
             asset_name: asset.map(|a| a.name.clone()),
             asset_url: asset.map(|a| a.browser_download_url.clone()),
             asset_size: asset.and_then(|a| a.size),
+            checksums_url,
         },
         has_update,
     })
 }
 
-pub fn spawn_download(asset_url: String, asset_name: String, tx: mpsc::Sender<UpdateEvent>) {
+pub fn spawn_download(
+    asset_url: String,
+    asset_name: String,
+    checksums_url: Option<String>,
+    tx: mpsc::Sender<UpdateEvent>,
+) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -215,16 +265,53 @@ pub fn spawn_download(asset_url: String, asset_name: String, tx: mpsc::Sender<Up
                 return;
             }
         };
-        let res = rt.block_on(download_installer(&asset_url, &asset_name, &tx));
+        let res = rt.block_on(download_installer(
+            &asset_url,
+            &asset_name,
+            checksums_url.as_deref(),
+            &tx,
+        ));
         let _ = tx.send(UpdateEvent::ReadyToApply(res));
     });
+}
+
+async fn fetch_expected_sha256(checksums_url: &str, asset_name: &str) -> Result<String, String> {
+    let url = validate_update_download_url(checksums_url)?;
+    let client = build_update_client(Duration::from_secs(20))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Checksum manifest fetch failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Checksum manifest fetch failed: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Checksum manifest read failed: {e}"))?;
+    if bytes.len() > 128 * 1024 {
+        return Err("Checksum manifest is unexpectedly large".to_string());
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "Checksum manifest is not valid UTF-8".to_string())?;
+    parse_sha256_manifest_entry(text, asset_name)
+        .ok_or_else(|| format!("SHA256SUMS.txt does not list {asset_name}"))
 }
 
 async fn download_installer(
     asset_url: &str,
     asset_name: &str,
+    checksums_url: Option<&str>,
     tx: &mpsc::Sender<UpdateEvent>,
 ) -> Result<PathBuf, String> {
+    let manifest_url = checksums_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "Release is missing SHA256SUMS.txt verification manifest — download manually from GitHub Releases"
+                .to_string()
+        })?;
+    let expected_sha256 = fetch_expected_sha256(manifest_url, asset_name).await?;
     let url = validate_update_download_url(asset_url)?;
     let safe_name = lajufile_core::naming::sanitize_file_name(asset_name);
     let target = std::env::temp_dir().join(format!("lajufile-update-{safe_name}"));
@@ -264,12 +351,9 @@ async fn download_installer(
         let _ = fs::remove_file(&part);
         return Err("Downloaded installer is unexpectedly small or empty".to_string());
     }
-    if cfg!(windows) {
-        let header = fs::read(&part).map_err(|e| e.to_string())?;
-        if !header.starts_with(b"MZ") || !header.ends_with(b"LAJUFILE_PK1") {
-            let _ = fs::remove_file(&part);
-            return Err("Downloaded file failed Windows installer verification".to_string());
-        }
+    if let Err(err) = verify_downloaded_installer(&part, &expected_sha256) {
+        let _ = fs::remove_file(&part);
+        return Err(err);
     }
     let _ = fs::remove_file(&target);
     fs::rename(&part, &target).map_err(|e| format!("Finalize error: {e}"))?;
@@ -375,5 +459,99 @@ mod tests {
         } else {
             assert!(picked.name.ends_with(".run"));
         }
+    }
+
+    #[test]
+    fn sha256_manifest_parser_handles_standard_binary_and_dot_slash_formats() {
+        let manifest = "\
+# Release checksums
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  LajuFile-v1.0.5-windows-x64-setup.exe
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *./LajuFile-v1.0.5-linux-x64-setup.run
+invalidhash  broken.exe
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  other.dmg
+";
+        assert_eq!(
+            parse_sha256_manifest_entry(manifest, "LajuFile-v1.0.5-windows-x64-setup.exe")
+                .as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            parse_sha256_manifest_entry(manifest, "LajuFile-v1.0.5-linux-x64-setup.run").as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(parse_sha256_manifest_entry(manifest, "broken.exe"), None);
+        assert_eq!(parse_sha256_manifest_entry(manifest, "missing.exe"), None);
+    }
+
+    #[test]
+    fn verify_downloaded_installer_rejects_hash_mismatch_and_invalid_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("setup.exe");
+
+        let mut exe_bytes = b"MZ_STUB".to_vec();
+        let payload = crate::installer::pack_entries(&[("lajufile.exe", b"app")]).unwrap();
+        exe_bytes.extend_from_slice(&payload);
+        fs::write(&file_path, &exe_bytes).unwrap();
+
+        let digest = lajufile_core::checksum::sha256_file(&file_path).unwrap();
+        assert!(verify_downloaded_installer(&file_path, &digest).is_ok());
+
+        let wrong_digest = "0".repeat(64);
+        let err = verify_downloaded_installer(&file_path, &wrong_digest).unwrap_err();
+        assert!(err.contains("SHA-256"), "unexpected error: {err}");
+
+        if cfg!(windows) {
+            let invalid_path = dir.path().join("bad-setup.exe");
+            fs::write(&invalid_path, b"MZnot-a-valid-installer").unwrap();
+            let bad_digest = lajufile_core::checksum::sha256_file(&invalid_path).unwrap();
+            assert!(verify_downloaded_installer(&invalid_path, &bad_digest).is_err());
+        }
+    }
+
+    #[test]
+    fn release_checksum_manifest_is_required_for_download() {
+        let info = UpdateInfo {
+            tag: "v1.0.5".into(),
+            version: "1.0.5".into(),
+            notes: String::new(),
+            release_url: GITHUB_RELEASES_PAGE.into(),
+            asset_name: Some("LajuFile-v1.0.5-windows-x64-setup.exe".into()),
+            asset_url: Some("https://github.com/nuellpr/LajuFile/releases/download/v1.0.5/LajuFile-v1.0.5-windows-x64-setup.exe".into()),
+            asset_size: Some(1024),
+            checksums_url: None,
+        };
+        assert!(info.checksums_url.is_none());
+
+        let assets = vec![
+            ReleaseAsset {
+                name: "LajuFile-v1.0.5-windows-x64-setup.exe".into(),
+                browser_download_url: "https://github.com/x.exe".into(),
+                size: Some(100),
+            },
+            ReleaseAsset {
+                name: "SHA256SUMS.txt".into(),
+                browser_download_url: "https://github.com/SHA256SUMS.txt".into(),
+                size: Some(256),
+            },
+        ];
+        assert_eq!(
+            select_checksums_asset(&assets).map(|a| a.browser_download_url.as_str()),
+            Some("https://github.com/SHA256SUMS.txt")
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let err = rt
+            .block_on(download_installer(
+                info.asset_url.as_deref().unwrap(),
+                info.asset_name.as_deref().unwrap(),
+                info.checksums_url.as_deref(),
+                &tx,
+            ))
+            .unwrap_err();
+        assert!(err.contains("SHA256SUMS.txt"), "unexpected err: {err}");
     }
 }

@@ -889,6 +889,7 @@ impl LajuFileApp {
                 }
                 Action::StartSelfUpdate { url, file_name } => {
                     if let UpdateUiState::Available(info) = &self.update_state {
+                        let checksums_url = info.checksums_url.clone();
                         self.update_state = UpdateUiState::Downloading {
                             info: info.clone(),
                             downloaded: 0,
@@ -896,7 +897,7 @@ impl LajuFileApp {
                         };
                         let (tx, rx) = mpsc::channel();
                         self.update_rx = Some(rx);
-                        updater::spawn_download(url, file_name, tx);
+                        updater::spawn_download(url, file_name, checksums_url, tx);
                     }
                 }
                 Action::OpenProperties(id) => {
