@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.6
+
+### Perbaikan
+- Memastikan working directory aplikasi desktop tidak tertahan di folder sistem Windows yang terproteksi (`C:\Windows\System32` / `Program Files`) saat dijalankan lewat Windows Startup (`autostart`), shortcut shell, atau installer `--relaunch`.
+- Menetapkan `.current_dir(...)` eksplisit yang dapat ditulis untuk proses anak `yt-dlp` (`spawn_video` ke folder simpan `save_path.parent()` / `%TEMP%`, dan `ytdlp_listing` ke `%TEMP%`) guna mencegah error `Permission denied: 'C:\Windows\system32\tmp*.tmp'`.
+- Memperbaiki kegagalan `os error 32` saat auto-update / install menimpa biner yang sedang berjalan di Windows (`stop_running_lajufile` menunggu proses keluar penuh dengan fallback `/F` dan retry lock `ERROR_SHARING_VIOLATION`).
+
 ## v1.0.5
 
 ### Keamanan & Hardening

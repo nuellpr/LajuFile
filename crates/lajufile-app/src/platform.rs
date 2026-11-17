@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lajufile_core::paths;
@@ -223,6 +224,61 @@ impl Drop for SleepGuard {
     }
 }
 
+/// Ensures the desktop process does not keep a protected Windows directory (such as
+/// `C:\Windows\System32` inherited from Startup `Run` keys) as its working directory.
+pub fn ensure_writable_cwd() {
+    #[cfg(windows)]
+    {
+        let switch = match std::env::current_dir() {
+            Ok(cwd) => is_protected_windows_cwd(&cwd, &protected_windows_roots()),
+            Err(_) => true,
+        };
+        if switch {
+            let data = paths::data_dir();
+            if paths::ensure_dir(&data).is_ok() && std::env::set_current_dir(&data).is_ok() {
+                return;
+            }
+            let tmp = std::env::temp_dir();
+            let _ = std::fs::create_dir_all(&tmp);
+            let _ = std::env::set_current_dir(tmp);
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn protected_windows_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(val) = std::env::var_os(key)
+            && !val.is_empty()
+        {
+            roots.push(PathBuf::from(val));
+        }
+    }
+    if roots.is_empty() {
+        roots.push(PathBuf::from(r"C:\Windows"));
+    }
+    roots
+}
+
+#[cfg(any(windows, test))]
+fn is_protected_windows_cwd(cwd: &Path, roots: &[PathBuf]) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    };
+    let cwd_norm = norm(cwd);
+    roots.iter().any(|root| {
+        let r = norm(root);
+        !r.is_empty()
+            && (cwd_norm == r
+                || cwd_norm
+                    .strip_prefix(&r)
+                    .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/')))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -244,5 +300,27 @@ mod tests {
             guard.sync(true);
         }
         assert_eq!(*log.lock().unwrap(), vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn protected_windows_cwd_detects_system_directories_only() {
+        let roots = vec![
+            PathBuf::from(r"C:\WINDOWS"),
+            PathBuf::from(r"C:\Program Files"),
+        ];
+        assert!(is_protected_windows_cwd(
+            Path::new(r"C:\Windows\system32"),
+            &roots
+        ));
+        assert!(is_protected_windows_cwd(Path::new(r"C:\windows"), &roots));
+        assert!(is_protected_windows_cwd(
+            Path::new(r"C:\Program Files\LajuFile"),
+            &roots
+        ));
+        assert!(!is_protected_windows_cwd(
+            Path::new(r"C:\WindowsOld\work"),
+            &roots
+        ));
+        assert!(!is_protected_windows_cwd(Path::new(r"D:\LajuFile"), &roots));
     }
 }

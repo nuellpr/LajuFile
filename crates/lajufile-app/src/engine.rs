@@ -1759,8 +1759,10 @@ impl EngineState {
             .and_then(TempCookieFile::from_netscape);
         let js_runtime = tools::js_runtime_arg(&dir);
         let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
+        let work_dir = ytdlp_work_dir(download.save_path.parent());
         let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
         command
+            .current_dir(work_dir)
             .args(video_args(
                 selector,
                 &download.save_path,
@@ -2366,12 +2368,28 @@ fn format_ytdlp_error(stderr: &str) -> String {
     }
 }
 
+/// Resolves a writable working directory for `yt-dlp` child processes so they never
+/// inherit a protected OS directory (such as `C:\Windows\System32`).
+fn ytdlp_work_dir(preferred: Option<&Path>) -> PathBuf {
+    if let Some(dir) = preferred.filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
+        && ensure_dir(dir).is_ok()
+        && dir.is_dir()
+    {
+        return dir.to_path_buf();
+    }
+    let tmp = std::env::temp_dir();
+    let _ = std::fs::create_dir_all(&tmp);
+    tmp
+}
+
 /// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
 fn ytdlp_listing(dir: &Path, url: &str, cookie: Option<&str>) -> Result<VideoListing, String> {
     let cookie_file = cookie.and_then(TempCookieFile::from_netscape);
     let js_runtime = tools::js_runtime_arg(dir);
     let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
-    command.args(["--no-playlist", "-J"]);
+    command
+        .current_dir(ytdlp_work_dir(None))
+        .args(["--no-playlist", "-J"]);
     if let Some(runtime) = js_runtime.as_deref() {
         command.args(["--js-runtimes", runtime]);
     }
@@ -2999,5 +3017,20 @@ mod tests {
             format_ytdlp_error(other),
             "yt-dlp: ERROR: [youtube] xyz: Video unavailable"
         );
+    }
+
+    #[test]
+    fn ytdlp_work_dir_prefers_writable_absolute_dir_and_falls_back_to_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("videos/sub");
+        assert_eq!(ytdlp_work_dir(Some(&nested)), nested);
+        assert!(nested.is_dir());
+
+        assert_eq!(ytdlp_work_dir(Some(Path::new(""))), std::env::temp_dir());
+        assert_eq!(
+            ytdlp_work_dir(Some(Path::new("relative-dir"))),
+            std::env::temp_dir()
+        );
+        assert_eq!(ytdlp_work_dir(None), std::env::temp_dir());
     }
 }

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{ExitCode, Stdio};
 
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Margin, RichText, Stroke, Vec2};
 use lajufile_app::installer::{
@@ -272,8 +272,7 @@ impl SetupApp {
             Step::Done => {
                 if ui.add(egui::Button::new("Finish").fill(accent)).clicked() {
                     if self.launch_after {
-                        let exe = launch_installed_path(&PathBuf::from(self.install_dir.trim()));
-                        let _ = std::process::Command::new(exe).spawn();
+                        launch_installed_app(Path::new(self.install_dir.trim()));
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -390,8 +389,7 @@ fn main() -> ExitCode {
         return match result {
             Ok(()) => {
                 if relaunch && !uninstall_mode {
-                    let exe = launch_installed_path(&install_dir);
-                    let _ = std::process::Command::new(exe).spawn();
+                    launch_installed_app(&install_dir);
                 }
                 ExitCode::SUCCESS
             }
@@ -430,4 +428,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn launch_installed_app(install_dir: &Path) {
+    let exe = launch_installed_path(install_dir);
+    let mut cmd = std::process::Command::new(exe);
+    if install_dir.is_dir() {
+        cmd.current_dir(install_dir);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = cmd.spawn();
 }

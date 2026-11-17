@@ -351,6 +351,26 @@ fn strip_pe_security_directory(stub: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Owned(stripped)
 }
 
+fn is_retryable_write_error(err: &io::Error) -> bool {
+    // 5=ACCESS_DENIED, 32=SHARING_VIOLATION, 33=LOCK_VIOLATION (Windows); 16=EBUSY, 26=ETXTBSY (Unix).
+    err.kind() == io::ErrorKind::PermissionDenied
+        || matches!(err.raw_os_error(), Some(5 | 16 | 26 | 32 | 33))
+}
+
+fn write_with_lock_retry(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fs::write(path, bytes).or_else(|err| {
+        if is_retryable_write_error(&err) {
+            for _ in 0..15 {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if fs::write(path, bytes).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(err)
+    })
+}
+
 pub fn write_install_files(
     install_dir: &Path,
     entries: &[PayloadEntry],
@@ -364,18 +384,7 @@ pub fn write_install_files(
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, &entry.bytes).or_else(|err| {
-            // Brief retry after stopping the running binary so Windows releases the file lock.
-            if err.kind() == io::ErrorKind::PermissionDenied {
-                for _ in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    if fs::write(&dest, &entry.bytes).is_ok() {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(err)
-        })?;
+        write_with_lock_retry(&dest, &entry.bytes)?;
         if entry.rel_path == "lajufile" || entry.rel_path == "lajufile.exe" {
             make_executable(&dest);
         }
@@ -383,7 +392,7 @@ pub fn write_install_files(
     if let Some(stub) = uninstaller_stub {
         let uninst = install_dir.join(UNINSTALL_BIN);
         let clean_stub = strip_pe_security_directory(stub);
-        fs::write(&uninst, clean_stub.as_ref())?;
+        write_with_lock_retry(&uninst, clean_stub.as_ref())?;
         make_executable(&uninst);
     }
     Ok(())
@@ -511,18 +520,45 @@ fn make_executable(path: &Path) {
 fn make_executable(_path: &Path) {}
 
 #[cfg(windows)]
+fn is_lajufile_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    let Ok(out) = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq lajufile.exe", "/NH"])
+        .creation_flags(0x0800_0000)
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .to_ascii_lowercase()
+        .contains("lajufile.exe")
+}
+
+#[cfg(windows)]
 fn stop_running_lajufile() {
     use std::os::windows::process::CommandExt;
-    let gentle = std::process::Command::new("taskkill")
+    if !is_lajufile_running() {
+        return;
+    }
+    let _ = std::process::Command::new("taskkill")
         .args(["/IM", "lajufile.exe"])
         .creation_flags(0x0800_0000)
         .output();
-    if gentle.is_ok_and(|out| out.status.success()) {
-        std::thread::sleep(std::time::Duration::from_millis(1200));
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "lajufile.exe", "/F"])
-            .creation_flags(0x0800_0000)
-            .output();
+    for _ in 0..8 {
+        if !is_lajufile_running() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/IM", "lajufile.exe", "/F"])
+        .creation_flags(0x0800_0000)
+        .output();
+    for _ in 0..15 {
+        if !is_lajufile_running() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
 }
 
@@ -945,5 +981,18 @@ mod tests {
         let written = fs::read(dir.path().join(UNINSTALL_BIN)).unwrap();
         assert_eq!(&written[checksum_off..checksum_off + 4], &[0u8; 4]);
         assert_eq!(&written[security_dir_off..security_dir_off + 8], &[0u8; 8]);
+    }
+
+    #[test]
+    fn write_retry_detects_windows_sharing_violation_and_permission_errors() {
+        assert!(is_retryable_write_error(&io::Error::from_raw_os_error(32)));
+        assert!(is_retryable_write_error(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "locked"
+        )));
+        assert!(!is_retryable_write_error(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing"
+        )));
     }
 }

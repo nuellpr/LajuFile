@@ -6,6 +6,7 @@ fn main() -> eframe::Result {
     let Some(_instance_guard) = lajufile_app::platform::SingleInstanceGuard::acquire() else {
         return Ok(());
     };
+    lajufile_app::platform::ensure_writable_cwd();
 
     let icon =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/icon-32.png"))
