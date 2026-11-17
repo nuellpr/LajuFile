@@ -839,16 +839,17 @@ fn range_ignored_falls_back_to_single() {
 fn pause_and_resume_continue_from_offset() {
     let server = start_server();
     let dir = tempfile::tempdir().unwrap();
-    let settings = Settings {
+    let mut settings = Settings {
         download_dir: dir.path().join("downloads"),
         max_connections: 4,
         max_concurrent: 1,
+        global_speed_limit_kbps: 256,
         ..test_settings(dir.path())
     };
     let handle = EngineHandle::start(EngineConfig {
         data_dir: dir.path().to_path_buf(),
         db_path: dir.path().join("lajufile.db"),
-        settings,
+        settings: settings.clone(),
     })
     .unwrap();
 
@@ -868,14 +869,17 @@ fn pause_and_resume_continue_from_offset() {
         .unwrap();
     let snap = wait_for(
         &handle,
-        |s| s.downloads.first().is_some_and(|d| d.downloaded > 0),
+        |s| {
+            s.downloads.first().is_some_and(|d| {
+                d.status == DownloadStatus::Downloading && d.downloaded >= 256 * 1024
+            })
+        },
         Duration::from_secs(15),
     );
     let id = snap.downloads[0].id;
-    std::thread::sleep(Duration::from_millis(100));
 
     handle.send(Command::Pause(id)).unwrap();
-    wait_for(
+    let paused = wait_for(
         &handle,
         |s| {
             s.downloads
@@ -884,8 +888,15 @@ fn pause_and_resume_continue_from_offset() {
         },
         Duration::from_secs(15),
     );
+    assert!(
+        paused.downloads[0].downloaded < SEG_SIZE as u64,
+        "download finished before pause settled: {}",
+        paused.downloads[0].downloaded
+    );
     let ranges_before = server.ranges().len();
 
+    settings.global_speed_limit_kbps = 0;
+    handle.send(Command::UpdateSettings(settings)).unwrap();
     handle.send(Command::Resume(id)).unwrap();
     let done = wait_for(
         &handle,
