@@ -117,48 +117,48 @@ mod platform {
 }
 
 #[cfg_attr(windows, allow(dead_code))]
-fn keystream_byte(key: &[u8; 32], nonce: &[u8; 16], index: usize) -> u8 {
-    let mut acc = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    for (i, &k) in key.iter().enumerate() {
-        let n = u64::from(nonce[i % 16]);
-        acc = acc
-            .wrapping_add(u64::from(k) ^ n.rotate_left((i as u32) * 3))
-            .rotate_left(7)
-            .wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    }
-    (acc ^ (acc >> 32)) as u8
+const ENVELOPE_MAGIC: &[u8; 3] = b"LF2";
+
+#[cfg_attr(windows, allow(dead_code))]
+fn derive_subkeys(master: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    (
+        crate::checksum::hmac_sha256(master, b"lajufile-cookie-enc-v2"),
+        crate::checksum::hmac_sha256(master, b"lajufile-cookie-mac-v2"),
+    )
 }
 
 #[cfg_attr(windows, allow(dead_code))]
-fn compute_tag(key: &[u8; 32], nonce: &[u8; 16], body: &[u8]) -> [u8; 16] {
-    let mut state = [0u64; 2];
-    for (i, &n) in nonce.iter().enumerate() {
-        state[i / 8] |= u64::from(n) << ((i % 8) * 8);
+fn xor_ctr_sha256(enc_key: &[u8; 32], nonce: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut block_in = [0u8; 20];
+    block_in[..16].copy_from_slice(nonce);
+    for (idx, chunk) in data.chunks(32).enumerate() {
+        block_in[16..20].copy_from_slice(&(idx as u32).to_le_bytes());
+        let mask = crate::checksum::hmac_sha256(enc_key, &block_in);
+        for (&b, &m) in chunk.iter().zip(mask.iter()) {
+            out.push(b ^ m);
+        }
     }
-    for (idx, &b) in body.iter().chain(key.iter()).enumerate() {
-        let lane = idx & 1;
-        state[lane] = state[lane]
-            .wrapping_add(u64::from(b).wrapping_mul(0x94D0_49BB_1331_11EB))
-            .rotate_left(13)
-            ^ state[1 - lane];
-    }
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&state[0].to_le_bytes());
-    out[8..].copy_from_slice(&state[1].to_le_bytes());
     out
 }
 
 #[cfg_attr(windows, allow(dead_code))]
+fn compute_cookie_mac(mac_key: &[u8; 32], nonce: &[u8], body: &[u8]) -> [u8; 32] {
+    let mut signed = Vec::with_capacity(ENVELOPE_MAGIC.len() + nonce.len() + body.len());
+    signed.extend_from_slice(ENVELOPE_MAGIC);
+    signed.extend_from_slice(nonce);
+    signed.extend_from_slice(body);
+    crate::checksum::hmac_sha256(mac_key, &signed)
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn seal_with_key(key: &[u8; 32], cookie: &str) -> Vec<u8> {
+    let (enc_key, mac_key) = derive_subkeys(key);
     let nonce = rand::random::<[u8; 16]>();
-    let body: Vec<u8> = cookie
-        .as_bytes()
-        .iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ keystream_byte(key, &nonce, i))
-        .collect();
-    let tag = compute_tag(key, &nonce, &body);
-    let mut out = Vec::with_capacity(32 + body.len());
+    let body = xor_ctr_sha256(&enc_key, &nonce, cookie.as_bytes());
+    let tag = compute_cookie_mac(&mac_key, &nonce, &body);
+    let mut out = Vec::with_capacity(ENVELOPE_MAGIC.len() + 16 + 32 + body.len());
+    out.extend_from_slice(ENVELOPE_MAGIC);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&tag);
     out.extend_from_slice(&body);
@@ -167,22 +167,21 @@ fn seal_with_key(key: &[u8; 32], cookie: &str) -> Vec<u8> {
 
 #[cfg_attr(windows, allow(dead_code))]
 fn open_with_key(key: &[u8; 32], ciphertext: &[u8]) -> Result<String, CookieError> {
-    if ciphertext.len() <= 32 {
+    const HDR_LEN: usize = 3 + 16 + 32;
+    if ciphertext.len() <= HDR_LEN || !ciphertext.starts_with(ENVELOPE_MAGIC) {
         return Err(CookieError::Dpapi("invalid cookie blob".to_string()));
     }
-    let nonce: [u8; 16] = ciphertext[..16].try_into().unwrap();
-    let tag = &ciphertext[16..32];
-    let body = &ciphertext[32..];
-    if compute_tag(key, &nonce, body) != tag {
+    let (enc_key, mac_key) = derive_subkeys(key);
+    let nonce: [u8; 16] = ciphertext[3..19].try_into().unwrap();
+    let tag = &ciphertext[19..HDR_LEN];
+    let body = &ciphertext[HDR_LEN..];
+    let expected = compute_cookie_mac(&mac_key, &nonce, body);
+    if !crate::checksum::constant_time_eq(&expected, tag) {
         return Err(CookieError::Dpapi(
             "cookie authentication failed".to_string(),
         ));
     }
-    let plain: Vec<u8> = body
-        .iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ keystream_byte(key, &nonce, i))
-        .collect();
+    let plain = xor_ctr_sha256(&enc_key, &nonce, body);
     String::from_utf8(plain).map_err(|_| CookieError::Utf8)
 }
 
@@ -208,10 +207,22 @@ mod tests {
     #[test]
     fn keyed_cookie_roundtrip_and_tamper_check() {
         let key = [7u8; 32];
-        let sealed = seal_with_key(&key, "sid=123");
-        assert_eq!(open_with_key(&key, &sealed).unwrap(), "sid=123");
-        let mut tampered = sealed.clone();
-        tampered[20] ^= 1;
-        assert!(open_with_key(&key, &tampered).is_err());
+        let payload = "sid=123; session=αβγδεζηθ; path=/; HttpOnly; Secure; extra=0123456789abcdef0123456789abcdef0123456789abcdef";
+        let sealed_a = seal_with_key(&key, payload);
+        let sealed_b = seal_with_key(&key, payload);
+        assert!(sealed_a.starts_with(b"LF2"));
+        assert_ne!(sealed_a, sealed_b);
+        assert_eq!(open_with_key(&key, &sealed_a).unwrap(), payload);
+        assert_eq!(open_with_key(&key, &sealed_b).unwrap(), payload);
+
+        for idx in [0usize, 5, 25, sealed_a.len() - 1] {
+            let mut tampered = sealed_a.clone();
+            tampered[idx] ^= 1;
+            assert!(
+                open_with_key(&key, &tampered).is_err(),
+                "tampered byte {idx} must fail auth"
+            );
+        }
+        assert!(open_with_key(&key, &sealed_a[..sealed_a.len() - 1]).is_err());
     }
 }

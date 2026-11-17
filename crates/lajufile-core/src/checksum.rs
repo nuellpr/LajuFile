@@ -61,7 +61,7 @@ impl Sha256 {
         }
     }
 
-    fn finalize(mut self) -> String {
+    fn finalize_bytes(mut self) -> [u8; 32] {
         let total_bits = self.len_bytes.wrapping_mul(8);
         self.buf[self.buf_len] = 0x80;
         self.buf_len += 1;
@@ -80,7 +80,11 @@ impl Sha256 {
         for (i, word) in self.state.iter().enumerate() {
             digest[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
         }
-        hex::encode(digest)
+        digest
+    }
+
+    fn finalize(self) -> String {
+        hex::encode(self.finalize_bytes())
     }
 
     fn compress(&mut self, block: &[u8; 64]) {
@@ -135,9 +139,50 @@ impl Sha256 {
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
+    hex::encode(sha256_raw(bytes))
+}
+
+pub(crate) fn sha256_raw(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize()
+    hasher.finalize_bytes()
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        key_block[..32].copy_from_slice(&sha256_raw(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(data);
+    let inner_hash = inner.finalize_bytes();
+
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(&inner_hash);
+    outer.finalize_bytes()
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -202,5 +247,20 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         ));
         assert!(!checksums_match("   ", hex));
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_and_constant_time_eq_works() {
+        // RFC 4231 Test Case 2
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            hex::encode(mac),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert!(constant_time_eq(&mac, &mac));
+        let mut altered = mac;
+        altered[31] ^= 1;
+        assert!(!constant_time_eq(&mac, &altered));
+        assert!(!constant_time_eq(&mac, &altered[..31]));
     }
 }
