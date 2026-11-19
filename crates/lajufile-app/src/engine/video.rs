@@ -378,11 +378,16 @@ pub(super) fn video_args(
         args.push("--embed-chapters".into());
     }
     args.extend([
-        // Speed up fragmented/DASH streams and work around single-stream server throttling.
+        // Balance DASH/HLS fragment concurrency against YouTube throttling, keep
+        // 10M HTTP chunks for single-stream throttling, and throttle stdout progress lines.
         "-N".into(),
-        "8".into(),
+        "4".into(),
         "--http-chunk-size".into(),
         "10M".into(),
+        "--buffer-size".into(),
+        "64K".into(),
+        "--progress-delta".into(),
+        "0.25".into(),
         // Machine-readable progress, one line per update:
         // "LF <downloaded> <total> <estimate> <filename>", either total may be NA.
         "--progress-template".into(),
@@ -644,7 +649,16 @@ mod tests {
         );
         assert!(!args.iter().any(|arg| arg == "--embed-subs"));
         assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
+        assert_eq!(args[args.iter().position(|a| a == "-N").unwrap() + 1], "4");
         assert!(args.iter().any(|arg| arg == "--http-chunk-size"));
+        assert_eq!(
+            args[args.iter().position(|a| a == "--buffer-size").unwrap() + 1],
+            "64K"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--progress-delta").unwrap() + 1],
+            "0.25"
+        );
         assert!(args.iter().any(|arg| arg == "--progress-template"));
         assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");

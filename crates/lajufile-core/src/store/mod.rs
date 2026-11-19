@@ -44,6 +44,8 @@ impl Store {
         }
         let mut conn = Connection::open(path)?;
         conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))?;
+        // Safe in WAL mode against app crashes while avoiding per-commit fsync stalls.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::configure(&conn)?;
         Self::migrate(&mut conn)?;
         Ok(Self { conn })

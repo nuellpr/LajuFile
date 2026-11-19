@@ -17,6 +17,7 @@
 - Mengemas payload macOS ke sidecar `Contents/Resources/payload.bin` (`--payload-only`) agar tidak bentrok dengan `codesign`, melewati `package.ps1` saat packing, dan menambahkan single-instance `flock` serta anti-sleep (`caffeinate` / `systemd-inhibit`) untuk Unix.
 - Memperbaiki duplikasi simbol Unix `acquire_unix_lock` (`E0428`) pada Linux/macOS serta menambahkan *graceful shutdown* untuk installer melalui endpoint bridge lokal terautentikasi `POST /shutdown` (menolak header `Origin` browser) sebelum *fallback* `taskkill`/`pkill`.
 - Menambahkan cache *snapshot* in-memory pada `EngineState` dengan *overlay* `pending_segments` agar `publish()` tidak melakukan pemindaian SQLite penuh berulang kali pada setiap tick.
+- Menstabilkan kecepatan unduhan dan grafik speed: mengganti perhitungan speed ke *sliding window* 4 detik (`SpeedTracker`) dengan *grace period* 3 detik dan *cooldown* decay 1 detik, menghindari penulisan SQLite `set_video_size` berulang pada setiap baris progres video, mengaktifkan `PRAGMA synchronous=NORMAL` pada WAL, menambahkan `PYTHONUNBUFFERED=1`, serta menyetel argumen `yt-dlp` (`-N 4`, `--buffer-size 64K`, `--progress-delta 0.25`).
 
 ### UI, Efisiensi, Ekstensi & Metadata
 - Mengurangi penggunaan CPU saat idle (`recv_timeout(500ms)` di engine, repaint UI adaptif `1000ms`, reuse handle `Clipboard`, dan cache drive `roots()` di Folder Picker).
