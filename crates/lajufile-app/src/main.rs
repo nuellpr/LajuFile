@@ -18,6 +18,9 @@ fn main() -> eframe::Result {
             .with_position([20.0, 20.0])
             .with_min_inner_size([1024.0, 640.0])
             .with_icon(icon),
+        depth_buffer: 0,
+        stencil_buffer: 0,
+        multisampling: 0,
         ..Default::default()
     };
 

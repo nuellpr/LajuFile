@@ -60,6 +60,8 @@ impl Store {
 
     fn configure(conn: &Connection) -> Result<(), StoreError> {
         conn.pragma_update(None, "foreign_keys", true)?;
+        conn.pragma_update(None, "cache_size", -512)?;
+        conn.pragma_update(None, "journal_size_limit", 1_048_576_i64)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         Ok(())
     }

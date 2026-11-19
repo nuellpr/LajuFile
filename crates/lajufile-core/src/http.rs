@@ -41,7 +41,8 @@ fn base_client_builder(
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .tcp_nodelay(true)
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(4)
+        .pool_idle_timeout(Duration::from_secs(30))
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
 }

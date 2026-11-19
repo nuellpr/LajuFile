@@ -891,53 +891,129 @@ pub fn has_builtin_catalog(code: &str) -> bool {
         .is_some_and(|(base, _)| builtin_lookup(base, "Settings").is_some())
 }
 
-/// Registers system fallback fonts (Segoe UI, Tahoma, CJK, Devanagari) so non-Latin scripts
-/// render crisply across all languages without missing-glyph boxes.
-pub fn install_system_fonts(ctx: &egui::Context) {
-    #[cfg(windows)]
-    {
-        const FONT_PATHS: &[(&str, &str)] = &[
-            ("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf"),
-            ("win_tahoma", r"C:\Windows\Fonts\tahoma.ttf"),
-            ("win_malgun", r"C:\Windows\Fonts\malgun.ttf"),
-            ("win_nirmala", r"C:\Windows\Fonts\Nirmala.ttf"),
-            ("win_msyh", r"C:\Windows\Fonts\msyh.ttc"),
-            ("win_meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
-        ];
-        let mut defs = egui::FontDefinitions::default();
-        let mut added = false;
-        for (name, path) in FONT_PATHS {
-            if let Ok(bytes) = std::fs::read(path) {
-                defs.font_data.insert(
-                    (*name).to_string(),
-                    egui::FontData::from_owned(bytes).into(),
-                );
-                if let Some(list) = defs.families.get_mut(&egui::FontFamily::Proportional) {
-                    list.push((*name).to_string());
-                }
-                if let Some(list) = defs.families.get_mut(&egui::FontFamily::Monospace) {
-                    list.push((*name).to_string());
-                }
-                added = true;
-            }
-        }
-        if added {
-            ctx.set_fonts(defs);
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FontProfile {
+    Latin,
+    RtlOrThai,
+    Indic,
+    Chinese,
+    Japanese,
+    Korean,
+}
+
+/// Picks the smallest system font profile required by `lang` so heavy CJK/Indic
+/// fonts (15–35+ MiB) stay out of RAM when the UI uses Latin/Cyrillic/Greek scripts.
+pub(crate) fn font_profile_for(lang: &str) -> FontProfile {
+    let eff = effective_code(lang);
+    let base = eff.split('-').next().unwrap_or(eff.as_str());
+    match base {
+        "zh" => FontProfile::Chinese,
+        "ja" => FontProfile::Japanese,
+        "ko" => FontProfile::Korean,
+        "hi" | "bn" | "ta" | "te" | "kn" | "ml" | "mr" | "gu" | "pa" | "or" | "as" | "ne"
+        | "si" | "kok" => FontProfile::Indic,
+        "ar" | "fa" | "he" | "ur" | "ku" | "ps" | "th" | "lo" => FontProfile::RtlOrThai,
+        _ => FontProfile::Latin,
     }
-    #[cfg(not(windows))]
-    {
-        #[cfg(target_os = "macos")]
-        const FONT_PATHS: &[(&str, &str)] = &[
+}
+
+/// Returns whether the native script of `code` can render crisply under the currently
+/// active language's loaded font profile without loading unused CJK/Indic fonts.
+pub(crate) fn native_name_supported(code: &str, active_lang: &str) -> bool {
+    let target = font_profile_for(code);
+    if target == font_profile_for(active_lang) {
+        return true;
+    }
+    let eff = effective_code(code);
+    let base = eff.split('-').next().unwrap_or(eff.as_str());
+    target == FontProfile::Latin && !matches!(base, "am" | "hy" | "ka" | "km" | "my")
+}
+
+#[cfg(windows)]
+fn font_groups_for_profile(
+    profile: FontProfile,
+) -> &'static [&'static [(&'static str, &'static str)]] {
+    match profile {
+        FontProfile::Latin => &[&[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")]],
+        FontProfile::RtlOrThai => &[
+            &[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")],
+            &[("win_tahoma", r"C:\Windows\Fonts\tahoma.ttf")],
+            &[("win_leelawui", r"C:\Windows\Fonts\LeelawUI.ttf")],
+        ],
+        FontProfile::Indic => &[
+            &[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")],
+            &[("win_nirmala", r"C:\Windows\Fonts\Nirmala.ttf")],
+        ],
+        FontProfile::Chinese => &[
+            &[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")],
+            &[("win_msyh", r"C:\Windows\Fonts\msyh.ttc")],
+        ],
+        FontProfile::Japanese => &[
+            &[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")],
+            &[
+                ("win_yugoth", r"C:\Windows\Fonts\YuGothR.ttc"),
+                ("win_meiryo", r"C:\Windows\Fonts\meiryo.ttc"),
+            ],
+        ],
+        FontProfile::Korean => &[
+            &[("win_segoeui", r"C:\Windows\Fonts\segoeui.ttf")],
+            &[("win_malgun", r"C:\Windows\Fonts\malgun.ttf")],
+        ],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn font_groups_for_profile(
+    profile: FontProfile,
+) -> &'static [&'static [(&'static str, &'static str)]] {
+    match profile {
+        FontProfile::Latin => &[],
+        FontProfile::RtlOrThai => &[
+            &[
+                ("sys_geeza", "/System/Library/Fonts/GeezaPro.ttc"),
+                (
+                    "sys_arial_unicode",
+                    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                ),
+            ],
+            &[("sys_thonburi", "/System/Library/Fonts/Thonburi.ttc")],
+        ],
+        FontProfile::Indic => &[&[
+            ("sys_kohinoor", "/System/Library/Fonts/Kohinoor.ttc"),
             (
                 "sys_arial_unicode",
                 "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             ),
-            ("sys_hiragino", "/System/Library/Fonts/Hiragino Sans GB.ttc"),
-            ("sys_apple_sd", "/System/Library/Fonts/AppleSDGothicNeo.ttc"),
-        ];
-        #[cfg(not(target_os = "macos"))]
-        const FONT_PATHS: &[(&str, &str)] = &[
+        ]],
+        FontProfile::Chinese | FontProfile::Japanese => {
+            &[&[("sys_hiragino", "/System/Library/Fonts/Hiragino Sans GB.ttc")]]
+        }
+        FontProfile::Korean => &[&[("sys_apple_sd", "/System/Library/Fonts/AppleSDGothicNeo.ttc")]],
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn font_groups_for_profile(
+    profile: FontProfile,
+) -> &'static [&'static [(&'static str, &'static str)]] {
+    match profile {
+        FontProfile::Chinese | FontProfile::Japanese | FontProfile::Korean => &[
+            &[
+                (
+                    "sys_noto_sans",
+                    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                ),
+                (
+                    "sys_dejavu",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                ),
+            ],
+            &[(
+                "sys_noto_cjk",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            )],
+        ],
+        _ => &[&[
             (
                 "sys_noto_sans",
                 "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
@@ -946,10 +1022,23 @@ pub fn install_system_fonts(ctx: &egui::Context) {
                 "sys_dejavu",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             ),
-        ];
-        let mut defs = egui::FontDefinitions::default();
-        let mut added = false;
-        for (name, path) in FONT_PATHS {
+        ]],
+    }
+}
+
+/// Registers only the system fallback fonts needed for `lang`, avoiding loading
+/// tens of megabytes of unused CJK/Indic font collections at startup.
+pub fn install_system_fonts_for_language(ctx: &egui::Context, lang: &str) {
+    let profile = font_profile_for(lang);
+    let profile_id = egui::Id::unique("lajufile_font_profile");
+    let previous = ctx.data_mut(|data| data.get_temp::<FontProfile>(profile_id));
+    if previous == Some(profile) {
+        return;
+    }
+
+    let mut defs = egui::FontDefinitions::default();
+    for group in font_groups_for_profile(profile) {
+        for (name, path) in *group {
             if let Ok(bytes) = std::fs::read(path) {
                 defs.font_data.insert(
                     (*name).to_string(),
@@ -961,12 +1050,14 @@ pub fn install_system_fonts(ctx: &egui::Context) {
                 if let Some(list) = defs.families.get_mut(&egui::FontFamily::Monospace) {
                     list.push((*name).to_string());
                 }
-                added = true;
+                break;
             }
         }
-        if added {
-            ctx.set_fonts(defs);
-        }
+    }
+    ctx.set_fonts(defs);
+    ctx.data_mut(|data| data.insert_temp(profile_id, profile));
+    if previous.is_some() {
+        crate::platform::trim_process_memory();
     }
 }
 
@@ -1758,5 +1849,25 @@ mod tests {
                 info.code
             );
         }
+    }
+
+    #[test]
+    fn font_profile_loads_heavy_cjk_and_indic_fonts_only_on_demand() {
+        assert_eq!(font_profile_for("en"), FontProfile::Latin);
+        assert_eq!(font_profile_for("id"), FontProfile::Latin);
+        assert_eq!(font_profile_for("ru"), FontProfile::Latin);
+        assert_eq!(font_profile_for("ar"), FontProfile::RtlOrThai);
+        assert_eq!(font_profile_for("th"), FontProfile::RtlOrThai);
+        assert_eq!(font_profile_for("hi"), FontProfile::Indic);
+        assert_eq!(font_profile_for("zh-cn"), FontProfile::Chinese);
+        assert_eq!(font_profile_for("ja"), FontProfile::Japanese);
+        assert_eq!(font_profile_for("ko"), FontProfile::Korean);
+
+        assert!(native_name_supported("id", "en"));
+        assert!(native_name_supported("fr", "id"));
+        assert!(!native_name_supported("zh-cn", "id"));
+        assert!(native_name_supported("zh-cn", "zh-cn"));
+        assert!(!native_name_supported("ko", "en"));
+        assert!(native_name_supported("ko", "ko"));
     }
 }

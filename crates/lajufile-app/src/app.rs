@@ -89,11 +89,12 @@ pub struct LajuFileApp {
     pub(crate) last_clipboard_poll: Instant,
     pub(crate) last_wake_seq: u64,
     pub(crate) sleep_guard: crate::platform::SleepGuard,
+    pub(crate) was_downloading: bool,
+    pub(crate) startup_trimmed: bool,
 }
 
 impl LajuFileApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::i18n::install_system_fonts(&cc.egui_ctx);
         let data_dir = paths::data_dir();
         let settings = Settings::load_or_create(&data_dir).unwrap_or_default();
         if settings.autostart {
@@ -102,6 +103,7 @@ impl LajuFileApp {
         let theme = settings.theme.clone();
         let ui_scale_pct = settings.ui_scale_pct.clamp(80, 150);
         let language = settings.language.clone();
+        crate::i18n::install_system_fonts_for_language(&cc.egui_ctx, &language);
         crate::i18n::set_ctx_lang(&cc.egui_ctx, &language);
         apply_theme(&cc.egui_ctx, &theme);
         apply_scale(&cc.egui_ctx, ui_scale_pct);
@@ -196,6 +198,8 @@ impl LajuFileApp {
             last_clipboard_poll: Instant::now(),
             last_wake_seq: 0,
             sleep_guard: crate::platform::SleepGuard::new(),
+            was_downloading: false,
+            startup_trimmed: false,
         }
     }
 
@@ -235,6 +239,15 @@ impl LajuFileApp {
             .iter()
             .any(|download| download.status == DownloadStatus::Downloading);
         self.sleep_guard.sync(any_downloading);
+        if (self.was_downloading && !any_downloading) || (!self.startup_trimmed && !any_downloading)
+        {
+            if self.speed_history.is_empty() {
+                self.speed_history.shrink_to_fit();
+            }
+            self.startup_trimmed = true;
+            crate::platform::trim_process_memory();
+        }
+        self.was_downloading = any_downloading;
 
         if let Some(message) = snapshot.message.as_ref()
             && self.last_message.as_deref() != Some(message.as_str())
@@ -254,6 +267,7 @@ impl LajuFileApp {
         }
         if snapshot.settings.language != self.language {
             self.language = snapshot.settings.language.clone();
+            crate::i18n::install_system_fonts_for_language(ctx, &self.language);
             crate::i18n::set_ctx_lang(ctx, &self.language);
         }
         let done_now: HashSet<i64> = snapshot
@@ -1088,6 +1102,7 @@ impl LajuFileApp {
                 Action::SetLanguage(code) => {
                     self.language = code.clone();
                     self.settings_draft.language = code.clone();
+                    crate::i18n::install_system_fonts_for_language(ctx, &code);
                     crate::i18n::set_ctx_lang(ctx, &code);
                     if let Some(snapshot) = &self.snapshot {
                         let mut settings = snapshot.settings.clone();
@@ -1469,7 +1484,7 @@ impl LajuFileApp {
         }
     }
 
-    fn intercept_close(&self, ctx: &egui::Context) -> bool {
+    fn intercept_close(&mut self, ctx: &egui::Context) -> bool {
         let close_to_tray = self
             .snapshot
             .as_ref()
@@ -1481,6 +1496,8 @@ impl LajuFileApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.clipboard = None;
+            crate::platform::trim_process_memory();
             ctx.request_repaint_after(Duration::from_millis(250));
             return true;
         }

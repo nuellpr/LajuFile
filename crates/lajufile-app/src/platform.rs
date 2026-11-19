@@ -383,6 +383,16 @@ fn is_protected_windows_cwd(cwd: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+/// Hints the OS to reclaim unused working-set pages after startup, tray hide,
+/// or unloading heavy fallback fonts.
+pub fn trim_process_memory() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

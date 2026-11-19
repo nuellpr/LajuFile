@@ -670,13 +670,18 @@ pub fn language_dialog(
                                             FontId::proportional(9.0),
                                             sp.muted,
                                         );
+                                        let row_label = if crate::i18n::native_name_supported(
+                                            info.code,
+                                            current_setting,
+                                        ) {
+                                            format!("{}  ·  {}", info.native_name, info.english_name)
+                                        } else {
+                                            info.english_name.to_string()
+                                        };
                                         ui.painter().text(
                                             egui::pos2(rect.left() + 42.0, rect.center().y),
                                             Align2::LEFT_CENTER,
-                                            format!(
-                                                "{}  ·  {}",
-                                                info.native_name, info.english_name
-                                            ),
+                                            row_label,
                                             FontId::proportional(11.5),
                                             if is_sel { sp.accent } else { sp.text },
                                         );

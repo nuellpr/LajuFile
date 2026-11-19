@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.8
+
+### Optimasi Memori (RAM) & Efisiensi
+- Memuat font sistem secara **on-demand sesuai aksara bahasa aktif** (`install_system_fonts_for_language`), tidak lagi memuat paksa puluhan MB font CJK/Korea/Indic (`msyh.ttc`, `malgun.ttf`, `Nirmala.ttf`, `Arial Unicode.ttf`) saat antarmuka memakai aksara Latin/Indonesia/Inggris, serta membebaskan font berat otomatis saat berganti bahasa.
+- Menonaktifkan buffer OpenGL 3D yang tidak dipakai oleh UI 2D (`depth_buffer: 0`, `stencil_buffer: 0`, `multisampling: 0` di `eframe::NativeOptions`).
+- Membatasi runtime `tokio` engine ke `worker_threads(2)`, `max_blocking_threads(4)`, dan `thread_stack_size(1 MiB)` (sebelumnya memakai jumlah inti CPU penuh).
+- Membatasi cache SQLite (`PRAGMA cache_size = -512`, `journal_size_limit = 1 MiB`) dan pool koneksi idle HTTP (`pool_max_idle_per_host(4)`, `pool_idle_timeout(30s)`).
+- Menambahkan `platform::trim_process_memory()` (Win32 `SetProcessWorkingSetSize`) yang dipanggil saat startup selesai, setelah unduhan selesai, saat berganti profil font, dan saat jendela disembunyikan ke System Tray (sekaligus melepas handle clipboard sementara).
+
+### Keamanan & Dokumentasi
+- Menambahkan kebijakan keamanan [SECURITY.md](SECURITY.md) (mengaktifkan tab **Security / Keamanan** di GitHub lengkap dengan tautan pelaporan kerentanan privat dan ringkasan area keamanan utama LajuFile).
+
 ## v1.0.7
 
 ### Keamanan & Integritas

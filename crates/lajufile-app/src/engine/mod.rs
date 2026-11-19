@@ -377,6 +377,9 @@ fn engine_loop(
     wake_callback: Arc<RwLock<Option<WakeCallback>>>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .thread_stack_size(1024 * 1024)
         .enable_all()
         .build()
         .expect("build engine runtime");
