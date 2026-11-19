@@ -879,27 +879,16 @@ pub fn t_ctx<'a>(ctx: &egui::Context, en: &'a str) -> Cow<'a, str> {
 }
 
 pub fn has_builtin_catalog(code: &str) -> bool {
-    matches!(
-        code.split('-').next().unwrap_or(code),
-        "id" | "ms"
-            | "de"
-            | "fr"
-            | "es"
-            | "pt"
-            | "it"
-            | "nl"
-            | "pl"
-            | "tr"
-            | "ru"
-            | "uk"
-            | "ar"
-            | "hi"
-            | "th"
-            | "vi"
-            | "ja"
-            | "ko"
-            | "en"
-    ) || matches!(code, "zh-cn" | "zh-tw" | "pt-br")
+    let normalized = effective_code(code);
+    if normalized == "en" || normalized.starts_with("en-") {
+        return true;
+    }
+    if builtin_lookup(&normalized, "Settings").is_some() {
+        return true;
+    }
+    normalized
+        .split_once('-')
+        .is_some_and(|(base, _)| builtin_lookup(base, "Settings").is_some())
 }
 
 /// Registers system fallback fonts (Segoe UI, Tahoma, CJK, Devanagari) so non-Latin scripts
@@ -1741,5 +1730,33 @@ mod tests {
             translate("id", "Untranslated Key Sample").as_ref(),
             "Untranslated Key Sample"
         );
+    }
+
+    #[test]
+    fn has_builtin_catalog_matches_lookup_table_across_catalog() {
+        assert!(has_builtin_catalog("en"));
+        assert!(has_builtin_catalog("id"));
+        assert!(has_builtin_catalog("pt-BR"));
+        assert!(!has_builtin_catalog("it"));
+        assert!(!has_builtin_catalog("he"));
+        assert!(!has_builtin_catalog("nl"));
+        assert!(!has_builtin_catalog("pl"));
+        assert!(!has_builtin_catalog("th"));
+        assert!(!has_builtin_catalog("uk"));
+        for info in CATALOG {
+            let norm = effective_code(info.code);
+            let expected = norm == "en"
+                || norm.starts_with("en-")
+                || builtin_lookup(&norm, "Settings").is_some()
+                || norm
+                    .split_once('-')
+                    .is_some_and(|(base, _)| builtin_lookup(base, "Settings").is_some());
+            assert_eq!(
+                has_builtin_catalog(info.code),
+                expected,
+                "mismatch for {}",
+                info.code
+            );
+        }
     }
 }

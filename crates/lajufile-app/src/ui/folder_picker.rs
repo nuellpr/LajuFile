@@ -17,6 +17,7 @@ pub enum FolderChoice {
 pub struct FolderPicker {
     current: PathBuf,
     entries: Vec<PathBuf>,
+    roots: Vec<PathBuf>,
     error: Option<String>,
     new_name: String,
 }
@@ -26,6 +27,7 @@ impl FolderPicker {
         let mut picker = Self {
             current: start,
             entries: Vec::new(),
+            roots: roots(),
             error: None,
             new_name: String::new(),
         };
@@ -134,12 +136,17 @@ impl FolderPicker {
                                     self.enter(downloads);
                                 }
                             }
-                            for root in roots() {
+                            let multi_root = self.roots.len() > 1;
+                            let mut next_root = None;
+                            for root in &self.roots {
                                 let label = root.display().to_string();
-                                let active = self.current.starts_with(&root) && roots().len() > 1;
+                                let active = self.current.starts_with(root) && multi_root;
                                 if pill_chip(ui, &label, active, true, &sp) {
-                                    self.enter(root);
+                                    next_root = Some(root.clone());
                                 }
+                            }
+                            if let Some(root) = next_root {
+                                self.enter(root);
                             }
                         });
 

@@ -5,8 +5,8 @@ use std::process::{ExitCode, Stdio};
 
 use egui::{Align, Color32, CornerRadius, FontId, Layout, Margin, RichText, Stroke, Vec2};
 use lajufile_app::installer::{
-    InstallOptions, build_setup_executable, default_install_dir, launch_installed_path,
-    perform_install, perform_uninstall,
+    InstallOptions, build_payload_file, build_setup_executable, default_install_dir,
+    launch_installed_path, perform_install, perform_uninstall,
 };
 
 const LICENSE_TEXT: &str = include_str!("../../../../LICENSE");
@@ -315,10 +315,12 @@ fn parse_arg_value(args: &[String], flag: &str) -> Option<String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--pack") {
-        let Some(stub) = parse_arg_value(&args, "--stub") else {
+        let payload_only = args.iter().any(|a| a == "--payload-only");
+        let stub = parse_arg_value(&args, "--stub");
+        if !payload_only && stub.is_none() {
             eprintln!("missing --stub");
             return ExitCode::from(2);
-        };
+        }
         let Some(app_exe) = parse_arg_value(&args, "--app") else {
             eprintln!("missing --app");
             return ExitCode::from(2);
@@ -339,14 +341,25 @@ fn main() -> ExitCode {
             eprintln!("missing --out");
             return ExitCode::from(2);
         };
-        return match build_setup_executable(
-            &PathBuf::from(stub),
-            &PathBuf::from(app_exe),
-            &PathBuf::from(ext_dir),
-            &PathBuf::from(license),
-            &PathBuf::from(readme),
-            &PathBuf::from(out_exe),
-        ) {
+        let res = if payload_only {
+            build_payload_file(
+                &PathBuf::from(app_exe),
+                &PathBuf::from(ext_dir),
+                &PathBuf::from(license),
+                &PathBuf::from(readme),
+                &PathBuf::from(out_exe),
+            )
+        } else {
+            build_setup_executable(
+                &PathBuf::from(stub.unwrap()),
+                &PathBuf::from(app_exe),
+                &PathBuf::from(ext_dir),
+                &PathBuf::from(license),
+                &PathBuf::from(readme),
+                &PathBuf::from(out_exe),
+            )
+        };
+        return match res {
             Ok(count) => {
                 println!("Packed {count} files into installer.");
                 ExitCode::SUCCESS
@@ -366,9 +379,9 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| {
             if uninstall_mode
                 && let Ok(exe) = std::env::current_exe()
-                && let Some(parent) = exe.parent()
+                && let Some(dir) = infer_uninstall_dir(&exe)
             {
-                return parent.to_path_buf();
+                return dir;
             }
             default_install_dir()
         });
@@ -440,4 +453,35 @@ fn launch_installed_app(install_dir: &Path) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let _ = cmd.spawn();
+}
+
+fn infer_uninstall_dir(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    if parent.file_name().and_then(|n| n.to_str()) == Some("MacOS")
+        && let Some(contents) = parent.parent()
+        && contents.file_name().and_then(|n| n.to_str()) == Some("Contents")
+        && let Some(bundle) = contents.parent()
+    {
+        return Some(bundle.to_path_buf());
+    }
+    Some(parent.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_uninstall_dir_resolves_macos_app_bundle_root() {
+        assert_eq!(
+            infer_uninstall_dir(Path::new(
+                "/Applications/LajuFile.app/Contents/MacOS/uninstall"
+            )),
+            Some(PathBuf::from("/Applications/LajuFile.app"))
+        );
+        assert_eq!(
+            infer_uninstall_dir(Path::new("/opt/lajufile/uninstall")),
+            Some(PathBuf::from("/opt/lajufile"))
+        );
+    }
 }

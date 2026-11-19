@@ -97,3 +97,39 @@ fn reserved_windows_device_names_are_prefixed() {
     assert_eq!(sanitize_file_name("COM0"), "COM0");
     assert_eq!(sanitize_file_name("LPT10"), "LPT10");
 }
+
+#[test]
+fn dedupes_long_filename_without_losing_suffix_or_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let long_name = format!("{}.zip", "a".repeat(220));
+    let first = dedupe_path(dir.path(), &long_name);
+    assert_ne!(first.file_name().unwrap().to_str().unwrap(), "");
+    std::fs::write(&first, b"x").unwrap();
+
+    let second = dedupe_path(dir.path(), &long_name);
+    assert_ne!(second, first);
+    let second_name = second.file_name().unwrap().to_str().unwrap();
+    assert!(second_name.ends_with(" (1).zip"), "got {second_name}");
+    assert!(second_name.chars().count() <= 180);
+
+    std::fs::write(&second, b"x").unwrap();
+    let third = dedupe_path(dir.path(), &long_name);
+    let third_name = third.file_name().unwrap().to_str().unwrap();
+    assert!(third_name.ends_with(" (2).zip"), "got {third_name}");
+}
+
+#[test]
+fn dedupes_inside_deep_directory_within_path_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let pad = 225usize.saturating_sub(root.path().as_os_str().to_string_lossy().chars().count());
+    let deep = root.path().join("d".repeat(pad.max(8)));
+    std::fs::create_dir_all(&deep).unwrap();
+
+    let first = dedupe_path(&deep, "very_long_archive_filename.tar.gz");
+    std::fs::write(&first, b"x").unwrap();
+    let second = dedupe_path(&deep, "very_long_archive_filename.tar.gz");
+    assert_ne!(second, first);
+    let second_name = second.file_name().unwrap().to_str().unwrap();
+    assert!(second_name.contains(" (1)"), "got {second_name}");
+    assert!(second.as_os_str().to_string_lossy().chars().count() <= 250);
+}

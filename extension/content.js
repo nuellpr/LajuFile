@@ -243,7 +243,7 @@ function mount() {
 
   const menu = document.createElement("div");
   menu.style.cssText =
-    "display:none;position:absolute;top:100%;right:0;margin-top:6px;background:rgba(18,24,33,0.96);backdrop-filter:blur(14px);color:#e7edf5;border:1px solid rgba(148,163,184,0.22);border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,0.55);min-width:480px;max-width:600px;max-height:340px;overflow-y:auto;padding:6px;z-index:10000;";
+    "display:none;position:absolute;top:100%;right:0;margin-top:6px;background:rgba(18,24,33,0.96);backdrop-filter:blur(14px);color:#e7edf5;border:1px solid rgba(148,163,184,0.22);border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,0.55);min-width:min(480px, calc(100vw - 28px));max-width:min(600px, calc(100vw - 28px));max-height:340px;overflow-y:auto;padding:6px;z-index:10000;";
 
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -258,7 +258,7 @@ function mount() {
     event.stopPropagation();
     showStatusRow(
       menu,
-      'Klik "Unduh video ini" untuk memilih resolusi video dan mengunduhnya dengan LajuFile.',
+      'Click "Download with LajuFile" to choose a video resolution and download it with LajuFile.',
     );
   });
 

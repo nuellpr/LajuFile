@@ -176,13 +176,13 @@ pub fn generate_token() -> String {
     hex::encode(rand::random::<[u8; 32]>())
 }
 
-fn is_valid_token(token: &str) -> bool {
+pub fn is_valid_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 impl Settings {
     pub fn load_or_create(dir: &Path) -> Result<Self, SettingsError> {
-        paths::ensure_dir(dir).map_err(|source| SettingsError::Io {
+        paths::ensure_private_dir(dir).map_err(|source| SettingsError::Io {
             path: dir.to_path_buf(),
             source,
         })?;
@@ -216,29 +216,45 @@ impl Settings {
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), SettingsError> {
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        paths::ensure_private_dir(dir).map_err(|source| SettingsError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = paths::settings_path(dir);
-        let tmp = dir.join("settings.json.tmp");
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("settings.json.tmp.{}.{seq}", std::process::id()));
         let json = serde_json::to_string_pretty(self).map_err(|source| SettingsError::Json {
             path: path.clone(),
             source,
         })?;
 
-        let mut file = std::fs::File::create(&tmp).map_err(|source| SettingsError::Io {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp).map_err(|source| SettingsError::Io {
             path: tmp.clone(),
             source,
         })?;
-        file.write_all(json.as_bytes())
-            .map_err(|source| SettingsError::Io {
-                path: tmp.clone(),
-                source,
-            })?;
-        file.sync_all().map_err(|source| SettingsError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
+        if let Err(source) = file
+            .write_all(json.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(SettingsError::Io { path: tmp, source });
+        }
         drop(file);
 
-        std::fs::rename(&tmp, &path).map_err(|source| SettingsError::Io { path, source })
+        if let Err(source) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(SettingsError::Io { path, source });
+        }
+        Ok(())
     }
 }
 

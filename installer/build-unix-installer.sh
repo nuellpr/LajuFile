@@ -17,24 +17,21 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   if [[ "$ARCH_NAME" == "arm64" ]]; then
     ARCH_TAG="arm64"
   fi
-  RAW_SETUP="dist/LajuFile-${TAG}-macos-${ARCH_TAG}-setup"
   DMG_OUT="dist/LajuFile-${TAG}-macos-${ARCH_TAG}-setup.dmg"
   STAGE="$(mktemp -d)"
   APP_BUNDLE="$STAGE/LajuFile Setup.app"
 
+  mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+  cp target/release/lajufile-setup "$APP_BUNDLE/Contents/MacOS/lajufile-setup"
+  chmod +x "$APP_BUNDLE/Contents/MacOS/lajufile-setup"
   ./target/release/lajufile-setup \
     --pack \
-    --stub target/release/lajufile-setup \
+    --payload-only \
     --app target/release/lajufile \
     --ext extension \
     --license LICENSE \
     --readme README.md \
-    --out "$RAW_SETUP"
-  chmod +x "$RAW_SETUP"
-
-  mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-  cp "$RAW_SETUP" "$APP_BUNDLE/Contents/MacOS/lajufile-setup"
-  chmod +x "$APP_BUNDLE/Contents/MacOS/lajufile-setup"
+    --out "$APP_BUNDLE/Contents/Resources/payload.bin"
   cp assets/icons/icon-256.png "$APP_BUNDLE/Contents/Resources/icon.png"
   cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -49,10 +46,10 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 EOF
-  codesign --force --deep --sign - "$APP_BUNDLE" || true
+  codesign --force --deep --sign - "$APP_BUNDLE"
   hdiutil create -volname "LajuFile ${TAG} Setup" -srcfolder "$STAGE" -ov -format UDZO "$DMG_OUT"
   rm -rf "$STAGE"
-  echo "Built macOS Installer: $DMG_OUT and $RAW_SETUP"
+  echo "Built macOS Installer: $DMG_OUT"
 else
   ARCH_TAG="x64"
   if [[ "$ARCH_NAME" == "aarch64" ]]; then

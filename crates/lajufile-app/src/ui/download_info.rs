@@ -19,6 +19,8 @@ pub struct DownloadInfoDraft {
     pub category: Category,
     pub folder: String,
     pub remember: bool,
+    pub user_edited_name: bool,
+    pub user_edited_folder: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -34,14 +36,7 @@ pub enum DownloadInfoChoice {
 }
 
 pub fn category_label(category: Category) -> &'static str {
-    match category {
-        Category::Video => "Video",
-        Category::Music => "Music",
-        Category::Documents => "Documents",
-        Category::Programs => "Programs",
-        Category::Compressed => "Compressed",
-        Category::Other => "Other",
-    }
+    category.label()
 }
 
 pub fn download_info_dialog(
@@ -180,6 +175,7 @@ pub fn download_info_dialog(
                                     )
                                     .changed()
                                 {
+                                    draft.user_edited_name = true;
                                     draft.category =
                                         Category::from_file_name(draft.file_name.trim());
                                 }
@@ -196,12 +192,17 @@ pub fn download_info_dialog(
                                 .inner_margin(Margin::symmetric(10, 6))
                                 .show(ui, |ui| {
                                     ui.set_width((ui.available_width() - 108.0).max(160.0));
-                                    ui.add_sized(
-                                        [ui.available_width(), 20.0],
-                                        egui::TextEdit::singleline(&mut draft.folder)
-                                            .frame(egui::Frame::NONE)
-                                            .background_color(Color32::TRANSPARENT),
-                                    );
+                                    if ui
+                                        .add_sized(
+                                            [ui.available_width(), 20.0],
+                                            egui::TextEdit::singleline(&mut draft.folder)
+                                                .frame(egui::Frame::NONE)
+                                                .background_color(Color32::TRANSPARENT),
+                                        )
+                                        .changed()
+                                    {
+                                        draft.user_edited_folder = true;
+                                    }
                                 });
                             ui.add_space(8.0);
                             if figma_button(ui, "Browse...", 86.0, 32.0, false, &sp) {

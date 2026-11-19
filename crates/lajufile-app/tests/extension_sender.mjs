@@ -10,8 +10,14 @@ const EXT_ORIGIN = `chrome-extension://${EXT_ID}/`;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BG_PATH = path.resolve(__dirname, "../../../extension/background.js");
 
-function loadBackgroundHarness() {
+function loadBackgroundHarness({
+  rules = { excluded_domains: "", captured_extensions: "" },
+  hasDeterminingFilename = true,
+  searchItems = [],
+} = {}) {
   const listeners = [];
+  const onCreatedListeners = [];
+  const onDeterminingListeners = [];
   const fetchCalls = [];
   const storageData = {
     port: 53841,
@@ -20,6 +26,21 @@ function loadBackgroundHarness() {
     excludedDomains: "",
     fileTypes: "",
   };
+
+  const downloads = {
+    onCreated: { addListener: (fn) => onCreatedListeners.push(fn) },
+    cancel: (_id, cb) => cb?.(),
+    removeFile: (_id, cb) => cb?.(),
+    erase: (_q, cb) => cb?.(),
+    pause: async () => {},
+    resume: async () => {},
+    search: async ({ id }) => searchItems.filter((item) => item.id === id),
+  };
+  if (hasDeterminingFilename) {
+    downloads.onDeterminingFilename = {
+      addListener: (fn) => onDeterminingListeners.push(fn),
+    };
+  }
 
   const sandbox = {
     URL,
@@ -46,7 +67,7 @@ function loadBackgroundHarness() {
         return {
           ok: true,
           status: 200,
-          json: async () => ({ excluded_domains: "", captured_extensions: "" }),
+          json: async () => rules,
         };
       }
       if (String(url).endsWith("/video/formats")) {
@@ -63,16 +84,7 @@ function loadBackgroundHarness() {
       },
       cookies: { getAll: async () => [] },
       notifications: { create: () => {} },
-      downloads: {
-        onDeterminingFilename: { addListener: () => {} },
-        onCreated: { addListener: () => {} },
-        cancel: (_id, cb) => cb?.(),
-        removeFile: (_id, cb) => cb?.(),
-        erase: (_q, cb) => cb?.(),
-        pause: async () => {},
-        resume: async () => {},
-        search: async () => [],
-      },
+      downloads,
       contextMenus: {
         removeAll: (cb) => cb?.(),
         create: () => {},
@@ -92,7 +104,12 @@ function loadBackgroundHarness() {
   const code = fs.readFileSync(BG_PATH, "utf8");
   vm.runInNewContext(code, sandbox, { filename: BG_PATH });
   assert.equal(listeners.length, 1, "expected exactly one onMessage listener");
-  return { onMessage: listeners[0], fetchCalls };
+  return {
+    onMessage: listeners[0],
+    onCreated: onCreatedListeners[0],
+    onDetermining: onDeterminingListeners[0],
+    fetchCalls,
+  };
 }
 
 function dispatch(onMessage, message, sender) {
@@ -222,4 +239,47 @@ test("video-download omits non-finite size instead of serializing Infinity/null"
   assert.ok(videoCall, "expected POST /video call");
   const body = JSON.parse(videoCall.init.body);
   assert.equal("size" in body, false);
+});
+
+test("auto-capture uses remoteCapturedExtensions when config.fileTypes is empty", async () => {
+  const { onDetermining, fetchCalls } = loadBackgroundHarness({
+    rules: { excluded_domains: "", captured_extensions: "zip,7z" },
+  });
+
+  await new Promise((resolve) => {
+    onDetermining(
+      { id: 1, state: "in_progress", url: "https://example.org/page.html", filename: "page.html" },
+      resolve,
+    );
+  });
+  assert.equal(fetchCalls.some((c) => c.url.endsWith("/downloads")), false);
+
+  await new Promise((resolve) => {
+    onDetermining(
+      { id: 2, state: "in_progress", url: "https://example.org/bundle.zip", filename: "bundle.zip" },
+      resolve,
+    );
+  });
+  const dlCalls = fetchCalls.filter((c) => c.url.endsWith("/downloads"));
+  assert.equal(dlCalls.length, 1);
+  assert.equal(JSON.parse(dlCalls[0].init.body).url, "https://example.org/bundle.zip");
+});
+
+test("firefox onCreated captures immediately when onDeterminingFilename is absent", async () => {
+  const item = {
+    id: 42,
+    state: "in_progress",
+    url: "https://example.org/archive.zip",
+    filename: "archive.zip",
+  };
+  const { onCreated, fetchCalls } = loadBackgroundHarness({
+    hasDeterminingFilename: false,
+    searchItems: [item],
+  });
+
+  onCreated(item);
+  await new Promise((r) => setTimeout(r, 80));
+  const dlCalls = fetchCalls.filter((c) => c.url.endsWith("/downloads"));
+  assert.equal(dlCalls.length, 1);
+  assert.equal(JSON.parse(dlCalls[0].init.body).url, "https://example.org/archive.zip");
 });

@@ -8,7 +8,7 @@ use egui::{
 use lajufile_core::checksum::checksums_match;
 use lajufile_core::settings::{DEFAULT_CAPTURE_EXTENSIONS, DuplicatePolicy, Settings, Theme};
 use lajufile_core::store::{Download, DownloadStatus, Segment, now_millis};
-use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice};
+use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice, is_audio_only_selector};
 
 use crate::bridge::{BridgeState, BridgeStatus};
 use crate::engine::AddRequest;
@@ -45,12 +45,6 @@ impl Default for AddDraft {
     }
 }
 
-fn is_audio_selector(selector: &str) -> bool {
-    let lower = selector.to_ascii_lowercase();
-    (lower.contains("ba") || lower.contains("bestaudio"))
-        && !(lower.contains("bv") || lower.contains("bestvideo"))
-}
-
 impl AddDraft {
     pub fn for_settings(settings: &Settings) -> Self {
         Self {
@@ -66,7 +60,7 @@ impl AddDraft {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
         });
-        let audio_only = video_format.as_deref().is_some_and(is_audio_selector);
+        let audio_only = video_format.as_deref().is_some_and(is_audio_only_selector);
         let mut file_name = non_empty(self.file_name);
         if audio_only
             && let Some(ref mut name) = file_name
@@ -127,6 +121,11 @@ pub fn add_dialog(
                 [ui.available_width(), 30.0],
                 egui::TextEdit::singleline(&mut draft.url).hint_text("https://..."),
             );
+            if url.changed() {
+                draft.formats.clear();
+                draft.quality = None;
+                draft.quality_size = None;
+            }
             if *focus {
                 url.request_focus();
                 *focus = false;
@@ -153,7 +152,6 @@ pub fn add_dialog(
             });
 
             ui.add_space(12.0);
-            ui.checkbox(&mut draft.start_now, "Start downloading now");
             ui.add(egui::Slider::new(&mut draft.connections, 1..=32).text("Connections"));
             ui.label(
                 RichText::new("Parallel ranges are used when the server supports them.")
@@ -202,7 +200,8 @@ pub fn add_dialog(
                         .then(|| draft.formats[selected - 1].size)
                         .flatten();
                     if selected != chosen {
-                        let audio_sel = draft.quality.as_deref().is_some_and(is_audio_selector);
+                        let audio_sel =
+                            draft.quality.as_deref().is_some_and(is_audio_only_selector);
                         let trimmed = draft.file_name.trim().to_string();
                         if audio_sel && trimmed.to_ascii_lowercase().ends_with(".mp4") {
                             draft.file_name = format!("{}.m4a", &trimmed[..trimmed.len() - 4]);
@@ -1161,12 +1160,12 @@ pub fn language_dialog(
                                             FontId::proportional(11.5),
                                             if is_sel { sp.accent } else { sp.text },
                                         );
-                                        let tag = if info.rtl {
-                                            "RTL · Built-in"
-                                        } else if crate::i18n::has_builtin_catalog(info.code) {
-                                            "Built-in"
-                                        } else {
-                                            "TSV / EN"
+                                        let built_in = crate::i18n::has_builtin_catalog(info.code);
+                                        let tag = match (info.rtl, built_in) {
+                                            (true, true) => "RTL · Built-in",
+                                            (true, false) => "RTL · TSV / EN",
+                                            (false, true) => "Built-in",
+                                            (false, false) => "TSV / EN",
                                         };
                                         ui.painter().text(
                                             egui::pos2(rect.right() - 10.0, rect.center().y),
@@ -3755,6 +3754,7 @@ pub struct BatchDraft {
     pub pad_width: u32,
     pub folder: String,
     pub connections: u32,
+    pub import_error: Option<String>,
 }
 
 impl Default for BatchDraft {
@@ -3770,6 +3770,7 @@ impl Default for BatchDraft {
             pad_width: 2,
             folder: String::new(),
             connections: 8,
+            import_error: None,
         }
     }
 }
@@ -3936,17 +3937,32 @@ pub fn batch_dialog(
                             egui::TextEdit::singleline(&mut draft.import_path)
                                 .hint_text("C:\\path\\to\\urls.txt"),
                         );
-                        if ui.button("Load file").clicked()
-                            && let Ok(contents) = std::fs::read_to_string(draft.import_path.trim())
-                        {
-                            if draft.urls_text.trim().is_empty() {
-                                draft.urls_text = contents;
+                        if ui.button("Load file").clicked() {
+                            let path_str = draft.import_path.trim();
+                            if path_str.is_empty() {
+                                draft.import_error =
+                                    Some("Enter a .txt file path to import".to_string());
                             } else {
-                                draft.urls_text.push('\n');
-                                draft.urls_text.push_str(&contents);
+                                match load_batch_import_file(std::path::Path::new(path_str)) {
+                                    Ok(contents) => {
+                                        draft.import_error = None;
+                                        if draft.urls_text.trim().is_empty() {
+                                            draft.urls_text = contents;
+                                        } else {
+                                            draft.urls_text.push('\n');
+                                            draft.urls_text.push_str(&contents);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        draft.import_error = Some(err);
+                                    }
+                                }
                             }
                         }
                     });
+                    if let Some(err) = &draft.import_error {
+                        ui.colored_label(ui.visuals().error_fg_color, err);
+                    }
                 }
                 BatchMode::Pattern => {
                     ui.label(
@@ -4211,6 +4227,19 @@ pub fn update_dialog(
     action
 }
 
+const MAX_BATCH_IMPORT_BYTES: u64 = 512 * 1024;
+
+fn load_batch_import_file(path: &std::path::Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Could not read file: {e}"))?;
+    if !meta.is_file() {
+        return Err("Selected path is not a file".to_string());
+    }
+    if meta.len() > MAX_BATCH_IMPORT_BYTES {
+        return Err("Import file exceeds 512 KiB size limit".to_string());
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("Could not read text file: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4375,5 +4404,23 @@ mod tests {
             format_utc_timestamp(1_700_000_000_000),
             "2023-11-14 22:13:20 UTC"
         );
+    }
+
+    #[test]
+    fn batch_import_rejects_oversized_or_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_batch_import_file(&dir.path().join("missing.txt")).is_err());
+
+        let small = dir.path().join("urls.txt");
+        std::fs::write(&small, "https://example.com/a.zip\n").unwrap();
+        assert_eq!(
+            load_batch_import_file(&small).unwrap(),
+            "https://example.com/a.zip\n"
+        );
+
+        let large = dir.path().join("huge.txt");
+        let file = std::fs::File::create(&large).unwrap();
+        file.set_len(MAX_BATCH_IMPORT_BYTES + 1).unwrap();
+        assert!(load_batch_import_file(&large).is_err());
     }
 }

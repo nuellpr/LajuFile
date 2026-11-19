@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "lajufile-app"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "arboard",
  "axum",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "lajufile-core"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "axum",
  "content_disposition",

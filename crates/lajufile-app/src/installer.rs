@@ -264,15 +264,12 @@ fn read_slice<'a>(buf: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]
     Ok(out)
 }
 
-pub fn build_setup_executable(
-    stub_path: &Path,
+pub fn collect_payload_entries(
     lajufile_bin: &Path,
     extension_dir: &Path,
     license_path: &Path,
     readme_path: &Path,
-    out_exe: &Path,
-) -> Result<usize, String> {
-    let stub = fs::read(stub_path).map_err(|e| format!("read stub {stub_path:?}: {e}"))?;
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let app_name = lajufile_bin
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -296,7 +293,19 @@ pub fn build_setup_executable(
             fs::read(readme_path).map_err(|e| format!("read README.md: {e}"))?,
         ));
     }
+    Ok(owned)
+}
 
+pub fn build_setup_executable(
+    stub_path: &Path,
+    lajufile_bin: &Path,
+    extension_dir: &Path,
+    license_path: &Path,
+    readme_path: &Path,
+    out_exe: &Path,
+) -> Result<usize, String> {
+    let stub = fs::read(stub_path).map_err(|e| format!("read stub {stub_path:?}: {e}"))?;
+    let owned = collect_payload_entries(lajufile_bin, extension_dir, license_path, readme_path)?;
     let refs: Vec<(&str, &[u8])> = owned
         .iter()
         .map(|(p, b)| (p.as_str(), b.as_slice()))
@@ -314,6 +323,26 @@ pub fn build_setup_executable(
     Ok(owned.len())
 }
 
+pub fn build_payload_file(
+    lajufile_bin: &Path,
+    extension_dir: &Path,
+    license_path: &Path,
+    readme_path: &Path,
+    out_payload: &Path,
+) -> Result<usize, String> {
+    let owned = collect_payload_entries(lajufile_bin, extension_dir, license_path, readme_path)?;
+    let refs: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let payload = pack_entries(&refs)?;
+    if let Some(parent) = out_payload.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {parent:?}: {e}"))?;
+    }
+    fs::write(out_payload, &payload).map_err(|e| format!("write {out_payload:?}: {e}"))?;
+    Ok(owned.len())
+}
+
 fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .map_err(|e| format!("read {dir:?}: {e}"))?
@@ -323,6 +352,9 @@ fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) -> Re
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "package.ps1" {
+            continue;
+        }
         let rel = format!("{prefix}/{name}");
         if path.is_dir() {
             collect_dir(&path, &rel, out)?;
@@ -398,13 +430,37 @@ pub fn write_install_files(
     Ok(())
 }
 
+pub fn load_install_payload(exe_path: &Path) -> Result<(Vec<u8>, Vec<PayloadEntry>), String> {
+    let exe_bytes = fs::read(exe_path).map_err(|e| format!("read installer: {e}"))?;
+    if let Ok((stub_end, entries)) = parse_payload(&exe_bytes) {
+        return Ok((exe_bytes[..stub_end].to_vec(), entries));
+    }
+    let sidecars = [
+        exe_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|contents| contents.join("Resources").join("payload.bin")),
+        exe_path.parent().map(|p| p.join("payload.bin")),
+    ];
+    for candidate in sidecars.into_iter().flatten() {
+        if candidate.is_file() {
+            let payload_bytes =
+                fs::read(&candidate).map_err(|e| format!("read payload {candidate:?}: {e}"))?;
+            let (stub_end, entries) = parse_payload(&payload_bytes)?;
+            if stub_end != 0 {
+                return Err("unexpected prefix bytes in external installer payload".to_string());
+            }
+            return Ok((exe_bytes, entries));
+        }
+    }
+    Err("installer payload is missing (run setup builder first)".to_string())
+}
+
 pub fn perform_install(options: &InstallOptions) -> Result<(), String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("locate setup binary: {e}"))?;
-    let exe_bytes = fs::read(&exe_path).map_err(|e| format!("read installer: {e}"))?;
-    let (stub_end, entries) = parse_payload(&exe_bytes)?;
+    let (stub, entries) = load_install_payload(&exe_path)?;
     stop_running_lajufile();
 
-    let stub = &exe_bytes[..stub_end];
     if cfg!(target_os = "macos")
         && options
             .install_dir
@@ -412,9 +468,9 @@ pub fn perform_install(options: &InstallOptions) -> Result<(), String> {
             .and_then(|s| s.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("app"))
     {
-        write_macos_bundle(&options.install_dir, &entries, stub).map_err(|e| e.to_string())?;
+        write_macos_bundle(&options.install_dir, &entries, &stub).map_err(|e| e.to_string())?;
     } else {
-        write_install_files(&options.install_dir, &entries, Some(stub))
+        write_install_files(&options.install_dir, &entries, Some(&stub))
             .map_err(|e| format!("install files: {e}"))?;
     }
     register_installation(options)?;
@@ -472,9 +528,7 @@ fn write_macos_bundle(
     Ok(())
 }
 
-pub fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
-    stop_running_lajufile();
-    unregister_installation();
+pub fn remove_installed_files(install_dir: &Path) {
     for rel in [
         "lajufile.exe",
         "lajufile",
@@ -491,6 +545,12 @@ pub fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
             let _ = fs::remove_file(&target);
         }
     }
+}
+
+pub fn perform_uninstall(install_dir: &Path) -> Result<(), String> {
+    stop_running_lajufile();
+    unregister_installation();
+    remove_installed_files(install_dir);
     schedule_self_cleanup(install_dir);
     Ok(())
 }
@@ -770,6 +830,12 @@ fn unregister_installation() {
 #[cfg(windows)]
 fn schedule_self_cleanup(install_dir: &Path) {
     use std::os::windows::process::CommandExt;
+    let uninst = install_dir.join(UNINSTALL_BIN);
+    let _ = fs::remove_file(&uninst);
+    if fs::remove_dir(install_dir).is_ok() {
+        return;
+    }
+    // Never pass /S to rmdir: preserve unrelated user files if install_dir is shared.
     let _ = std::process::Command::new("cmd.exe")
         .args([
             "/C",
@@ -779,18 +845,22 @@ fn schedule_self_cleanup(install_dir: &Path) {
             "2",
             ">nul",
             "&",
-            "rmdir",
-            "/S",
+            "del",
+            "/F",
             "/Q",
         ])
+        .arg(&uninst)
+        .args([">nul", "2>&1", "&", "rmdir"])
         .arg(install_dir)
+        .args([">nul", "2>&1"])
         .creation_flags(0x0800_0000)
         .spawn();
 }
 
 #[cfg(not(windows))]
 fn schedule_self_cleanup(install_dir: &Path) {
-    let _ = fs::remove_dir_all(install_dir);
+    let _ = fs::remove_file(install_dir.join(UNINSTALL_BIN));
+    let _ = fs::remove_dir(install_dir);
 }
 
 #[cfg(test)]
@@ -983,5 +1053,57 @@ mod tests {
             io::ErrorKind::NotFound,
             "missing"
         )));
+    }
+
+    #[test]
+    fn collect_dir_skips_packaging_scripts_and_load_payload_supports_macos_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_bin = dir.path().join(APP_BIN);
+        fs::write(&app_bin, b"app-bytes").unwrap();
+        let ext = dir.path().join("extension");
+        fs::create_dir_all(&ext).unwrap();
+        fs::write(ext.join("manifest.json"), b"{}").unwrap();
+        fs::write(ext.join("package.ps1"), b"pack script").unwrap();
+        let lic = dir.path().join("LICENSE");
+        let rdm = dir.path().join("README.md");
+        fs::write(&lic, b"MIT").unwrap();
+        fs::write(&rdm, b"Readme").unwrap();
+
+        let bundle_macos = dir.path().join("LajuFile Setup.app/Contents/MacOS");
+        let bundle_res = dir.path().join("LajuFile Setup.app/Contents/Resources");
+        fs::create_dir_all(&bundle_macos).unwrap();
+        let setup_exe = bundle_macos.join("lajufile-setup");
+        fs::write(&setup_exe, b"MACH_STUB").unwrap();
+        let payload_bin = bundle_res.join("payload.bin");
+
+        let count = build_payload_file(&app_bin, &ext, &lic, &rdm, &payload_bin).unwrap();
+        assert_eq!(count, 4);
+
+        let (stub, entries) = load_install_payload(&setup_exe).unwrap();
+        assert_eq!(stub, b"MACH_STUB");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.rel_path == "extension/manifest.json")
+        );
+        assert!(!entries.iter().any(|e| e.rel_path.ends_with("package.ps1")));
+    }
+
+    #[test]
+    fn uninstall_file_cleanup_preserves_unrelated_user_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("shared-folder");
+        fs::create_dir_all(install_dir.join("extension")).unwrap();
+        fs::write(install_dir.join(APP_BIN), b"bin").unwrap();
+        fs::write(install_dir.join("extension/manifest.json"), b"{}").unwrap();
+        let user_file = install_dir.join("my-important-file.txt");
+        fs::write(&user_file, b"keep me").unwrap();
+
+        remove_installed_files(&install_dir);
+        let _ = fs::remove_dir(&install_dir);
+
+        assert!(!install_dir.join(APP_BIN).exists());
+        assert!(!install_dir.join("extension").exists());
+        assert!(user_file.exists());
     }
 }

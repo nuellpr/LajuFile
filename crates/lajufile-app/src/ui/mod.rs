@@ -283,7 +283,6 @@ pub enum Action {
     BrowseCategoryDir(String),
     VerifyChecksum(i64),
     CopyChecksum(String),
-    Remove(i64),
     ConfirmRemove(Vec<i64>, bool),
     RemoveWithFile {
         ids: Vec<i64>,

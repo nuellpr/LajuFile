@@ -185,6 +185,13 @@ pub fn selector_for_height(height: u32) -> String {
     format!("bv*[height<={height}]+ba/b[height<={height}]/bv*+ba")
 }
 
+/// Returns true when the yt-dlp format selector targets audio-only output.
+pub fn is_audio_only_selector(selector: &str) -> bool {
+    let lower = selector.to_ascii_lowercase();
+    (lower.contains("ba") || lower.contains("bestaudio"))
+        && !(lower.contains("bv") || lower.contains("bestvideo"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

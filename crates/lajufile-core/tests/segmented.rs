@@ -332,3 +332,28 @@ async fn prefix_matches_accepts_matching_and_rejects_plain_200() {
     let ignored = Url::parse(&format!("{base}/seg-ignore")).unwrap();
     assert!(!prefix_matches(&client(), &ignored, &prefix, SEG_SIZE as u64, &options).await);
 }
+
+#[tokio::test]
+async fn permanent_http_status_does_not_sleep_on_retries() {
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let spec = spec(
+        &base,
+        "/missing",
+        dir.path().join("missing.bin.lajufile"),
+        dir.path().join("missing.bin"),
+        segments(),
+        vec![Duration::from_secs(5), Duration::from_secs(5)],
+        None,
+    );
+
+    let started = std::time::Instant::now();
+    let error = download_segmented(&client(), &spec, |_, _, _| {})
+        .await
+        .unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(matches!(
+        error,
+        SegmentedError::Download(lajufile_core::download::DownloadError::Status(404))
+    ));
+}

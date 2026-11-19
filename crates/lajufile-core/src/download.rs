@@ -118,7 +118,7 @@ where
     download_single_with_limiter(client, spec, None, on_progress).await
 }
 
-fn is_retryable_single_error(err: &DownloadError) -> bool {
+pub(crate) fn is_retryable_error(err: &DownloadError) -> bool {
     match err {
         DownloadError::Request(_) | DownloadError::SizeMismatch { .. } => true,
         DownloadError::Status(status) => *status == 429 || (500..600).contains(status),
@@ -139,7 +139,7 @@ where
     for attempt in 0..=retry_delays.len() {
         match download_single_with_limiter(client, spec, limiter.clone(), &mut on_progress).await {
             Ok(outcome) => return Ok(outcome),
-            Err(err) if attempt < retry_delays.len() && is_retryable_single_error(&err) => {
+            Err(err) if attempt < retry_delays.len() && is_retryable_error(&err) => {
                 let delay = retry_delays[attempt];
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;

@@ -324,7 +324,9 @@ where
                 debug_assert_eq!(done, length);
                 return Ok(());
             }
-            Err(SegmentedError::Download(_)) if attempt < retry_delays.len() => {
+            Err(SegmentedError::Download(ref err))
+                if attempt < retry_delays.len() && crate::download::is_retryable_error(err) =>
+            {
                 let delay = retry_delays[attempt];
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;

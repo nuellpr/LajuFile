@@ -13,7 +13,6 @@ use lajufile_core::store::Category;
 pub enum IconKey {
     CatCompressed,
     CatDocuments,
-    CatImages,
     CatMusic,
     CatOther,
     CatPrograms,
@@ -49,7 +48,6 @@ fn png_bytes(key: IconKey) -> &'static [u8] {
         IconKey::CatDocuments => {
             include_bytes!("../../../../assets/file-icons/kategori/documents.png")
         }
-        IconKey::CatImages => include_bytes!("../../../../assets/file-icons/kategori/images.png"),
         IconKey::CatMusic => include_bytes!("../../../../assets/file-icons/kategori/music.png"),
         IconKey::CatOther => include_bytes!("../../../../assets/file-icons/kategori/other.png"),
         IconKey::CatPrograms => {

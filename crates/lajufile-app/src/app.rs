@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use lajufile_core::checksum::sha256_file;
 use lajufile_core::paths;
-use lajufile_core::settings::{Settings, Theme, generate_token};
+use lajufile_core::settings::{Settings, Theme, generate_token, is_valid_token};
 use lajufile_core::store::{Category, DownloadStatus};
 use lajufile_core::video::VideoListing;
 
@@ -83,6 +83,7 @@ pub struct LajuFileApp {
     pub(crate) completed_id: Option<i64>,
     pub(crate) seen_done: Option<HashSet<i64>>,
     pub(crate) seen_downloading: Option<HashSet<i64>>,
+    pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) last_clipboard: Option<String>,
     pub(crate) clipboard_initialized: bool,
     pub(crate) last_clipboard_poll: Instant,
@@ -189,6 +190,7 @@ impl LajuFileApp {
             completed_id: None,
             seen_done: None,
             seen_downloading: None,
+            clipboard: None,
             last_clipboard: None,
             clipboard_initialized: false,
             last_clipboard_poll: Instant::now(),
@@ -333,16 +335,36 @@ impl LajuFileApp {
         self.snapshot = Some(snapshot);
         match pending {
             Some(prompt) if self.dismissed_capture != Some(prompt.key) => {
-                if let Some((active_key, draft)) = &mut self.capture_info
-                    && *active_key == prompt.key
-                {
-                    if draft.size.is_none() && prompt.size.is_some() {
-                        draft.size = prompt.size;
+                let mut refreshed_cat = None;
+                if let Some((active_key, draft)) = &mut self.capture_info {
+                    if *active_key == prompt.key {
+                        if draft.size.is_none() && prompt.size.is_some() {
+                            draft.size = prompt.size;
+                        }
+                        if draft.ranged.is_none() && prompt.ranged.is_some() {
+                            draft.ranged = prompt.ranged;
+                        }
+                        if !draft.user_edited_name
+                            && !prompt.file_name.is_empty()
+                            && draft.file_name != prompt.file_name
+                        {
+                            draft.file_name = prompt.file_name.clone();
+                            draft.category = Category::from_file_name(&draft.file_name);
+                            if !draft.user_edited_folder {
+                                refreshed_cat = Some(draft.category);
+                            }
+                        }
+                    } else {
+                        self.capture_info = None;
                     }
-                    if draft.ranged.is_none() && prompt.ranged.is_some() {
-                        draft.ranged = prompt.ranged;
+                }
+                if let Some(cat) = refreshed_cat {
+                    let folder = self.default_folder_for(cat);
+                    if let Some((_, draft)) = &mut self.capture_info {
+                        draft.folder = folder.display().to_string();
                     }
-                } else if self.capture_info.is_none() {
+                }
+                if self.capture_info.is_none() {
                     let category = Category::from_file_name(&prompt.file_name);
                     let folder = self.default_folder_for(category);
                     self.show_window(ctx);
@@ -356,15 +378,16 @@ impl LajuFileApp {
                             category,
                             folder: folder.display().to_string(),
                             remember: false,
+                            user_edited_name: false,
+                            user_edited_folder: false,
                         },
                     ));
                 }
             }
             Some(_) => {}
             None => {
-                if self.capture_info.is_none() {
-                    self.dismissed_capture = None;
-                }
+                self.capture_info = None;
+                self.dismissed_capture = None;
             }
         }
     }
@@ -547,11 +570,18 @@ impl LajuFileApp {
         }
     }
 
+    fn configured_proxy(&self) -> Option<String> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.settings.proxy_url.trim().to_string())
+            .filter(|p| !p.is_empty())
+    }
+
     fn start_update_check(&mut self) {
         self.update_state = UpdateUiState::Checking;
         let (tx, rx) = mpsc::channel();
         self.update_rx = Some(rx);
-        updater::spawn_check(tx);
+        updater::spawn_check(tx, self.configured_proxy());
     }
 
     fn poll_updater(&mut self, ctx: &egui::Context) {
@@ -671,6 +701,7 @@ impl LajuFileApp {
                 None => {
                     if let Some((_, draft)) = &mut self.capture_info {
                         draft.folder = path.display().to_string();
+                        draft.user_edited_folder = true;
                     } else if self.show_batch {
                         self.batch_draft.folder = path.display().to_string();
                     } else if self.show_settings && !self.show_add && self.pending_add.is_none() {
@@ -707,9 +738,19 @@ impl LajuFileApp {
             return;
         }
         self.last_clipboard_poll = Instant::now();
-        let current = arboard::Clipboard::new()
-            .ok()
-            .and_then(|mut cb| cb.get_text().ok());
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let current = match self.clipboard.as_mut() {
+            Some(cb) => match cb.get_text() {
+                Ok(text) => Some(text),
+                Err(_) => {
+                    self.clipboard = None;
+                    None
+                }
+            },
+            None => None,
+        };
         if !self.clipboard_initialized {
             self.clipboard_initialized = true;
             self.last_clipboard = current;
@@ -889,7 +930,6 @@ impl LajuFileApp {
                     ctx.copy_text(hash);
                     self.toast = Some(("SHA-256 copied".to_string(), Instant::now()));
                 }
-                Action::Remove(id) => self.remove_download(id, false),
                 Action::ConfirmRemove(ids, delete_file) => {
                     if !ids.is_empty() {
                         self.delete_confirm = Some((ids, delete_file));
@@ -931,6 +971,7 @@ impl LajuFileApp {
                 Action::StartSelfUpdate { url, file_name } => {
                     if let UpdateUiState::Available(info) = &self.update_state {
                         let checksums_url = info.checksums_url.clone();
+                        let proxy = self.configured_proxy();
                         self.update_state = UpdateUiState::Downloading {
                             info: info.clone(),
                             downloaded: 0,
@@ -938,33 +979,15 @@ impl LajuFileApp {
                         };
                         let (tx, rx) = mpsc::channel();
                         self.update_rx = Some(rx);
-                        updater::spawn_download(url, file_name, checksums_url, tx);
+                        updater::spawn_download(url, file_name, checksums_url, proxy, tx);
                     }
                 }
                 Action::OpenProperties(id) => {
                     self.open_properties(id);
                 }
                 Action::Redownload(id) => {
-                    if let Some(download) = self
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.downloads.iter().find(|d| d.id == id))
-                        .cloned()
-                    {
-                        self.send(Command::Add(AddRequest {
-                            url: download.url,
-                            file_name: Some(download.file_name),
-                            save_dir: download.save_path.parent().map(|p| p.to_path_buf()),
-                            start_now: true,
-                            connections: Some(download.connections.max(1)),
-                            referrer: download.referrer,
-                            user_agent: download.user_agent,
-                            cookie: None,
-                            video_format: download.video_format,
-                            video_size: download.size,
-                        }));
-                        self.toast = Some(("Redownload queued".to_string(), Instant::now()));
-                    }
+                    self.send(Command::Redownload(id));
+                    self.toast = Some(("Redownload queued".to_string(), Instant::now()));
                 }
                 Action::PauseAll => self.send(Command::PauseAll),
                 Action::ResumeAll => self.send(Command::ResumeAll),
@@ -1472,7 +1495,28 @@ impl eframe::App for LajuFileApp {
         self.poll_checksum();
         self.poll_updater(ctx);
         self.update_tray_tooltip();
-        ctx.request_repaint_after(Duration::from_millis(250));
+        let has_active_downloads = self.snapshot.as_ref().is_some_and(|s| {
+            s.downloads.iter().any(|d| {
+                matches!(
+                    d.status,
+                    DownloadStatus::Downloading | DownloadStatus::Queued
+                )
+            })
+        });
+        let is_busy = has_active_downloads
+            || self.bridge_test.is_some()
+            || self.formats.is_some()
+            || self.page_links.is_some()
+            || self.checksum_rx.is_some()
+            || self.update_rx.is_some()
+            || self.capture_info.is_some()
+            || self.toast.is_some();
+        let repaint_after = if is_busy {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(1000)
+        };
+        ctx.request_repaint_after(repaint_after);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1886,12 +1930,7 @@ fn normalize_settings(settings: &mut Settings) {
     settings.ui_scale_pct = settings.ui_scale_pct.clamp(80, 150);
     settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
     settings.proxy_url = settings.proxy_url.trim().to_string();
-    if settings.bridge_token.len() != 64
-        || !settings
-            .bridge_token
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !is_valid_token(&settings.bridge_token) {
         settings.bridge_token = generate_token();
     }
 }

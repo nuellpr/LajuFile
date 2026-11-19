@@ -12,7 +12,13 @@ const MAX_CACHE_ENTRIES = 512;
 const handledIds = new Set();
 const bypassUrls = new Map();
 let healthCache = { port: null, ok: false, at: 0 };
-let rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
+let rulesCache = {
+  port: null,
+  token: "",
+  excludedDomains: "",
+  capturedExtensions: "",
+  at: 0,
+};
 
 function markBypass(url) {
   if (!url) return;
@@ -213,14 +219,17 @@ function detectExtension(item, url) {
 }
 
 async function fetchBridgeExcludedDomains(config) {
-  if (!config.token) return "";
+  if (!config.token) return { excludedDomains: "", capturedExtensions: "" };
   const now = Date.now();
   if (
     rulesCache.port === config.port &&
     rulesCache.token === config.token &&
     now - rulesCache.at < RULES_TTL_MS
   ) {
-    return rulesCache.excludedDomains;
+    return {
+      excludedDomains: rulesCache.excludedDomains,
+      capturedExtensions: rulesCache.capturedExtensions,
+    };
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1200);
@@ -230,7 +239,7 @@ async function fetchBridgeExcludedDomains(config) {
       signal: controller.signal,
       cache: "no-store",
     });
-    if (!response.ok) return "";
+    if (!response.ok) return { excludedDomains: "", capturedExtensions: "" };
     const body = await response.json();
     const excludedDomains = String((body && body.excluded_domains) || "");
     const capturedExtensions = String((body && body.captured_extensions) || "");
@@ -238,6 +247,7 @@ async function fetchBridgeExcludedDomains(config) {
       port: config.port,
       token: config.token,
       excludedDomains,
+      capturedExtensions,
       at: Date.now(),
     };
     chrome.storage.local
@@ -246,16 +256,20 @@ async function fetchBridgeExcludedDomains(config) {
         remoteCapturedExtensions: capturedExtensions,
       })
       .catch(() => { });
-    return excludedDomains;
+    return { excludedDomains, capturedExtensions };
   } catch {
-    return "";
+    return { excludedDomains: "", capturedExtensions: "" };
   } finally {
     clearTimeout(timer);
   }
 }
 
-function autoCaptureSkipReason(item, url, config, remoteExcluded) {
-  const combinedExcluded = `${config.excludedDomains || ""}\n${remoteExcluded || ""}`;
+function autoCaptureSkipReason(item, url, config, remoteRules) {
+  const remoteExcluded =
+    typeof remoteRules === "string"
+      ? remoteRules
+      : String((remoteRules && remoteRules.excludedDomains) || "");
+  const combinedExcluded = `${config.excludedDomains || ""}\n${remoteExcluded}`;
   const downloadHost = urlHost(url);
   const referrerHost = urlHost(item && item.referrer);
   if (
@@ -264,7 +278,14 @@ function autoCaptureSkipReason(item, url, config, remoteExcluded) {
   ) {
     return "excluded-domain";
   }
-  const extRules = parseRuleTokens(config.fileTypes).map((t) => t.replace(/^\./, "")).filter(Boolean);
+  const remoteCapturedExtensions =
+    remoteRules && typeof remoteRules === "object"
+      ? String(remoteRules.capturedExtensions || "")
+      : "";
+  const rawExtensions = String(config.fileTypes || "").trim()
+    ? config.fileTypes
+    : remoteCapturedExtensions;
+  const extRules = parseRuleTokens(rawExtensions).map((t) => t.replace(/^\./, "")).filter(Boolean);
   if (extRules.length > 0 && !extRules.includes("*")) {
     const ext = detectExtension(item, url);
     if (!ext || !extRules.includes(ext)) {
@@ -291,8 +312,8 @@ async function capture(item, allowBrowserFallback) {
     if (isBypassed(url)) {
       return { status: 0, skipped: true, reason: "alt-bypass" };
     }
-    const remoteExcluded = await fetchBridgeExcludedDomains(config);
-    const reason = autoCaptureSkipReason(item, url, config, remoteExcluded);
+    const remoteRules = await fetchBridgeExcludedDomains(config);
+    const reason = autoCaptureSkipReason(item, url, config, remoteRules);
     if (reason) {
       return { status: 0, skipped: true, reason };
     }
@@ -410,7 +431,8 @@ if (chrome.downloads.onDeterminingFilename) {
 chrome.downloads.onCreated.addListener((item) => {
   if (handledIds.has(item.id) || !isLiveDownload(item)) return;
   const id = item.id;
-  setTimeout(async () => {
+  const hasDeterminingFilename = Boolean(chrome.downloads.onDeterminingFilename);
+  const processCreated = async () => {
     if (handledIds.has(id)) return;
     const [current] = await chrome.downloads.search({ id }).catch(() => []);
     if (!current || current.state !== "in_progress") return;
@@ -424,7 +446,14 @@ chrome.downloads.onCreated.addListener((item) => {
     } else {
       await resumeItem(id);
     }
-  }, 1500);
+  };
+  if (hasDeterminingFilename) {
+    setTimeout(() => {
+      processCreated().catch(() => {});
+    }, 1500);
+  } else {
+    processCreated().catch(() => {});
+  }
 });
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -547,7 +576,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "config-updated") {
     if (!ownPage) return false;
     healthCache = { port: null, ok: false, at: 0 };
-    rulesCache = { port: null, token: "", excludedDomains: "", at: 0 };
+    rulesCache = {
+      port: null,
+      token: "",
+      excludedDomains: "",
+      capturedExtensions: "",
+      at: 0,
+    };
     getConfig()
       .then((config) => fetchBridgeExcludedDomains(config))
       .catch(() => { });

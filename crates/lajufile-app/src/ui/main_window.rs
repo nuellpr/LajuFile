@@ -10,6 +10,7 @@ use lajufile_core::settings::Theme;
 use lajufile_core::store::{Category, Download, DownloadStatus, now_millis};
 use url::Url;
 
+use super::dialogs::lerp_color;
 use super::{Action, Filter, SortOrder, format::*, matches_search};
 use crate::app::LajuFileApp;
 use crate::bridge::BridgeState;
@@ -1712,16 +1713,6 @@ fn paint_arc(
         })
         .collect();
     painter.line(points, stroke);
-}
-
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    Color32::from_rgba_unmultiplied(
-        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t).round() as u8,
-        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t).round() as u8,
-        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t).round() as u8,
-        (a.a() as f32 + (b.a() as f32 - a.a() as f32) * t).round() as u8,
-    )
 }
 
 fn paint_gradient_fill(painter: &egui::Painter, rect: Rect, stops: &[Color32; 3]) {

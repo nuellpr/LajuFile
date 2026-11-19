@@ -63,6 +63,17 @@ impl Category {
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Video => "Video",
+            Self::Music => "Music",
+            Self::Documents => "Documents",
+            Self::Programs => "Programs",
+            Self::Compressed => "Compressed",
+            Self::Other => "Other",
+        }
+    }
+
     pub fn from_db(value: &str) -> Result<Self, StoreError> {
         match value {
             "video" => Ok(Self::Video),
@@ -88,8 +99,9 @@ impl Category {
             "mp3" | "flac" | "wav" | "aac" | "ogg" | "m4a" | "wma" | "opus" => Self::Music,
             "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "rtf" | "csv"
             | "epub" | "md" => Self::Documents,
-            "exe" | "msi" | "msix" | "appx" | "dll" | "bat" | "cmd" | "ps1" => Self::Programs,
-            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" => Self::Compressed,
+            "exe" | "msi" | "msix" | "appx" | "dll" | "bat" | "cmd" | "ps1" | "dmg" | "deb"
+            | "rpm" | "apk" | "appimage" => Self::Programs,
+            "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" => Self::Compressed,
             _ => Self::Other,
         }
     }

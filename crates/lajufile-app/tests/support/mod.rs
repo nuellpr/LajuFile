@@ -93,6 +93,7 @@ fn app(state: ServerState) -> Router {
         .route("/slow-seg.bin", get(slow_seg))
         .route("/slow-probe.bin", get(slow_probe))
         .route("/auth.bin", get(auth_bin))
+        .route("/chunked.bin", get(chunked_bin))
         .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
         .with_state(state)
 }
@@ -128,6 +129,20 @@ async fn auth_bin(headers: HeaderMap) -> Response {
             .unwrap();
     }
     let mut response = Response::new(Body::from(b"LajuFile".repeat(1024 * 128)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+}
+
+async fn chunked_bin() -> Response {
+    let chunk = Bytes::from(b"LajuFile".repeat(1024));
+    let stream = tokio_stream::iter([
+        Ok::<Bytes, std::io::Error>(chunk.clone()),
+        Ok::<Bytes, std::io::Error>(chunk),
+    ]);
+    let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),

@@ -101,17 +101,60 @@ pub fn validate_update_download_url(raw: &str) -> Result<Url, String> {
 }
 
 pub fn select_asset_for_platform(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
-    let matches = |asset: &ReleaseAsset| -> bool {
-        let lower = asset.name.to_ascii_lowercase();
-        if cfg!(windows) {
-            lower.contains("windows") && lower.ends_with(".exe")
-        } else if cfg!(target_os = "macos") {
-            lower.contains("macos") && lower.ends_with(".dmg")
-        } else {
-            lower.contains("linux") && lower.ends_with(".run")
+    select_asset_for_target(assets, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+pub fn select_asset_for_target<'a>(
+    assets: &'a [ReleaseAsset],
+    os: &str,
+    arch: &str,
+) -> Option<&'a ReleaseAsset> {
+    let arch_tokens: &[&str] = match arch {
+        "x86_64" => &["-x64-", "x86_64", "amd64"],
+        "aarch64" => &["-arm64-", "aarch64", "arm64"],
+        "x86" => &["-x86-", "i686"],
+        other => {
+            return assets
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().contains(other));
         }
     };
-    assets.iter().find(|a| matches(a))
+    let os_matches = |asset: &ReleaseAsset| -> bool {
+        let lower = asset.name.to_ascii_lowercase();
+        match os {
+            "windows" => lower.contains("windows") && lower.ends_with(".exe"),
+            "macos" => lower.contains("macos") && lower.ends_with(".dmg"),
+            _ => lower.contains("linux") && lower.ends_with(".run"),
+        }
+    };
+
+    let exact = assets.iter().find(|a| {
+        os_matches(a) && {
+            let lower = a.name.to_ascii_lowercase();
+            arch_tokens.iter().any(|token| lower.contains(token))
+        }
+    });
+    if exact.is_some() {
+        return exact;
+    }
+
+    if os == "macos"
+        && let Some(universal) = assets
+            .iter()
+            .find(|a| os_matches(a) && a.name.to_ascii_lowercase().contains("universal"))
+    {
+        return Some(universal);
+    }
+
+    const ALL_ARCH_TAGS: &[&str] = &[
+        "-x64-", "x86_64", "amd64", "-arm64-", "aarch64", "arm64", "-x86-", "i686",
+    ];
+    assets.iter().find(|a| {
+        os_matches(a) && {
+            let lower = a.name.to_ascii_lowercase();
+            !ALL_ARCH_TAGS.iter().any(|tag| lower.contains(tag))
+        }
+    })
 }
 
 pub fn select_checksums_asset(assets: &[ReleaseAsset]) -> Option<&ReleaseAsset> {
@@ -155,8 +198,11 @@ pub fn verify_downloaded_installer(path: &Path, expected_sha256: &str) -> Result
     Ok(())
 }
 
-fn build_update_client(total_timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+fn build_update_client(
+    total_timeout: Duration,
+    proxy_url: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(total_timeout)
         .user_agent(concat!("LajuFile/", env!("CARGO_PKG_VERSION")))
@@ -171,12 +217,17 @@ fn build_update_client(total_timeout: Duration) -> Result<reqwest::Client, Strin
                 ));
             }
             attempt.follow()
-        }))
+        }));
+    if let Some(proxy) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = reqwest::Proxy::all(proxy).map_err(|e| format!("Invalid proxy URL: {e}"))?;
+        builder = builder.proxy(parsed);
+    }
+    builder
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))
 }
 
-pub fn spawn_check(tx: mpsc::Sender<UpdateEvent>) {
+pub fn spawn_check(tx: mpsc::Sender<UpdateEvent>, proxy_url: Option<String>) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -188,14 +239,14 @@ pub fn spawn_check(tx: mpsc::Sender<UpdateEvent>) {
                 return;
             }
         };
-        let res = rt.block_on(fetch_latest_release());
+        let res = rt.block_on(fetch_latest_release(proxy_url.as_deref()));
         let _ = tx.send(UpdateEvent::Checked(res));
     });
 }
 
-async fn fetch_latest_release() -> Result<UpdateCheck, String> {
+async fn fetch_latest_release(proxy_url: Option<&str>) -> Result<UpdateCheck, String> {
     let url = validate_update_download_url(GITHUB_LATEST_API)?;
-    let client = build_update_client(Duration::from_secs(20))?;
+    let client = build_update_client(Duration::from_secs(20), proxy_url)?;
     let resp = client
         .get(url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
@@ -253,6 +304,7 @@ pub fn spawn_download(
     asset_url: String,
     asset_name: String,
     checksums_url: Option<String>,
+    proxy_url: Option<String>,
     tx: mpsc::Sender<UpdateEvent>,
 ) {
     std::thread::spawn(move || {
@@ -270,15 +322,20 @@ pub fn spawn_download(
             &asset_url,
             &asset_name,
             checksums_url.as_deref(),
+            proxy_url.as_deref(),
             &tx,
         ));
         let _ = tx.send(UpdateEvent::ReadyToApply(res));
     });
 }
 
-async fn fetch_expected_sha256(checksums_url: &str, asset_name: &str) -> Result<String, String> {
+async fn fetch_expected_sha256(
+    checksums_url: &str,
+    asset_name: &str,
+    proxy_url: Option<&str>,
+) -> Result<String, String> {
     let url = validate_update_download_url(checksums_url)?;
-    let client = build_update_client(Duration::from_secs(20))?;
+    let client = build_update_client(Duration::from_secs(20), proxy_url)?;
     let resp = client
         .get(url)
         .send()
@@ -303,6 +360,7 @@ async fn download_installer(
     asset_url: &str,
     asset_name: &str,
     checksums_url: Option<&str>,
+    proxy_url: Option<&str>,
     tx: &mpsc::Sender<UpdateEvent>,
 ) -> Result<PathBuf, String> {
     let manifest_url = checksums_url
@@ -312,13 +370,16 @@ async fn download_installer(
             "Release is missing SHA256SUMS.txt verification manifest — download manually from GitHub Releases"
                 .to_string()
         })?;
-    let expected_sha256 = fetch_expected_sha256(manifest_url, asset_name).await?;
+    let expected_sha256 = fetch_expected_sha256(manifest_url, asset_name, proxy_url).await?;
     let url = validate_update_download_url(asset_url)?;
     let safe_name = lajufile_core::naming::sanitize_file_name(asset_name);
-    let target = std::env::temp_dir().join(format!("lajufile-update-{safe_name}"));
-    let part = std::env::temp_dir().join(format!("lajufile-update-{safe_name}.part"));
+    let update_dir = lajufile_core::paths::data_dir().join("updates");
+    lajufile_core::paths::ensure_private_dir(&update_dir)
+        .map_err(|e| format!("Update directory error: {e}"))?;
+    let target = update_dir.join(format!("lajufile-update-{safe_name}"));
+    let part = update_dir.join(format!("lajufile-update-{safe_name}.part"));
 
-    let client = build_update_client(Duration::from_secs(600))?;
+    let client = build_update_client(Duration::from_secs(600), proxy_url)?;
     let mut resp = client
         .get(url)
         .send()
@@ -447,19 +508,43 @@ mod tests {
                 size: Some(100),
             },
             ReleaseAsset {
+                name: "LajuFile-v1.0.1-linux-arm64-setup.run".into(),
+                browser_download_url: "https://github.com/x-arm64.run".into(),
+                size: Some(100),
+            },
+            ReleaseAsset {
+                name: "LajuFile-v1.0.1-macos-x64-setup.dmg".into(),
+                browser_download_url: "https://github.com/x-x64.dmg".into(),
+                size: Some(100),
+            },
+            ReleaseAsset {
                 name: "LajuFile-v1.0.1-macos-arm64-setup.dmg".into(),
-                browser_download_url: "https://github.com/x.dmg".into(),
+                browser_download_url: "https://github.com/x-arm64.dmg".into(),
                 size: Some(100),
             },
         ];
-        let picked = select_asset_for_platform(&assets).expect("matching asset");
-        if cfg!(windows) {
-            assert!(picked.name.ends_with(".exe"));
-        } else if cfg!(target_os = "macos") {
-            assert!(picked.name.ends_with(".dmg"));
-        } else {
-            assert!(picked.name.ends_with(".run"));
+        if let Some(picked) = select_asset_for_platform(&assets) {
+            if cfg!(windows) {
+                assert!(picked.name.ends_with(".exe"));
+            } else if cfg!(target_os = "macos") {
+                assert!(picked.name.ends_with(".dmg"));
+            } else {
+                assert!(picked.name.ends_with(".run"));
+            }
         }
+        assert_eq!(
+            select_asset_for_target(&assets, "macos", "aarch64").map(|a| a.name.as_str()),
+            Some("LajuFile-v1.0.1-macos-arm64-setup.dmg")
+        );
+        assert_eq!(
+            select_asset_for_target(&assets, "macos", "x86_64").map(|a| a.name.as_str()),
+            Some("LajuFile-v1.0.1-macos-x64-setup.dmg")
+        );
+        assert_eq!(
+            select_asset_for_target(&assets, "linux", "aarch64").map(|a| a.name.as_str()),
+            Some("LajuFile-v1.0.1-linux-arm64-setup.run")
+        );
+        assert!(select_asset_for_target(&assets, "windows", "aarch64").is_none());
     }
 
     #[test]
@@ -551,6 +636,7 @@ cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  other.dmg
                 info.asset_url.as_deref().unwrap(),
                 info.asset_name.as_deref().unwrap(),
                 info.checksums_url.as_deref(),
+                None,
                 &tx,
             ))
             .unwrap_err();

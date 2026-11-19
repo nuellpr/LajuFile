@@ -30,6 +30,17 @@ pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
+/// Create `path` and restrict permissions on Unix so only the owner can access secrets/state.
+pub fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 pub fn settings_path(data_dir: &Path) -> PathBuf {
     data_dir.join("settings.json")
 }

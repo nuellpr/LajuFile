@@ -2,8 +2,10 @@
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+#[cfg(any(windows, unix, test))]
+use std::path::Path;
 #[cfg(any(windows, test))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use lajufile_core::paths;
@@ -13,6 +15,8 @@ use lajufile_core::settings::Settings;
 pub struct SingleInstanceGuard {
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(not(windows))]
+    _lock_file: Option<std::fs::File>,
 }
 
 impl SingleInstanceGuard {
@@ -38,14 +42,88 @@ impl SingleInstanceGuard {
         }
         #[cfg(not(windows))]
         {
+            #[cfg(unix)]
+            {
+                let dir = paths::data_dir();
+                if paths::ensure_private_dir(&dir).is_ok() {
+                    match acquire_unix_lock(&dir.join(".lajufile.lock")) {
+                        Ok(file) => {
+                            return Some(Self {
+                                _lock_file: Some(file),
+                            });
+                        }
+                        Err(true) => {
+                            if let Some(settings) = load_existing_settings() {
+                                let _ = probe_wake(&settings);
+                            }
+                            return None;
+                        }
+                        Err(false) => {}
+                    }
+                }
+            }
             if let Some(settings) = load_existing_settings()
                 && probe_wake(&settings)
             {
                 return None;
             }
-            Some(Self {})
+            Some(Self { _lock_file: None })
         }
     }
+}
+
+#[cfg(unix)]
+fn acquire_unix_lock(path: &Path) -> Result<std::fs::File, bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    unsafe extern "C" {
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+    const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| false)?;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX_NB) } == 0 {
+        return Ok(file);
+    }
+    let err = std::io::Error::last_os_error();
+    let contended =
+        err.kind() == std::io::ErrorKind::WouldBlock || matches!(err.raw_os_error(), Some(11 | 35));
+    Err(contended)
+}
+
+#[cfg(unix)]
+fn acquire_unix_lock(path: &Path) -> Result<std::fs::File, bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    unsafe extern "C" {
+        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+    const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| false)?;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX_NB) } == 0 {
+        return Ok(file);
+    }
+    let err = std::io::Error::last_os_error();
+    let contended =
+        err.kind() == std::io::ErrorKind::WouldBlock || matches!(err.raw_os_error(), Some(11 | 35));
+    Err(contended)
 }
 
 #[cfg(windows)]
@@ -184,7 +262,51 @@ fn set_prevent_sleep_os(prevent: bool) {
         SetThreadExecutionState(flags);
     }
     #[cfg(not(windows))]
-    let _ = prevent;
+    {
+        use std::process::{Child, Command, Stdio};
+        use std::sync::Mutex;
+
+        static SLEEP_INHIBITOR: Mutex<Option<Child>> = Mutex::new(None);
+        let Ok(mut guard) = SLEEP_INHIBITOR.lock() else {
+            return;
+        };
+        if prevent {
+            if let Some(child) = guard.as_mut()
+                && child.try_wait().ok().flatten().is_none()
+            {
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            let spawned = Command::new("caffeinate")
+                .args(["-i", "-s", "-w", &std::process::id().to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+            #[cfg(not(target_os = "macos"))]
+            let spawned = Command::new("systemd-inhibit")
+                .args([
+                    "--what=idle:sleep",
+                    "--who=LajuFile",
+                    "--why=Downloading files",
+                    "--mode=block",
+                    "sh",
+                    "-c",
+                    "read _",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+            *guard = spawned;
+        } else if let Some(mut child) = guard.take() {
+            drop(child.stdin.take());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Tracks system sleep inhibition state cleanly and releases it when idle or dropped.
@@ -323,5 +445,16 @@ mod tests {
             &roots
         ));
         assert!(!is_protected_windows_cwd(Path::new(r"D:\LajuFile"), &roots));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_flock_blocks_second_holder_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(".lajufile.lock");
+        let first = acquire_unix_lock(&lock_path).expect("first lock should succeed");
+        assert!(acquire_unix_lock(&lock_path).unwrap_err());
+        drop(first);
+        assert!(acquire_unix_lock(&lock_path).is_ok());
     }
 }

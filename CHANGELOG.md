@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.0.7
+
+### Keamanan & Integritas
+- Memperketat proteksi SSRF pada Web Page Grabber menggunakan `RedirectPolicy::none()`, validasi DNS publik di setiap redirect (maks. 5 hop), dan IP pinning melalui `resolve_to_addrs`.
+- Mengganti unduhan alat video berbasis subproses `curl` menjadi `reqwest` HTTPS-only (memblokir downgrade ke HTTP pada redirect), mendukung proxy aplikasi, membersihkan temp file secara RAII, dan mewajibkan verifikasi **SHA-256** di semua OS termasuk `ffmpeg` macOS (`ffmpeg.martin-riedl.de`).
+- Membatasi izin direktori data di Unix (`0o700`), penulisan atomik `settings.json` berizin `0o600`, dan pembuatan `.cookie.key` secara atomik (`create_new`, `0o600`) tanpa menimpa kunci lama saat gagal baca/korup.
+- Menjadikan auto-updater sadar arsitektur CPU (`x64` vs `arm64`), mendukung proxy pengaturan, dan menempatkan staging installer di direktori privat `data_dir/updates`.
+- Memperbaiki uninstaller agar non-rekursif (tidak menghapus berkas pengguna lain di folder instalasi bersama) dan memperbaiki resolusi root bundle macOS (`infer_uninstall_dir`).
+
+### Mesin Unduhan, Video & Platform
+- Memperbaiki *infinite loop* saat deduplikasi nama file panjang (~180 karakter) atau direktori dalam dengan menyisipkan sufiks ` ({n})` sebelum pemotongan `stem`, serta membatasi percobaan `reserve_download_paths`.
+- Menghindari retry-sleep pada error HTTP/disk permanen (mis. 404/403) pada unduhan tersegmentasi dan memastikan ukuran akhir unduhan *chunked* tersimpan ke database.
+- Mengaktifkan routing **Category Folders** untuk unduhan default (termasuk ekstensi baru `.dmg`, `.deb`, `.rpm`, `.apk`, `.appimage`, `.tgz`), pengecekan duplikat di `insert_video`, serta `Command::Redownload` yang mempertahankan cookie terenkripsi.
+- Meneruskan `--proxy`, `--limit-rate`, escaping `%%` pada template `-o`, dan pemisah `--` ke `yt-dlp`; menunggu thread `stdout`/`stderr` sebelum membaca pesan error, memverifikasi/mendeteksi ekstensi hasil akhir video, serta menjaga file `.part`/`.ytdl` saat Pause/Shutdown.
+- Mengemas payload macOS ke sidecar `Contents/Resources/payload.bin` (`--payload-only`) agar tidak bentrok dengan `codesign`, melewati `package.ps1` saat packing, dan menambahkan single-instance `flock` serta anti-sleep (`caffeinate` / `systemd-inhibit`) untuk Unix.
+
+### UI, Efisiensi, Ekstensi & Metadata
+- Mengurangi penggunaan CPU saat idle (`recv_timeout(500ms)` di engine, repaint UI adaptif `1000ms`, reuse handle `Clipboard`, dan cache drive `roots()` di Folder Picker).
+- Menyinkronkan nama file hasil probe `Content-Disposition` ke dialog *Download File Info* (bila belum diedit pengguna) dan menutup dialog stale bila request ekstensi timeout, serta merapikan badge bahasa *Built-in*/*RTL*, reset kualitas YouTube saat URL diubah, dan batas 512 KiB impor `.txt` Batch.
+- Ekstensi browser kini membaca `remoteCapturedExtensions` dari `/rules` bila filter ekstensi lokal kosong, menangkap unduhan Firefox langsung tanpa delay 1,5 detik pada `onCreated`, merapikan menu YouTube agar responsif, serta memperbarui `README.md` dan `rust-toolchain.toml`.
+
 ## v1.0.6
 
 ### Perbaikan

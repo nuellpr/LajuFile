@@ -85,24 +85,52 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
 
     use super::{CookieError, open_with_key, seal_with_key};
     use crate::paths;
 
     fn user_key() -> Result<[u8; 32], CookieError> {
         let dir = paths::data_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| CookieError::Dpapi(e.to_string()))?;
+        paths::ensure_private_dir(&dir).map_err(|e| CookieError::Dpapi(e.to_string()))?;
         let key_path = dir.join(".cookie.key");
-        if let Ok(bytes) = std::fs::read(&key_path)
-            && let Ok(key) = <[u8; 32]>::try_from(bytes.as_slice())
-        {
-            return Ok(key);
+        match std::fs::read(&key_path) {
+            Ok(bytes) => {
+                return <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                    CookieError::Dpapi(format!(
+                        "invalid cookie key length in {} (expected 32 bytes)",
+                        key_path.display()
+                    ))
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CookieError::Dpapi(e.to_string())),
         }
+
         let key = rand::random::<[u8; 32]>();
-        std::fs::write(&key_path, key).map_err(|e| CookieError::Dpapi(e.to_string()))?;
-        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
-        Ok(key)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        match opts.open(&key_path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&key).and_then(|()| file.sync_all()) {
+                    let _ = std::fs::remove_file(&key_path);
+                    return Err(CookieError::Dpapi(e.to_string()));
+                }
+                Ok(key)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let bytes =
+                    std::fs::read(&key_path).map_err(|err| CookieError::Dpapi(err.to_string()))?;
+                <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                    CookieError::Dpapi(format!(
+                        "invalid cookie key length in {} (expected 32 bytes)",
+                        key_path.display()
+                    ))
+                })
+            }
+            Err(e) => Err(CookieError::Dpapi(e.to_string())),
+        }
     }
 
     pub fn protect(cookie: &str) -> Result<Vec<u8>, CookieError> {

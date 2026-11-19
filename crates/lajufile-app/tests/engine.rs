@@ -1444,3 +1444,141 @@ fn wake_window_invokes_callback_and_updates_wake_seq() {
     assert!(wakes.load(Ordering::SeqCst) >= 1);
     handle.shutdown();
 }
+
+#[test]
+fn category_dirs_routes_default_downloads_by_category() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let archives_dir = dir.path().join("archives");
+    let mut settings = test_settings(dir.path());
+    settings
+        .category_dirs
+        .insert("Compressed".to_string(), archives_dir.clone());
+
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("bundle.zip".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+        }))
+        .unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(done.downloads[0].category, Category::Compressed);
+    assert_eq!(
+        done.downloads[0].save_path.parent(),
+        Some(archives_dir.as_path())
+    );
+    assert!(done.downloads[0].save_path.is_file());
+    handle.shutdown();
+}
+
+#[test]
+fn chunked_download_persists_final_byte_size() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/chunked.bin", server.base),
+            file_name: Some("stream.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+        }))
+        .unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(done.downloads[0].size, Some(16_384));
+    assert_eq!(done.downloads[0].downloaded, 16_384);
+    handle.shutdown();
+}
+
+#[test]
+fn redownload_preserves_encrypted_cookie_and_headers() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/auth.bin", server.base),
+            file_name: Some("secret.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: Some("https://example.test/page".to_string()),
+            user_agent: Some("LajuFileTest/1.0".to_string()),
+            cookie: Some("session=abc".to_string()),
+            video_format: None,
+            video_size: None,
+        }))
+        .unwrap();
+
+    let first = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    let first_id = first.downloads[0].id;
+
+    handle.send(Command::Redownload(first_id)).unwrap();
+    let second = wait_for(
+        &handle,
+        |s| s.downloads.len() == 2 && s.downloads.iter().all(|d| d.status == DownloadStatus::Done),
+        Duration::from_secs(15),
+    );
+    assert_eq!(second.downloads.len(), 2);
+    assert_ne!(second.downloads[0].save_path, second.downloads[1].save_path);
+    handle.shutdown();
+}

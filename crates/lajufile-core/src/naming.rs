@@ -123,18 +123,40 @@ pub fn dedupe_path(dir: &Path, file_name: &str) -> PathBuf {
 
     let (stem, ext) = split_name(&name);
     for n in 1..=9999u32 {
-        let numbered = format!("{stem} ({n}){ext}");
-        let candidate = dir.join(truncate_file_name(&numbered, max_name));
+        let suffix = format!(" ({n})");
+        let candidate = dir.join(build_numbered_name(stem, ext, &suffix, max_name));
         if !candidate.exists() && !temp_path_for(&candidate).exists() {
             return candidate;
         }
     }
 
     // Exhausting 9999 suffixes in a real download folder is not realistic.
-    dir.join(truncate_file_name(
-        &format!("{stem} (9999{}){ext}", std::process::id()),
-        max_name,
-    ))
+    let fallback = format!(" (9999{})", std::process::id());
+    dir.join(build_numbered_name(stem, ext, &fallback, max_name))
+}
+
+fn build_numbered_name(stem: &str, ext: &str, suffix: &str, max_name: usize) -> String {
+    let ext_chars = ext.chars().count();
+    let suffix_chars = suffix.chars().count();
+    let (base, kept_ext) = if !ext.is_empty()
+        && ext_chars <= MAX_EXTENSION_CHARS
+        && ext_chars + suffix_chars <= max_name
+    {
+        (stem.to_string(), ext)
+    } else {
+        (format!("{stem}{ext}"), "")
+    };
+    let kept_ext_chars = kept_ext.chars().count();
+    if suffix_chars + kept_ext_chars <= max_name {
+        let base_budget = max_name - suffix_chars - kept_ext_chars;
+        let truncated_base: String = base.chars().take(base_budget).collect();
+        return format!("{truncated_base}{suffix}{kept_ext}");
+    }
+    let digits: String = suffix.chars().filter(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        return digits.chars().take(max_name).collect();
+    }
+    suffix.chars().take(max_name).collect()
 }
 
 pub fn temp_path_for(final_path: &Path) -> PathBuf {

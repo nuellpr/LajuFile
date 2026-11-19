@@ -20,12 +20,12 @@ use lajufile_core::paths::ensure_dir;
 use lajufile_core::probe::{ProbeError, ProbeRequest, ProbeResult, probe};
 use lajufile_core::segment::plan_segments;
 use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented};
-use lajufile_core::settings::{DuplicatePolicy, Settings, generate_token};
+use lajufile_core::settings::{DuplicatePolicy, Settings, generate_token, is_valid_token};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Segment, Store, StoreError, now_millis,
 };
-use lajufile_core::video::{self, DEFAULT_SELECTOR, VideoListing};
+use lajufile_core::video::{self, DEFAULT_SELECTOR, VideoListing, is_audio_only_selector};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -143,6 +143,7 @@ pub enum Command {
     },
     Pause(i64),
     Resume(i64),
+    Redownload(i64),
     UpdateUrlAndResume {
         id: i64,
         url: String,
@@ -307,8 +308,8 @@ fn validate_public_page_url(url: &Url) -> Result<(), String> {
 /// Reserves a deduplicated save path and empty `.lajufile` sentinel so queued rows
 /// cannot collide before download writes begin.
 fn reserve_download_paths(dir: &Path, base_name: &str) -> Result<(PathBuf, PathBuf), String> {
-    let mut final_path = dedupe_path(dir, base_name);
-    loop {
+    for _ in 0..128 {
+        let final_path = dedupe_path(dir, base_name);
         let candidate = temp_path_for(&final_path);
         match std::fs::OpenOptions::new()
             .write(true)
@@ -316,16 +317,11 @@ fn reserve_download_paths(dir: &Path, base_name: &str) -> Result<(PathBuf, PathB
             .open(&candidate)
         {
             Ok(_) => return Ok((final_path, candidate)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                final_path = dedupe_path(dir, base_name);
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.to_string()),
         }
     }
-}
-
-fn valid_bridge_token(token: &str) -> bool {
-    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    Err("Could not reserve a unique download filename".to_string())
 }
 
 enum Event {
@@ -385,6 +381,8 @@ struct VideoRun {
     child: std::process::Child,
     save_path: PathBuf,
     last_error: Arc<Mutex<String>>,
+    stdout_join: Option<JoinHandle<()>>,
+    stderr_join: Option<JoinHandle<()>>,
     // Dropped automatically when the yt-dlp process exits, stops, or is aborted.
     _cookie_file: Option<TempCookieFile>,
 }
@@ -435,6 +433,7 @@ struct EngineState {
     message: Option<String>,
     pending_captures: BTreeMap<u64, PendingCapture>,
     next_capture_key: u64,
+    in_flight_probes: usize,
     wake_seq: u64,
     immediate_publish: bool,
     wake_callback: Arc<RwLock<Option<WakeCallback>>>,
@@ -567,7 +566,7 @@ fn engine_loop(
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
-    if !valid_bridge_token(&settings.bridge_token) {
+    if !is_valid_token(&settings.bridge_token) {
         settings.bridge_token = generate_token();
         let _ = settings.save(&config.data_dir);
     }
@@ -604,6 +603,7 @@ fn engine_loop(
         message: startup_message.take(),
         pending_captures: BTreeMap::new(),
         next_capture_key: 0,
+        in_flight_probes: 0,
         wake_seq: 0,
         immediate_publish: false,
         wake_callback,
@@ -637,17 +637,54 @@ fn engine_loop(
             state.dirty = true;
         }
 
+        let captures_before = state.pending_captures.len();
+        state
+            .pending_captures
+            .retain(|_, pending| !pending.reply.is_closed());
+        if state.pending_captures.len() != captures_before {
+            state.dirty = true;
+        }
+
+        if !state.speeds.is_empty() && state.decay_stalled_speeds() {
+            state.dirty = true;
+        }
+
         if state.immediate_publish
             || (state.dirty && last_publish.elapsed() >= Duration::from_millis(250))
         {
-            state.decay_stalled_speeds();
             state.publish();
             state.immediate_publish = false;
             state.dirty = false;
             last_publish = Instant::now();
         }
 
-        thread::sleep(Duration::from_millis(25));
+        let wait_timeout = if !state.active.is_empty()
+            || state.in_flight_probes > 0
+            || !state.pending_captures.is_empty()
+            || state.dirty
+        {
+            Duration::from_millis(25)
+        } else {
+            Duration::from_millis(500)
+        };
+        match commands.recv_timeout(wait_timeout) {
+            Ok(command) => {
+                let mutates = !matches!(command, Command::GetRules { .. });
+                if state.handle_command(command) {
+                    state.publish();
+                    return;
+                }
+                if mutates {
+                    state.dirty = true;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                state.shutdown();
+                state.publish();
+                return;
+            }
+        }
     }
 }
 
@@ -689,6 +726,7 @@ impl EngineState {
             }
             Command::Pause(id) => self.pause(id),
             Command::Resume(id) => self.resume(id),
+            Command::Redownload(id) => self.redownload(id),
             Command::UpdateUrlAndResume { id, url } => self.update_url_and_resume(id, url),
             Command::MoveRename { id, file_name, dir } => self.move_rename(id, file_name, dir),
             Command::Remove(id) => self.remove(id, false),
@@ -814,6 +852,7 @@ impl EngineState {
         };
         let client = self.client.clone();
         let events = self.events.clone();
+        self.in_flight_probes += 1;
         self.runtime.spawn(async move {
             let result = probe(&client, &probe_request).await;
             let _ = events.send(Event::Probe {
@@ -916,6 +955,7 @@ impl EngineState {
                 };
                 let client = self.client.clone();
                 let events = self.events.clone();
+                self.in_flight_probes += 1;
                 self.runtime.spawn(async move {
                     let result = probe(&client, &probe_request).await;
                     let _ = events.send(Event::CaptureProbe {
@@ -950,7 +990,7 @@ impl EngineState {
             Ok(inserted) => BridgeAddOutcome::Created {
                 id: inserted.id,
                 filename: inserted.file_name,
-                size: None,
+                size: inserted.size,
             },
             Err(InsertError::Duplicate(existing)) => BridgeAddOutcome::Conflict { id: existing.id },
             Err(InsertError::Failed(error)) => BridgeAddOutcome::ProbeFailed(error),
@@ -977,6 +1017,7 @@ impl EngineState {
         };
         let client = self.client.clone();
         let events = self.events.clone();
+        self.in_flight_probes += 1;
         self.runtime.spawn(async move {
             let result = probe(&client, &probe_request).await;
             let _ = events.send(Event::BridgeProbe {
@@ -1019,7 +1060,7 @@ impl EngineState {
             .filter(|name| !name.is_empty())
             .or(pending.request.filename);
         let add = AddRequest {
-            url: pending.request.url,
+            url: url.to_string(),
             file_name: chosen_name,
             save_dir: Some(folder),
             start_now,
@@ -1070,6 +1111,18 @@ impl EngineState {
         }
     }
 
+    fn resolve_save_dir(&self, category: Category, requested: Option<&Path>) -> PathBuf {
+        if let Some(dir) = requested {
+            return dir.to_path_buf();
+        }
+        if let Some(dir) = self.settings.category_dirs.get(category.label())
+            && !dir.as_os_str().is_empty()
+        {
+            return dir.clone();
+        }
+        self.settings.download_dir.clone()
+    }
+
     fn insert_from_probe(
         &mut self,
         request: AddRequest,
@@ -1083,19 +1136,17 @@ impl EngineState {
             }
         }
 
-        let dir = request
-            .save_dir
-            .clone()
-            .unwrap_or_else(|| self.settings.download_dir.clone());
-        if let Err(error) = ensure_dir(&dir) {
-            return Err(InsertError::Failed(error.to_string()));
-        }
-
         let base_name = resolve_file_name(
             request.file_name.as_deref(),
             result.content_disposition.as_deref(),
             &result.final_url,
         );
+        let category = Category::from_file_name(&base_name);
+        let dir = self.resolve_save_dir(category, request.save_dir.as_deref());
+        if let Err(error) = ensure_dir(&dir) {
+            return Err(InsertError::Failed(error.to_string()));
+        }
+
         let (final_path, temp_path) =
             reserve_download_paths(&dir, &base_name).map_err(InsertError::Failed)?;
         let reserved_temp = temp_path.clone();
@@ -1176,18 +1227,28 @@ impl EngineState {
 
     /// Queues a yt-dlp job: no probe, no temp file, no parallel ranges.
     fn insert_video(&mut self, request: AddRequest) -> Result<Inserted, InsertError> {
-        let dir = request
-            .save_dir
-            .clone()
-            .unwrap_or_else(|| self.settings.download_dir.clone());
-        if let Err(error) = ensure_dir(&dir) {
-            return Err(InsertError::Failed(error.to_string()));
+        if self.settings.duplicate_policy != DuplicatePolicy::RenameNumbered {
+            match self.store.active_by_url(&request.url) {
+                Ok(Some(existing)) => return Err(InsertError::Duplicate(Box::new(existing))),
+                Ok(None) => {}
+                Err(error) => return Err(InsertError::Failed(error.to_string())),
+            }
         }
 
         let audio_only = request
             .video_format
             .as_deref()
             .is_some_and(is_audio_only_selector);
+        let category = if audio_only {
+            Category::Music
+        } else {
+            Category::Video
+        };
+        let dir = self.resolve_save_dir(category, request.save_dir.as_deref());
+        if let Err(error) = ensure_dir(&dir) {
+            return Err(InsertError::Failed(error.to_string()));
+        }
+
         let base_name = resolve_video_file_name(
             request.file_name.as_deref(),
             &request.url,
@@ -1221,19 +1282,16 @@ impl EngineState {
         } else {
             DownloadStatus::Paused
         };
+        let size = request.video_size.filter(|s| *s > 0);
         let new = NewDownload {
             url: request.url.clone(),
             final_url: Some(request.url),
             file_name: file_name.clone(),
             temp_path,
             save_path,
-            size: request.video_size.filter(|s| *s > 0),
+            size,
             status,
-            category: if audio_only {
-                Category::Music
-            } else {
-                Category::Video
-            },
+            category,
             kind: "video".to_string(),
             video_format: request.video_format,
             connections: 1,
@@ -1259,7 +1317,7 @@ impl EngineState {
                 Ok(Inserted {
                     id,
                     file_name,
-                    size: None,
+                    size,
                 })
             }
             Err(error) => {
@@ -1282,17 +1340,23 @@ impl EngineState {
         self.spawn_tools_install();
     }
 
+    fn configured_proxy(&self) -> Option<String> {
+        let trimmed = self.settings.proxy_url.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
     fn spawn_tools_install(&mut self) {
         if self.tools_installing {
             self.message = Some("Downloading tools...".to_string());
             return;
         }
         let dir = tools::tools_dir();
+        let proxy = self.configured_proxy();
         self.tools_installing = true;
         self.message = Some("Downloading tools...".to_string());
         let commands = self.commands.clone();
         thread::spawn(move || {
-            let result = tools::install_tools(&dir);
+            let result = tools::install_tools_with_proxy(&dir, proxy.as_deref());
             let _ = commands.send(Command::ToolsInstalled(result));
         });
     }
@@ -1316,8 +1380,14 @@ impl EngineState {
             ));
             return;
         }
+        let proxy = self.configured_proxy();
         thread::spawn(move || {
-            let _ = reply.send(ytdlp_listing(&dir, &url, cookie.as_deref()));
+            let _ = reply.send(ytdlp_listing(
+                &dir,
+                &url,
+                cookie.as_deref(),
+                proxy.as_deref(),
+            ));
         });
     }
 
@@ -1349,6 +1419,7 @@ impl EngineState {
     fn handle_event(&mut self, event: Event) {
         match event {
             Event::Probe { request, result } => {
+                self.in_flight_probes = self.in_flight_probes.saturating_sub(1);
                 self.message = Some(self.handle_probe(request, *result));
             }
             Event::BridgeProbe {
@@ -1356,6 +1427,7 @@ impl EngineState {
                 reply,
                 result,
             } => {
+                self.in_flight_probes = self.in_flight_probes.saturating_sub(1);
                 let outcome = match *result {
                     Err(error) => BridgeAddOutcome::ProbeFailed(error.to_string()),
                     Ok(result) => match self.insert_from_probe(request, result) {
@@ -1373,6 +1445,7 @@ impl EngineState {
                 let _ = reply.send(outcome);
             }
             Event::CaptureProbe { key, result } => {
+                self.in_flight_probes = self.in_flight_probes.saturating_sub(1);
                 if let Ok(result) = *result
                     && let Some(pending) = self.pending_captures.get_mut(&key)
                 {
@@ -1485,7 +1558,8 @@ impl EngineState {
                 self.active.remove(&id);
                 self.flush_segment_progress(id);
                 match result {
-                    Ok(_) => {
+                    Ok(outcome) => {
+                        let _ = self.store.set_size(id, outcome.bytes);
                         let _ = self.store.mark_done(id, now_millis());
                     }
                     Err(error) => {
@@ -1526,16 +1600,19 @@ impl EngineState {
         }
     }
 
-    fn decay_stalled_speeds(&mut self) {
+    fn decay_stalled_speeds(&mut self) -> bool {
         let now = Instant::now();
+        let mut changed = false;
         for (&id, (_, at)) in &self.progress {
             if now.duration_since(*at) >= Duration::from_secs(2)
                 && let Some(speed) = self.speeds.get_mut(&id)
                 && *speed > 0
             {
                 *speed = if *speed < 1024 { 0 } else { *speed / 2 };
+                changed = true;
             }
         }
+        changed
     }
 
     fn flush_segment_progress(&mut self, id: i64) {
@@ -1602,6 +1679,9 @@ impl EngineState {
             return false;
         }
 
+        if download.kind == "video" {
+            return self.spawn_video(download, generation, cookie);
+        }
         let options = RequestOptions {
             user_agent: download
                 .user_agent
@@ -1610,9 +1690,6 @@ impl EngineState {
             referrer: download.referrer.clone(),
             cookie,
         };
-        if download.kind == "video" {
-            return self.spawn_video(download, generation);
-        }
         let id = download.id;
         let events = self.events.clone();
         let limiter = self.limiter.clone();
@@ -1729,7 +1806,12 @@ impl EngineState {
         true
     }
 
-    fn spawn_video(&mut self, download: &Download, generation: u64) -> bool {
+    fn spawn_video(
+        &mut self,
+        download: &Download,
+        generation: u64,
+        cookie_text: Option<String>,
+    ) -> bool {
         let dir = tools::tools_dir();
         if !tools::tools_ready(&dir) {
             // No download here: a test (or a fresh profile) must not hit the network.
@@ -1740,26 +1822,13 @@ impl EngineState {
             );
             return false;
         }
-        let cookie_text = match download.cookie_enc.as_deref() {
-            Some(encrypted) => match unprotect_cookie(encrypted) {
-                Ok(cookie) => Some(cookie),
-                Err(error) => {
-                    let _ = self.store.update_status(
-                        download.id,
-                        DownloadStatus::Error,
-                        Some(&format!("cookie: {error}")),
-                    );
-                    return false;
-                }
-            },
-            None => None,
-        };
         let cookie_file = cookie_text
             .as_deref()
             .and_then(TempCookieFile::from_netscape);
         let js_runtime = tools::js_runtime_arg(&dir);
         let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
         let work_dir = ytdlp_work_dir(download.save_path.parent());
+        let proxy = self.configured_proxy();
         let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
         command
             .current_dir(work_dir)
@@ -1772,6 +1841,8 @@ impl EngineState {
                 self.settings.video_chapters,
                 js_runtime.as_deref(),
                 cookie_file.as_ref().map(TempCookieFile::path),
+                proxy.as_deref(),
+                self.settings.global_speed_limit_kbps,
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1791,7 +1862,7 @@ impl EngineState {
         let id = download.id;
         self.video_streams
             .insert(id, VideoStreamTracker::from_seeded(download.size));
-        if let Some(stdout) = child.stdout.take() {
+        let stdout_join = child.stdout.take().map(|stdout| {
             let events = self.events.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1808,10 +1879,10 @@ impl EngineState {
                         });
                     }
                 }
-            });
-        }
+            })
+        });
         let last_error = Arc::new(Mutex::new(String::new()));
-        if let Some(stderr) = child.stderr.take() {
+        let stderr_join = child.stderr.take().map(|stderr| {
             let slot = Arc::clone(&last_error);
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -1828,8 +1899,8 @@ impl EngineState {
                         }
                     }
                 }
-            });
-        }
+            })
+        });
         self.active.insert(
             id,
             ActiveDownload {
@@ -1839,6 +1910,8 @@ impl EngineState {
                     child,
                     save_path: download.save_path.clone(),
                     last_error,
+                    stdout_join,
+                    stderr_join,
                     _cookie_file: cookie_file,
                 }),
             },
@@ -1860,15 +1933,38 @@ impl EngineState {
             let Some(mut active) = self.active.remove(&id) else {
                 continue;
             };
-            let Some(run) = active.video.take() else {
+            let Some(mut run) = active.video.take() else {
                 continue;
             };
+            if let Some(join) = run.stdout_join.take() {
+                let _ = join.join();
+            }
+            if let Some(join) = run.stderr_join.take() {
+                let _ = join.join();
+            }
             self.flush_segment_progress(id);
             if success {
                 // The row reserved its temp name before the run; a finished video leaves it empty.
                 let _ = std::fs::remove_file(temp_path_for(&run.save_path));
-                let actual_bytes = std::fs::metadata(&run.save_path).ok().map(|m| m.len());
-                let _ = self.store.mark_video_done(id, actual_bytes, now_millis());
+                if let Some(actual_path) = resolve_video_output(&run.save_path) {
+                    if actual_path != run.save_path
+                        && let Some(actual_name) = actual_path.file_name().and_then(|n| n.to_str())
+                    {
+                        let actual_temp = temp_path_for(&actual_path);
+                        let _ =
+                            self.store
+                                .update_location(id, actual_name, &actual_path, &actual_temp);
+                    }
+                    let actual_bytes = std::fs::metadata(&actual_path).ok().map(|m| m.len());
+                    let _ = self.store.mark_video_done(id, actual_bytes, now_millis());
+                } else {
+                    let _ = self.store.update_status(
+                        id,
+                        DownloadStatus::Error,
+                        Some("yt-dlp exited without producing an output file"),
+                    );
+                    remove_parts(&run.save_path);
+                }
             } else {
                 let raw = run
                     .last_error
@@ -1968,6 +2064,37 @@ impl EngineState {
         self.pump_queue();
     }
 
+    fn redownload(&mut self, id: i64) {
+        let Ok(download) = self.store.get_download(id) else {
+            return;
+        };
+        let cookie = match download.cookie_enc.as_deref() {
+            Some(encrypted) => match unprotect_cookie(encrypted) {
+                Ok(cookie) => Some(cookie),
+                Err(error) => {
+                    self.message = Some(format!("Redownload failed: cookie {error}"));
+                    return;
+                }
+            },
+            None => None,
+        };
+        let request = AddRequest {
+            url: download.url,
+            file_name: Some(download.file_name),
+            save_dir: download.save_path.parent().map(Path::to_path_buf),
+            start_now: true,
+            connections: Some(download.connections.max(1)),
+            referrer: download.referrer,
+            user_agent: download.user_agent,
+            cookie,
+            video_format: download.video_format,
+            video_size: download.size,
+        };
+        if let Some(text) = self.handle_add(request) {
+            self.message = Some(text);
+        }
+    }
+
     fn update_url_and_resume(&mut self, id: i64, raw_url: String) {
         let Ok(parsed) = Url::parse(raw_url.trim()) else {
             self.message = Some("Invalid URL".to_string());
@@ -2043,16 +2170,18 @@ impl EngineState {
                 let _ = self.runtime.block_on(handle);
             }
         }
-        let paths = self
+        let details = self
             .store
             .get_download(id)
             .ok()
-            .map(|download| (download.temp_path, download.save_path));
+            .map(|download| (download.temp_path, download.save_path, download.kind));
         if self.store.delete_download(id).is_ok()
-            && let Some((temp_path, save_path)) = paths
+            && let Some((temp_path, save_path, kind)) = details
         {
             let _ = std::fs::remove_file(&temp_path);
-            remove_parts(&save_path);
+            if kind == "video" {
+                remove_parts(&save_path);
+            }
             if delete_file {
                 let _ = std::fs::remove_file(&save_path);
             }
@@ -2124,7 +2253,7 @@ impl EngineState {
             .last_update_check_ms
             .max(self.settings.last_update_check_ms);
         settings.browser_paired |= self.settings.browser_paired;
-        if !valid_bridge_token(&settings.bridge_token) {
+        if !is_valid_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();
         }
         if settings.proxy_url != self.settings.proxy_url {
@@ -2243,12 +2372,6 @@ fn video_file_name(url: &str) -> String {
     } else {
         format!("{safe}.mp4")
     }
-}
-
-fn is_audio_only_selector(selector: &str) -> bool {
-    let lower = selector.to_ascii_lowercase();
-    (lower.contains("ba") || lower.contains("bestaudio"))
-        && !(lower.contains("bv") || lower.contains("bestvideo"))
 }
 
 fn resolve_video_file_name(requested: Option<&str>, url: &str, selector: Option<&str>) -> String {
@@ -2383,13 +2506,21 @@ fn ytdlp_work_dir(preferred: Option<&Path>) -> PathBuf {
 }
 
 /// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
-fn ytdlp_listing(dir: &Path, url: &str, cookie: Option<&str>) -> Result<VideoListing, String> {
+fn ytdlp_listing(
+    dir: &Path,
+    url: &str,
+    cookie: Option<&str>,
+    proxy: Option<&str>,
+) -> Result<VideoListing, String> {
     let cookie_file = cookie.and_then(TempCookieFile::from_netscape);
     let js_runtime = tools::js_runtime_arg(dir);
     let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
     command
         .current_dir(ytdlp_work_dir(None))
         .args(["--no-playlist", "-J"]);
+    if let Some(proxy_url) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or(""))? {
+        command.args(["--proxy", &proxy_url]);
+    }
     if let Some(runtime) = js_runtime.as_deref() {
         command.args(["--js-runtimes", runtime]);
     }
@@ -2444,64 +2575,82 @@ fn read_all<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<V
     })
 }
 
-async fn verify_public_dns(url: &Url) -> Result<(), String> {
+async fn resolve_public_ips(url: &Url) -> Result<Vec<std::net::SocketAddr>, String> {
     validate_public_page_url(url)?;
     let host = url
         .host_str()
         .ok_or_else(|| "Web page URL is missing a host".to_string())?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let addrs = tokio::net::lookup_host((host, port))
+    let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|error| format!("Resolve failed: {error}"))?;
-    let mut saw_addr = false;
-    for addr in addrs {
-        saw_addr = true;
+        .map_err(|error| format!("Resolve failed: {error}"))?
+        .collect();
+    if resolved.is_empty() {
+        return Err("Could not resolve host".to_string());
+    }
+    for addr in &resolved {
         if !is_public_ip(addr.ip()) {
             return Err("Refusing to scan private or local network address".to_string());
         }
     }
-    if !saw_addr {
-        return Err("Could not resolve host".to_string());
-    }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Fetches up to 2 MB of HTML from one public web page and extracts unique link targets.
 async fn fetch_page_links(url: Url, proxy_url: Option<String>) -> Result<Vec<String>, String> {
     const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
-    verify_public_dns(&url).await?;
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.stop();
+    const MAX_REDIRECTS: usize = 5;
+
+    let validated_proxy =
+        lajufile_core::http::validate_proxy_url(proxy_url.as_deref().unwrap_or(""))?;
+    let mut current_url = url;
+    let mut response = {
+        let mut hops = 0usize;
+        loop {
+            validate_public_page_url(&current_url)?;
+            let mut builder = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none());
+            if let Some(proxy) = &validated_proxy {
+                builder =
+                    builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("Proxy: {e}"))?);
+            } else {
+                let addrs = resolve_public_ips(&current_url).await?;
+                if let Some(url::Host::Domain(domain)) = current_url.host() {
+                    builder = builder.resolve_to_addrs(domain, &addrs);
+                }
             }
-            if let Err(msg) = validate_public_page_url(attempt.url()) {
-                return attempt.error(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    msg,
-                ));
+            let client = builder
+                .build()
+                .map_err(|error| format!("Client failed: {error}"))?;
+            let resp = client
+                .get(current_url.clone())
+                .header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT)
+                .send()
+                .await
+                .map_err(|error| format!("Fetch failed: {error}"))?;
+            if resp.status().is_redirection() {
+                if hops >= MAX_REDIRECTS {
+                    return Err("Too many redirects".to_string());
+                }
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| "Redirect missing Location header".to_string())?;
+                current_url = current_url
+                    .join(location)
+                    .map_err(|error| format!("Invalid redirect target: {error}"))?;
+                hops += 1;
+                continue;
             }
-            attempt.follow()
-        }));
-    if let Some(proxy) =
-        lajufile_core::http::validate_proxy_url(proxy_url.as_deref().unwrap_or(""))?
-    {
-        builder = builder.proxy(reqwest::Proxy::all(&proxy).map_err(|e| format!("Proxy: {e}"))?);
-    }
-    let client = builder
-        .build()
-        .map_err(|error| format!("Client failed: {error}"))?;
-    let mut response = client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT)
-        .send()
-        .await
-        .map_err(|error| format!("Fetch failed: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("Fetch failed: {error}"))?;
-    verify_public_dns(response.url()).await?;
+            break resp
+                .error_for_status()
+                .map_err(|error| format!("Fetch failed: {error}"))?;
+        }
+    };
+
     if let Some(content_type) = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -2535,6 +2684,13 @@ async fn fetch_page_links(url: Url, proxy_url: Option<String>) -> Result<Vec<Str
     ))
 }
 
+fn ytdlp_output_template(path: &Path) -> OsString {
+    match path.to_str() {
+        Some(text) => OsString::from(text.replace('%', "%%")),
+        None => path.as_os_str().to_owned(),
+    }
+}
+
 /// yt-dlp arguments for one video job: merge to mp4 next to the target path.
 #[allow(clippy::too_many_arguments)]
 fn video_args(
@@ -2546,6 +2702,8 @@ fn video_args(
     embed_chapters: bool,
     js_runtime: Option<&str>,
     cookie_file: Option<&Path>,
+    proxy: Option<&str>,
+    limit_kbps: u64,
 ) -> Vec<OsString> {
     let audio_only = is_audio_only_selector(selector);
     let mut args: Vec<OsString> = vec!["--no-playlist".into(), "--newline".into()];
@@ -2563,6 +2721,12 @@ fn video_args(
         ]);
     }
     args.extend(["--ffmpeg-location".into(), tools_dir.as_os_str().to_owned()]);
+    if let Ok(Some(proxy_url)) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or("")) {
+        args.extend(["--proxy".into(), proxy_url.into()]);
+    }
+    if limit_kbps > 0 {
+        args.extend(["--limit-rate".into(), format!("{limit_kbps}K").into()]);
+    }
     if let Some(runtime) = js_runtime {
         args.push("--js-runtimes".into());
         args.push(runtime.into());
@@ -2596,7 +2760,8 @@ fn video_args(
         "-f".into(),
         selector.into(),
         "-o".into(),
-        save_path.as_os_str().to_owned(),
+        ytdlp_output_template(save_path),
+        "--".into(),
         url.into(),
     ]);
     args
@@ -2668,8 +2833,28 @@ fn stop_video(active: &mut ActiveDownload) {
         // yt-dlp's ffmpeg child survives a plain kill and would finish the merge.
         tools::kill_tree(run.child.id());
         let _ = run.child.wait();
-        remove_parts(&run.save_path);
+        if let Some(join) = run.stdout_join.take() {
+            let _ = join.join();
+        }
+        if let Some(join) = run.stderr_join.take() {
+            let _ = join.join();
+        }
     }
+}
+
+fn resolve_video_output(expected: &Path) -> Option<PathBuf> {
+    if expected.is_file() {
+        return Some(expected.to_path_buf());
+    }
+    let dir = expected.parent()?;
+    let stem = expected.file_stem()?.to_str()?;
+    for ext in ["mp4", "mkv", "webm", "m4a", "mp3", "opus"] {
+        let candidate = dir.join(format!("{stem}.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Drops the temp files yt-dlp leaves behind: `name.part`, `name.part-Frag<N>`,
@@ -2691,6 +2876,14 @@ fn move_file_safe(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+fn is_ytdlp_format_suffix(rest: &str) -> bool {
+    let Some(after_dot) = rest.strip_prefix(".f") else {
+        return false;
+    };
+    let digits = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && after_dot.as_bytes().get(digits) == Some(&b'.')
+}
+
 fn remove_parts(save_path: &Path) {
     let (Some(dir), Some(name)) = (
         save_path.parent(),
@@ -2702,18 +2895,30 @@ fn remove_parts(save_path: &Path) {
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.to_string());
+    let sentinel = format!("{name}.lajufile");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        let ours = file_name.starts_with(name) || file_name.starts_with(&format!("{stem}."));
+        if file_name == name {
+            continue;
+        }
+        if file_name == sentinel {
+            let _ = std::fs::remove_file(entry.path());
+            continue;
+        }
+        let matches_name = file_name
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('.'));
+        let matches_stem_ytdlp = file_name
+            .strip_prefix(&stem)
+            .is_some_and(|rest| rest.starts_with(".temp.") || is_ytdlp_format_suffix(rest));
         let temp = file_name.ends_with(".part")
             || file_name.contains(".part-Frag")
             || file_name.ends_with(".ytdl")
-            || file_name.ends_with(".temp.mp4")
-            || file_name.ends_with(".lajufile");
-        if ours && temp {
+            || file_name.ends_with(".temp.mp4");
+        if (matches_name || matches_stem_ytdlp) && temp {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -2788,13 +2993,15 @@ mod tests {
     fn video_args_select_quality_and_target() {
         let args = video_args(
             "bv*[height<=360]+ba",
-            Path::new("C:/dl/clip.mp4"),
+            Path::new("C:/dl/100% clip.mp4"),
             "https://youtu.be/x",
             Path::new("C:/tools"),
             false,
             false,
             Some("node:/usr/bin/node"),
             Some(Path::new("C:/tmp/cookies.txt")),
+            Some("http://127.0.0.1:8080"),
+            512,
         );
         let args: Vec<String> = args
             .iter()
@@ -2807,7 +3014,15 @@ mod tests {
         );
         assert_eq!(
             args[args.iter().position(|a| a == "-o").unwrap() + 1],
-            "C:/dl/clip.mp4"
+            "C:/dl/100%% clip.mp4"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--proxy").unwrap() + 1],
+            "http://127.0.0.1:8080/"
+        );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--limit-rate").unwrap() + 1],
+            "512K"
         );
         assert_eq!(
             args[args
@@ -2837,6 +3052,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
         assert!(args.iter().any(|arg| arg == "--http-chunk-size"));
         assert!(args.iter().any(|arg| arg == "--progress-template"));
+        assert_eq!(args[args.len() - 2], "--");
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");
     }
 
@@ -2860,6 +3076,8 @@ mod tests {
             true,
             None,
             None,
+            None,
+            0,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -2872,6 +3090,8 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
         }
+        assert!(!args.iter().any(|arg| arg == "--proxy"));
+        assert!(!args.iter().any(|arg| arg == "--limit-rate"));
     }
 
     #[test]
@@ -2918,6 +3138,8 @@ mod tests {
             true,
             None,
             None,
+            None,
+            0,
         )
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -2947,15 +3169,27 @@ mod tests {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         std::fs::write(dir.path().join("other.mp4.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("clip.1080p.mp4.lajufile"), b"x").unwrap();
         std::fs::write(dir.path().join("clip.mp4"), b"final").unwrap();
 
         remove_parts(&save);
 
         assert_eq!(std::fs::read(&save).unwrap(), b"final");
         assert!(dir.path().join("other.mp4.part").exists());
+        assert!(dir.path().join("clip.1080p.mp4.lajufile").exists());
         for name in leftovers {
             assert!(!dir.path().join(name).exists(), "{name} should be removed");
         }
+    }
+
+    #[test]
+    fn resolve_video_output_falls_back_to_remuxed_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("movie.mp4");
+        let mkv = dir.path().join("movie.mkv");
+        std::fs::write(&mkv, b"mkv-bytes").unwrap();
+        assert_eq!(resolve_video_output(&expected), Some(mkv));
+        assert_eq!(resolve_video_output(&dir.path().join("absent.mp4")), None);
     }
 
     #[test]

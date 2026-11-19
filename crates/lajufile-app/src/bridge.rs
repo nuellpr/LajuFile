@@ -421,7 +421,9 @@ fn authorize(
         .ok()
         .map(|token| token.clone())
         .unwrap_or_default();
-    if valid_token(&expected) && constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
+    if lajufile_core::settings::is_valid_token(&expected)
+        && lajufile_core::checksum::constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+    {
         Ok(())
     } else {
         Err((
@@ -429,21 +431,6 @@ fn authorize(
             Json(json!({ "error": "unauthorized" })),
         ))
     }
-}
-
-fn valid_token(token: &str) -> bool {
-    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut difference = 0u8;
-    for (left, right) in left.iter().zip(right) {
-        difference |= left ^ right;
-    }
-    difference == 0
 }
 
 pub fn health_check(port: u16, timeout: Duration) -> Result<(), String> {

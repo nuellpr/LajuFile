@@ -87,38 +87,44 @@ const YTDLP_ASSET: &str = "yt-dlp_linux";
 #[cfg(windows)]
 pub const FFMPEG_ZIP_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 #[cfg(windows)]
-const FFMPEG_SHA256_URL: Option<&str> =
-    Some("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256");
+const FFMPEG_SHA256_URL: &str =
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256";
 #[cfg(windows)]
 const FFMPEG_ASSET: Option<&str> = None;
 
-#[cfg(target_os = "macos")]
-pub const FFMPEG_ZIP_URL: &str = "https://evermeet.cx/ffmpeg/getrelease/zip";
-#[cfg(target_os = "macos")]
-const FFMPEG_SHA256_URL: Option<&str> = None;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const FFMPEG_ZIP_URL: &str =
+    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const FFMPEG_SHA256_URL: &str =
+    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip.sha256";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const FFMPEG_ASSET: Option<&str> = None;
+
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+pub const FFMPEG_ZIP_URL: &str =
+    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+const FFMPEG_SHA256_URL: &str =
+    "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip.sha256";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 const FFMPEG_ASSET: Option<&str> = None;
 
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
 pub const FFMPEG_ZIP_URL: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz";
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
-const FFMPEG_SHA256_URL: Option<&str> =
-    Some("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256");
+const FFMPEG_SHA256_URL: &str =
+    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256";
 #[cfg(all(not(windows), not(target_os = "macos"), target_arch = "aarch64"))]
 const FFMPEG_ASSET: Option<&str> = Some("ffmpeg-master-latest-linuxarm64-gpl.tar.xz");
 
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 pub const FFMPEG_ZIP_URL: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz";
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
-const FFMPEG_SHA256_URL: Option<&str> =
-    Some("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256");
+const FFMPEG_SHA256_URL: &str =
+    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256";
 #[cfg(all(not(windows), not(target_os = "macos"), not(target_arch = "aarch64")))]
 const FFMPEG_ASSET: Option<&str> = Some("ffmpeg-master-latest-linux64-gpl.tar.xz");
-
-#[cfg(windows)]
-const CURL_BIN: &str = "curl.exe";
-#[cfg(not(windows))]
-const CURL_BIN: &str = "curl";
 
 #[cfg(windows)]
 const TAR_BIN: &str = "tar.exe";
@@ -381,24 +387,42 @@ pub fn js_runtime_arg(dir: &Path) -> Option<String> {
 }
 
 /// Downloads yt-dlp, ffmpeg (if missing), and deno (when no JS runtime is installed yet),
-/// verifying SHA-256 checksums wherever upstream publishes checksum manifests.
+/// verifying SHA-256 checksums for every downloaded binary.
 pub fn install_tools(dir: &Path) -> Result<(), String> {
+    install_tools_with_proxy(dir, None)
+}
+
+pub fn install_tools_with_proxy(dir: &Path, proxy: Option<&str>) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("create {dir:?}: {error}"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("tokio runtime: {error}"))?;
+    let client = build_tool_client(std::time::Duration::from_secs(300), proxy)?;
 
     let ytdlp = tool_path(dir, YTDLP);
-    download_verified(
+    rt.block_on(download_verified(
+        &client,
         &ytdlp,
         YTDLP_URL,
-        Some(YTDLP_SHA256SUMS_URL),
+        YTDLP_SHA256SUMS_URL,
         Some(YTDLP_ASSET),
-    )?;
+    ))?;
     make_executable(&ytdlp);
 
     if !tool_path(dir, FFMPEG).is_file() {
         let archive = dir.join("ffmpeg-archive");
-        download_verified(&archive, FFMPEG_ZIP_URL, FFMPEG_SHA256_URL, FFMPEG_ASSET)?;
-
         let extract = dir.join("ffmpeg-extract");
+        let _cleanup = TempCleanup(vec![archive.clone(), extract.clone()]);
+
+        rt.block_on(download_verified(
+            &client,
+            &archive,
+            FFMPEG_ZIP_URL,
+            FFMPEG_SHA256_URL,
+            FFMPEG_ASSET,
+        ))?;
+
         let _ = std::fs::remove_dir_all(&extract);
         // tar refuses an extraction directory that does not exist yet.
         std::fs::create_dir_all(&extract)
@@ -412,13 +436,10 @@ pub fn install_tools(dir: &Path) -> Result<(), String> {
         let ffmpeg = tool_path(dir, FFMPEG);
         std::fs::copy(&found, &ffmpeg).map_err(|error| format!("copy ffmpeg: {error}"))?;
         make_executable(&ffmpeg);
-
-        let _ = std::fs::remove_file(&archive);
-        let _ = std::fs::remove_dir_all(&extract);
     }
 
     if js_runtime_arg(dir).is_none() {
-        let _ = install_deno(dir);
+        let _ = install_deno(&rt, &client, dir);
     }
 
     if tools_ready(dir) {
@@ -428,11 +449,23 @@ pub fn install_tools(dir: &Path) -> Result<(), String> {
     }
 }
 
-fn install_deno(dir: &Path) -> Result<(), String> {
+fn install_deno(
+    rt: &tokio::runtime::Runtime,
+    client: &reqwest::Client,
+    dir: &Path,
+) -> Result<(), String> {
     let archive = dir.join("deno-archive.zip");
-    download_verified(&archive, DENO_ZIP_URL, Some(DENO_SHA256_URL), None)?;
-
     let extract = dir.join("deno-extract");
+    let _cleanup = TempCleanup(vec![archive.clone(), extract.clone()]);
+
+    rt.block_on(download_verified(
+        client,
+        &archive,
+        DENO_ZIP_URL,
+        DENO_SHA256_URL,
+        None,
+    ))?;
+
     let _ = std::fs::remove_dir_all(&extract);
     std::fs::create_dir_all(&extract).map_err(|error| format!("create {extract:?}: {error}"))?;
 
@@ -468,10 +501,21 @@ fn install_deno(dir: &Path) -> Result<(), String> {
     let deno = tool_path(dir, DENO);
     std::fs::copy(&found, &deno).map_err(|error| format!("copy deno: {error}"))?;
     make_executable(&deno);
-
-    let _ = std::fs::remove_file(&archive);
-    let _ = std::fs::remove_dir_all(&extract);
     Ok(())
+}
+
+struct TempCleanup(Vec<PathBuf>);
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -523,75 +567,114 @@ pub fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<(), String>
     Ok(())
 }
 
-fn fetch_https_text(url: &str) -> Result<String, String> {
-    let mut command = std::process::Command::new(CURL_BIN);
-    command.args([
-        "-L",
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--proto",
-        "=https",
-        "--max-time",
-        "20",
-        "--",
-        url,
-    ]);
-    no_window(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| format!("{CURL_BIN}: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{CURL_BIN} checksum fetch failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+pub fn validate_tool_https_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|e| format!("invalid tool URL: {e}"))?;
+    if url.scheme() != "https" || !url.has_host() {
+        return Err(format!("tool URL must use HTTPS: {raw}"));
     }
-    String::from_utf8(output.stdout).map_err(|_| "checksum manifest is not valid UTF-8".to_string())
+    Ok(url)
 }
 
-/// Downloads to `<target>.part`, verifies SHA-256 when available, and atomically renames on success.
-fn download_verified(
+fn build_tool_client(
+    total_timeout: std::time::Duration,
+    proxy: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .timeout(total_timeout)
+        .user_agent(concat!("LajuFile/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.stop();
+            }
+            if let Err(msg) = validate_tool_https_url(attempt.url().as_str()) {
+                return attempt.error(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    msg,
+                ));
+            }
+            attempt.follow()
+        }));
+    if let Some(proxy_url) = proxy.map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = reqwest::Proxy::all(proxy_url).map_err(|e| format!("invalid proxy: {e}"))?;
+        builder = builder.proxy(parsed);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("HTTP client error: {error}"))
+}
+
+async fn fetch_https_text(client: &reqwest::Client, raw_url: &str) -> Result<String, String> {
+    let url = validate_tool_https_url(raw_url)?;
+    let resp = client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("checksum fetch failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("checksum fetch failed: {error}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|error| format!("checksum read failed: {error}"))?;
+    if bytes.len() > 512 * 1024 {
+        return Err("checksum manifest is unexpectedly large".to_string());
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| "checksum manifest is not valid UTF-8".to_string())
+}
+
+/// Downloads to `<target>.part`, verifies mandatory SHA-256, and atomically renames on success.
+async fn download_verified(
+    client: &reqwest::Client,
     target: &Path,
-    url: &str,
-    checksum_url: Option<&str>,
+    raw_url: &str,
+    checksum_url: &str,
     asset_name: Option<&str>,
 ) -> Result<(), String> {
-    let expected = match checksum_url {
-        Some(cs_url) => {
-            let text = fetch_https_text(cs_url)?;
-            Some(parse_tool_sha256(&text, asset_name).ok_or_else(|| {
-                format!(
-                    "SHA-256 digest for {} missing from checksum manifest",
-                    asset_name.unwrap_or(url)
-                )
-            })?)
-        }
-        None => None,
-    };
+    use std::io::Write;
 
+    let text = fetch_https_text(client, checksum_url).await?;
+    let expected = parse_tool_sha256(&text, asset_name).ok_or_else(|| {
+        format!(
+            "SHA-256 digest for {} missing from checksum manifest",
+            asset_name.unwrap_or(raw_url)
+        )
+    })?;
+
+    let url = validate_tool_https_url(raw_url)?;
     let mut part = target.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    run(
-        CURL_BIN,
-        &[
-            "-L",
-            "--fail",
-            "--proto",
-            "=https",
-            "-o",
-            path_arg(&part)?,
-            "--",
-            url,
-        ],
-    )?;
-    if let Some(expected_hex) = expected
-        && let Err(err) = verify_file_sha256(&part, &expected_hex)
+    let _cleanup = TempCleanup(vec![part.clone()]);
+
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("download {raw_url}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download {raw_url}: {error}"))?;
+
+    let file = std::fs::File::create(&part).map_err(|error| format!("create {part:?}: {error}"))?;
+    let mut writer = std::io::BufWriter::new(file);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|error| format!("stream {raw_url}: {error}"))?
     {
-        let _ = std::fs::remove_file(&part);
-        return Err(err);
+        writer
+            .write_all(&chunk)
+            .map_err(|error| format!("write {part:?}: {error}"))?;
     }
+    writer
+        .flush()
+        .map_err(|error| format!("flush {part:?}: {error}"))?;
+    drop(writer);
+
+    verify_file_sha256(&part, &expected)?;
     std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))
 }
 
@@ -758,5 +841,18 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *deno-x86_64-pc
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn tool_urls_and_checksums_require_https() {
+        assert!(validate_tool_https_url(YTDLP_URL).is_ok());
+        assert!(validate_tool_https_url(YTDLP_SHA256SUMS_URL).is_ok());
+        assert!(validate_tool_https_url(FFMPEG_ZIP_URL).is_ok());
+        assert!(validate_tool_https_url(FFMPEG_SHA256_URL).is_ok());
+        assert!(validate_tool_https_url(DENO_ZIP_URL).is_ok());
+        assert!(validate_tool_https_url(DENO_SHA256_URL).is_ok());
+        assert!(validate_tool_https_url("http://example.com/ffmpeg.zip").is_err());
+        assert!(validate_tool_https_url("file:///tmp/ffmpeg.zip").is_err());
+        assert!(validate_tool_https_url("https://").is_err());
     }
 }

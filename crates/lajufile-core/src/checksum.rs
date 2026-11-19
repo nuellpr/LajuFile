@@ -173,8 +173,7 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.finalize_bytes()
 }
 
-#[cfg_attr(windows, allow(dead_code))]
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
