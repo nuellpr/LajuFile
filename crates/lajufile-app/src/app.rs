@@ -225,6 +225,11 @@ impl LajuFileApp {
             self.last_wake_seq = snapshot.wake_seq;
             self.show_window(ctx);
         }
+        if snapshot.exit_requested && !self.allow_exit {
+            self.allow_exit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         let any_downloading = snapshot
             .downloads
             .iter()

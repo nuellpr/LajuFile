@@ -883,3 +883,39 @@ async fn wake_requires_token_and_preserves_browser_paired_false() {
     assert!(!woken.settings.browser_paired);
     handle.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_requires_token_blocks_browser_origin_and_sets_exit_requested() {
+    let (handle, _dir) = start_engine(0);
+    let port = bound_port(&handle);
+    let url = format!("http://127.0.0.1:{port}/shutdown");
+    let client = reqwest::Client::new();
+
+    let unauthorized = client.post(&url).send().await.unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let (name, value) = token_header();
+    let blocked_origin = client
+        .post(&url)
+        .header(name.clone(), value.clone())
+        .header("Origin", "chrome-extension://abc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let authorized = client.post(&url).header(name, value).send().await.unwrap();
+    assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&authorized.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["ok"], true);
+
+    let exiting = wait_for(
+        &handle,
+        |snapshot| snapshot.exit_requested,
+        Duration::from_secs(5),
+    );
+    assert!(exiting.exit_requested);
+    assert!(!exiting.settings.browser_paired);
+    handle.shutdown();
+}

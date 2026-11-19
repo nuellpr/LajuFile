@@ -1,6 +1,8 @@
+mod ssrf;
+mod video;
+
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -25,7 +27,7 @@ use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Segment, Store, StoreError, now_millis,
 };
-use lajufile_core::video::{self, DEFAULT_SELECTOR, VideoListing, is_audio_only_selector};
+use lajufile_core::video::{DEFAULT_SELECTOR, VideoListing, is_audio_only_selector};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -179,6 +181,7 @@ pub enum Command {
     ToolsInstalled(Result<(), String>),
     RecordUpdateCheck(i64),
     WakeWindow,
+    RequestExit,
     Shutdown,
 }
 
@@ -217,6 +220,7 @@ pub struct Snapshot {
     pub bridge: BridgeStatus,
     pub pending_capture: Option<CapturePrompt>,
     pub wake_seq: u64,
+    pub exit_requested: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -227,82 +231,6 @@ pub enum EngineError {
     Thread(#[from] std::io::Error),
     #[error("engine stopped")]
     Stopped,
-}
-
-fn validate_http_url(raw: &str) -> Result<Url, String> {
-    let url = Url::parse(raw.trim()).map_err(|error| format!("invalid URL: {error}"))?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("only http:// and https:// URLs are supported".to_string());
-    }
-    Ok(url)
-}
-
-fn is_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let oct = v4.octets();
-            let shared_cgnat = oct[0] == 100 && (oct[1] & 0xc0) == 64;
-            let benchmark = oct[0] == 198 && (oct[1] & 0xfe) == 18;
-            let reserved = oct[0] == 0 || oct[0] >= 240;
-            !v4.is_private()
-                && !v4.is_loopback()
-                && !v4.is_link_local()
-                && !v4.is_broadcast()
-                && !v4.is_documentation()
-                && !v4.is_unspecified()
-                && !v4.is_multicast()
-                && !shared_cgnat
-                && !benchmark
-                && !reserved
-        }
-        std::net::IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_ip(std::net::IpAddr::V4(mapped));
-            }
-            let seg = v6.segments();
-            let ula = (seg[0] & 0xfe00) == 0xfc00;
-            let link_local = (seg[0] & 0xffc0) == 0xfe80;
-            let site_local = (seg[0] & 0xffc0) == 0xfec0;
-            !v6.is_loopback()
-                && !v6.is_unspecified()
-                && !v6.is_multicast()
-                && !ula
-                && !link_local
-                && !site_local
-        }
-    }
-}
-
-fn validate_public_page_url(url: &Url) -> Result<(), String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err("Only http:// or https:// web page URLs are supported".to_string());
-    }
-    let Some(host) = url.host() else {
-        return Err("Web page URL is missing a host".to_string());
-    };
-    match host {
-        url::Host::Ipv4(v4) => {
-            if !is_public_ip(std::net::IpAddr::V4(v4)) {
-                return Err("Refusing to scan private or local IP addresses".to_string());
-            }
-        }
-        url::Host::Ipv6(v6) => {
-            if !is_public_ip(std::net::IpAddr::V6(v6)) {
-                return Err("Refusing to scan private or local IP addresses".to_string());
-            }
-        }
-        url::Host::Domain(domain) => {
-            let lower = domain.trim_end_matches('.').to_ascii_lowercase();
-            if lower == "localhost"
-                || lower.ends_with(".localhost")
-                || lower.ends_with(".local")
-                || lower.ends_with(".internal")
-            {
-                return Err("Refusing to scan localhost or internal domains".to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Reserves a deduplicated save path and empty `.lajufile` sentinel so queued rows
@@ -372,19 +300,7 @@ enum Event {
 struct ActiveDownload {
     generation: u64,
     handle: Option<tokio::task::JoinHandle<()>>,
-    video: Option<VideoRun>,
-}
-
-/// A running `yt-dlp` child; the engine polls it for exit instead of awaiting it,
-/// so pause and cancel can kill the process.
-struct VideoRun {
-    child: std::process::Child,
-    save_path: PathBuf,
-    last_error: Arc<Mutex<String>>,
-    stdout_join: Option<JoinHandle<()>>,
-    stderr_join: Option<JoinHandle<()>>,
-    // Dropped automatically when the yt-dlp process exits, stops, or is aborted.
-    _cookie_file: Option<TempCookieFile>,
+    video: Option<video::VideoRun>,
 }
 
 struct Inserted {
@@ -427,7 +343,7 @@ struct EngineState {
     generation: u64,
     speeds: HashMap<i64, u64>,
     progress: HashMap<i64, (u64, Instant)>,
-    video_streams: HashMap<i64, VideoStreamTracker>,
+    video_streams: HashMap<i64, video::VideoStreamTracker>,
     pending_segments: HashMap<(i64, u32), u64>,
     last_persist: HashMap<i64, Instant>,
     message: Option<String>,
@@ -435,9 +351,13 @@ struct EngineState {
     next_capture_key: u64,
     in_flight_probes: usize,
     wake_seq: u64,
+    exit_requested: bool,
     immediate_publish: bool,
     wake_callback: Arc<RwLock<Option<WakeCallback>>>,
     dirty: bool,
+    cached_downloads: Vec<Download>,
+    cached_segments: HashMap<i64, Vec<Segment>>,
+    cache_dirty: bool,
 }
 
 struct PendingCapture {
@@ -446,68 +366,6 @@ struct PendingCapture {
     file_name: String,
     size: Option<u64>,
     probe: Option<ProbeResult>,
-}
-
-#[derive(Default)]
-struct VideoStreamTracker {
-    seeded_size: Option<u64>,
-    current_file: Option<String>,
-    completed_bytes: u64,
-    current_peak: u64,
-    current_total: u64,
-}
-
-impl VideoStreamTracker {
-    fn from_seeded(seeded_size: Option<u64>) -> Self {
-        Self {
-            seeded_size: seeded_size.filter(|s| *s > 0),
-            ..Self::default()
-        }
-    }
-
-    fn record(
-        &mut self,
-        done: u64,
-        total: Option<u64>,
-        filename: Option<&str>,
-    ) -> (u64, Option<u64>) {
-        if let Some(fname) = filename {
-            if self.current_file.as_deref() != Some(fname) {
-                if self.current_file.is_some() {
-                    let finished = self.current_total.max(self.current_peak);
-                    self.completed_bytes = self.completed_bytes.saturating_add(finished);
-                    self.current_peak = 0;
-                    self.current_total = 0;
-                }
-                self.current_file = Some(fname.to_string());
-            }
-        } else if self.current_peak > 0 && done < self.current_peak / 2 {
-            // Filename omitted by yt-dlp; treat a sharp drop back toward zero as a new stream.
-            let finished = self.current_total.max(self.current_peak);
-            self.completed_bytes = self.completed_bytes.saturating_add(finished);
-            self.current_peak = 0;
-            self.current_total = 0;
-        }
-        self.current_peak = self.current_peak.max(done);
-        if let Some(t) = total
-            && t > 0
-        {
-            self.current_total = t;
-        }
-        let cumulative_done = self.completed_bytes.saturating_add(done);
-        let observed_total = self
-            .completed_bytes
-            .saturating_add(self.current_total.max(done));
-        let expected_size = if self.current_total > 0 {
-            Some(
-                self.seeded_size
-                    .map_or(observed_total, |seeded| seeded.max(observed_total)),
-            )
-        } else {
-            self.seeded_size
-        };
-        (cumulative_done, expected_size)
-    }
 }
 
 fn engine_loop(
@@ -555,6 +413,7 @@ fn engine_loop(
                     bridge: BridgeStatus::starting(config.settings.bridge_port),
                     pending_capture: None,
                     wake_seq: 0,
+                    exit_requested: false,
                 }));
             }
             return;
@@ -605,9 +464,13 @@ fn engine_loop(
         next_capture_key: 0,
         in_flight_probes: 0,
         wake_seq: 0,
+        exit_requested: false,
         immediate_publish: false,
         wake_callback,
         dirty: false,
+        cached_downloads: Vec::new(),
+        cached_segments: HashMap::new(),
+        cache_dirty: true,
     };
 
     state.normalize_startup();
@@ -701,6 +564,7 @@ impl EngineState {
                     DownloadStatus::Paused
                 };
                 let _ = self.store.update_status(download.id, status, None);
+                self.cache_dirty = true;
             }
         }
     }
@@ -765,6 +629,7 @@ impl EngineState {
                 let _ = self.settings.save(&self.data_dir);
             }
             Command::WakeWindow => self.trigger_wake(),
+            Command::RequestExit => self.request_exit(),
             Command::Shutdown => {
                 self.shutdown();
                 return true;
@@ -773,14 +638,25 @@ impl EngineState {
         false
     }
 
-    fn trigger_wake(&mut self) {
-        self.wake_seq = self.wake_seq.saturating_add(1);
-        self.immediate_publish = true;
+    fn notify_wake_callback(&self) {
         if let Ok(guard) = self.wake_callback.read()
             && let Some(cb) = guard.as_ref()
         {
             cb();
         }
+    }
+
+    fn trigger_wake(&mut self) {
+        self.wake_seq = self.wake_seq.saturating_add(1);
+        self.immediate_publish = true;
+        self.notify_wake_callback();
+    }
+
+    fn request_exit(&mut self) {
+        self.pause_all();
+        self.exit_requested = true;
+        self.immediate_publish = true;
+        self.notify_wake_callback();
     }
 
     fn check_duplicate_url(&mut self, url: &str) -> Result<DuplicateAction, StoreError> {
@@ -808,7 +684,7 @@ impl EngineState {
     }
 
     fn handle_add(&mut self, request: AddRequest) -> Option<String> {
-        let url = match validate_http_url(&request.url) {
+        let url = match ssrf::validate_http_url(&request.url) {
             Ok(url) => url,
             Err(error) => return Some(format!("Add failed: {error}")),
         };
@@ -871,7 +747,7 @@ impl EngineState {
         request: BridgeAddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
     ) {
-        let url = match validate_http_url(&request.url) {
+        let url = match ssrf::validate_http_url(&request.url) {
             Ok(url) => url,
             Err(error) => {
                 let _ = reply.send(BridgeAddOutcome::Invalid(error));
@@ -924,7 +800,7 @@ impl EngineState {
                 request
                     .filename
                     .clone()
-                    .unwrap_or_else(|| video_file_name(&add.url))
+                    .unwrap_or_else(|| video::video_file_name(&add.url))
             } else {
                 resolve_file_name(request.filename.as_deref(), None, &url)
             };
@@ -1211,6 +1087,7 @@ impl EngineState {
 
         match self.store.insert_download(&new) {
             Ok(id) => {
+                self.cache_dirty = true;
                 self.pump_queue();
                 Ok(Inserted {
                     id,
@@ -1249,7 +1126,7 @@ impl EngineState {
             return Err(InsertError::Failed(error.to_string()));
         }
 
-        let base_name = resolve_video_file_name(
+        let base_name = video::resolve_video_file_name(
             request.file_name.as_deref(),
             &request.url,
             request.video_format.as_deref(),
@@ -1313,6 +1190,7 @@ impl EngineState {
 
         match self.store.insert_download(&new) {
             Ok(id) => {
+                self.cache_dirty = true;
                 self.pump_queue();
                 Ok(Inserted {
                     id,
@@ -1368,7 +1246,7 @@ impl EngineState {
         cookie: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     ) {
-        if let Err(error) = validate_http_url(&url) {
+        if let Err(error) = ssrf::validate_http_url(&url) {
             let _ = reply.send(Err(error));
             return;
         }
@@ -1382,7 +1260,7 @@ impl EngineState {
         }
         let proxy = self.configured_proxy();
         thread::spawn(move || {
-            let _ = reply.send(ytdlp_listing(
+            let _ = reply.send(video::ytdlp_listing(
                 &dir,
                 &url,
                 cookie.as_deref(),
@@ -1405,14 +1283,14 @@ impl EngineState {
                 return;
             }
         };
-        if let Err(reason) = validate_public_page_url(&parsed) {
+        if let Err(reason) = ssrf::validate_public_page_url(&parsed) {
             let _ = reply.send(Err(reason));
             return;
         }
         let proxy = (!self.settings.proxy_url.trim().is_empty())
             .then(|| self.settings.proxy_url.trim().to_string());
         self.runtime.spawn(async move {
-            let _ = reply.send(fetch_page_links(parsed, proxy).await);
+            let _ = reply.send(ssrf::fetch_page_links(parsed, proxy).await);
         });
     }
 
@@ -1495,6 +1373,11 @@ impl EngineState {
                     && size > 0
                 {
                     let _ = self.store.set_video_size(id, size);
+                    if let Some(download) = self.cached_downloads.iter_mut().find(|d| d.id == id) {
+                        download.size = Some(size);
+                    } else {
+                        self.cache_dirty = true;
+                    }
                 }
                 self.record_speed(id, cumulative_done);
                 self.pending_segments.insert((id, 0), cumulative_done);
@@ -1561,6 +1444,7 @@ impl EngineState {
                     Ok(outcome) => {
                         let _ = self.store.set_size(id, outcome.bytes);
                         let _ = self.store.mark_done(id, now_millis());
+                        self.cache_dirty = true;
                     }
                     Err(error) => {
                         let _ = self.store.update_status(
@@ -1568,6 +1452,7 @@ impl EngineState {
                             DownloadStatus::Error,
                             Some(&error.to_string()),
                         );
+                        self.cache_dirty = true;
                     }
                 }
                 self.clear_pending(id);
@@ -1625,9 +1510,21 @@ impl EngineState {
         if updates.is_empty() {
             return;
         }
-        if self.store.update_progress_batch(id, &updates).is_ok() {
-            for (idx, _) in updates {
+        if let Ok(total) = self.store.update_progress_batch(id, &updates) {
+            for (idx, done) in updates {
                 self.pending_segments.remove(&(id, idx));
+                if let Some(list) = self.cached_segments.get_mut(&id)
+                    && let Some(segment) = list.iter_mut().find(|seg| seg.idx == idx)
+                {
+                    segment.done = done;
+                } else {
+                    self.cache_dirty = true;
+                }
+            }
+            if let Some(download) = self.cached_downloads.iter_mut().find(|d| d.id == id) {
+                download.downloaded = total;
+            } else {
+                self.cache_dirty = true;
             }
         }
     }
@@ -1649,6 +1546,7 @@ impl EngineState {
                     DownloadStatus::Error,
                     Some(&format!("invalid URL: {error}")),
                 );
+                self.cache_dirty = true;
                 return false;
             }
         };
@@ -1662,6 +1560,7 @@ impl EngineState {
                         DownloadStatus::Error,
                         Some(&format!("cookie: {error}")),
                     );
+                    self.cache_dirty = true;
                     return false;
                 }
             },
@@ -1678,6 +1577,7 @@ impl EngineState {
         {
             return false;
         }
+        self.cache_dirty = true;
 
         if download.kind == "video" {
             return self.spawn_video(download, generation, cookie);
@@ -1820,19 +1720,20 @@ impl EngineState {
                 DownloadStatus::Error,
                 Some("the video tools are not installed, install them in Settings"),
             );
+            self.cache_dirty = true;
             return false;
         }
         let cookie_file = cookie_text
             .as_deref()
-            .and_then(TempCookieFile::from_netscape);
+            .and_then(video::TempCookieFile::from_netscape);
         let js_runtime = tools::js_runtime_arg(&dir);
         let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
-        let work_dir = ytdlp_work_dir(download.save_path.parent());
+        let work_dir = video::ytdlp_work_dir(download.save_path.parent());
         let proxy = self.configured_proxy();
         let mut command = std::process::Command::new(tools::tool_path(&dir, tools::YTDLP));
         command
             .current_dir(work_dir)
-            .args(video_args(
+            .args(video::video_args(
                 selector,
                 &download.save_path,
                 &download.url,
@@ -1840,7 +1741,7 @@ impl EngineState {
                 self.settings.video_subtitles,
                 self.settings.video_chapters,
                 js_runtime.as_deref(),
-                cookie_file.as_ref().map(TempCookieFile::path),
+                cookie_file.as_ref().map(video::TempCookieFile::path),
                 proxy.as_deref(),
                 self.settings.global_speed_limit_kbps,
             ))
@@ -1856,18 +1757,19 @@ impl EngineState {
                     DownloadStatus::Error,
                     Some(&format!("yt-dlp: {error}")),
                 );
+                self.cache_dirty = true;
                 return false;
             }
         };
         let id = download.id;
         self.video_streams
-            .insert(id, VideoStreamTracker::from_seeded(download.size));
+            .insert(id, video::VideoStreamTracker::from_seeded(download.size));
         let stdout_join = child.stdout.take().map(|stdout| {
             let events = self.events.clone();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(parsed) = parse_progress(&line) {
-                        if is_auxiliary_media_file(parsed.filename.as_deref()) {
+                    if let Some(parsed) = video::parse_progress(&line) {
+                        if video::is_auxiliary_media_file(parsed.filename.as_deref()) {
                             continue;
                         }
                         let _ = events.send(Event::VideoProgress {
@@ -1906,7 +1808,7 @@ impl EngineState {
             ActiveDownload {
                 generation,
                 handle: None,
-                video: Some(VideoRun {
+                video: Some(video::VideoRun {
                     child,
                     save_path: download.save_path.clone(),
                     last_error,
@@ -1946,7 +1848,7 @@ impl EngineState {
             if success {
                 // The row reserved its temp name before the run; a finished video leaves it empty.
                 let _ = std::fs::remove_file(temp_path_for(&run.save_path));
-                if let Some(actual_path) = resolve_video_output(&run.save_path) {
+                if let Some(actual_path) = video::resolve_video_output(&run.save_path) {
                     if actual_path != run.save_path
                         && let Some(actual_name) = actual_path.file_name().and_then(|n| n.to_str())
                     {
@@ -1963,7 +1865,7 @@ impl EngineState {
                         DownloadStatus::Error,
                         Some("yt-dlp exited without producing an output file"),
                     );
-                    remove_parts(&run.save_path);
+                    video::remove_parts(&run.save_path);
                 }
             } else {
                 let raw = run
@@ -1971,13 +1873,14 @@ impl EngineState {
                     .lock()
                     .map(|line| line.clone())
                     .unwrap_or_default();
-                let message = format_ytdlp_error(&raw);
+                let message = video::format_ytdlp_error(&raw);
                 let _ = self
                     .store
                     .update_status(id, DownloadStatus::Error, Some(&message));
                 let _ = std::fs::remove_file(&run.save_path);
-                remove_parts(&run.save_path);
+                video::remove_parts(&run.save_path);
             }
+            self.cache_dirty = true;
             self.video_streams.remove(&id);
             self.speeds.remove(&id);
             self.progress.remove(&id);
@@ -1995,6 +1898,7 @@ impl EngineState {
         let segments = plan_segments(download.size.unwrap_or(0), false, 1);
         if self.store.replace_segments(id, &segments, 1, false).is_ok() {
             let _ = self.store.update_status(id, DownloadStatus::Queued, None);
+            self.cache_dirty = true;
             self.message = Some(format!("Falling back to single stream: {reason}"));
         }
     }
@@ -2029,7 +1933,7 @@ impl EngineState {
     fn pause_with_pump(&mut self, id: i64, pump: bool) {
         self.flush_segment_progress(id);
         if let Some(mut active) = self.active.remove(&id) {
-            stop_video(&mut active);
+            video::stop_video(&mut active.video);
             if let Some(handle) = active.handle.take() {
                 handle.abort();
             }
@@ -2045,6 +1949,7 @@ impl EngineState {
                 DownloadStatus::Downloading | DownloadStatus::Queued
             ) {
                 let _ = self.store.update_status(id, DownloadStatus::Paused, None);
+                self.cache_dirty = true;
             }
         }
         if pump {
@@ -2059,6 +1964,7 @@ impl EngineState {
                 DownloadStatus::Paused | DownloadStatus::Error | DownloadStatus::Queued
             ) {
                 let _ = self.store.update_status(id, DownloadStatus::Queued, None);
+                self.cache_dirty = true;
             }
         }
         self.pump_queue();
@@ -2117,6 +2023,7 @@ impl EngineState {
             self.message = Some(format!("Update URL failed: {error}"));
             return;
         }
+        self.cache_dirty = true;
         self.message = Some("URL updated, resuming download".to_string());
         self.resume(id);
     }
@@ -2159,12 +2066,13 @@ impl EngineState {
             self.message = Some(format!("Update record failed: {error}"));
             return;
         }
+        self.cache_dirty = true;
         self.message = Some(format!("Moved to {}", dest.display()));
     }
 
     fn remove(&mut self, id: i64, delete_file: bool) {
         if let Some(mut active) = self.active.remove(&id) {
-            stop_video(&mut active);
+            video::stop_video(&mut active.video);
             if let Some(handle) = active.handle.take() {
                 handle.abort();
                 let _ = self.runtime.block_on(handle);
@@ -2175,15 +2083,16 @@ impl EngineState {
             .get_download(id)
             .ok()
             .map(|download| (download.temp_path, download.save_path, download.kind));
-        if self.store.delete_download(id).is_ok()
-            && let Some((temp_path, save_path, kind)) = details
-        {
-            let _ = std::fs::remove_file(&temp_path);
-            if kind == "video" {
-                remove_parts(&save_path);
-            }
-            if delete_file {
-                let _ = std::fs::remove_file(&save_path);
+        if self.store.delete_download(id).is_ok() {
+            self.cache_dirty = true;
+            if let Some((temp_path, save_path, kind)) = details {
+                let _ = std::fs::remove_file(&temp_path);
+                if kind == "video" {
+                    video::remove_parts(&save_path);
+                }
+                if delete_file {
+                    let _ = std::fs::remove_file(&save_path);
+                }
             }
         }
         self.video_streams.remove(&id);
@@ -2204,7 +2113,9 @@ impl EngineState {
             .map(|download| download.id)
             .collect();
         for id in completed {
-            let _ = self.store.delete_download(id);
+            if self.store.delete_download(id).is_ok() {
+                self.cache_dirty = true;
+            }
         }
     }
 
@@ -2238,7 +2149,13 @@ impl EngineState {
             .map(|download| download.id)
             .collect();
         for id in paused {
-            let _ = self.store.update_status(id, DownloadStatus::Queued, None);
+            if self
+                .store
+                .update_status(id, DownloadStatus::Queued, None)
+                .is_ok()
+            {
+                self.cache_dirty = true;
+            }
         }
         self.pump_queue();
     }
@@ -2295,28 +2212,29 @@ impl EngineState {
         for id in active {
             self.flush_segment_progress(id);
             if let Some(mut download) = self.active.remove(&id) {
-                stop_video(&mut download);
+                video::stop_video(&mut download.video);
                 if let Some(handle) = download.handle.take() {
                     handle.abort();
                 }
                 let _ = self.store.update_status(id, DownloadStatus::Paused, None);
+                self.cache_dirty = true;
             }
             self.clear_pending(id);
         }
     }
 
     fn publish(&mut self) {
-        let Ok(downloads) = self.store.list_downloads() else {
-            return;
-        };
-        let mut segments = self.store.all_segments().unwrap_or_default();
-        for ((download_id, idx), done) in &self.pending_segments {
-            if let Some(list) = segments.get_mut(download_id)
-                && let Some(segment) = list.iter_mut().find(|seg| seg.idx == *idx)
-            {
-                segment.done = *done;
-            }
+        if self.cache_dirty {
+            let Ok(downloads) = self.store.list_downloads() else {
+                return;
+            };
+            self.cached_downloads = downloads;
+            self.cached_segments = self.store.all_segments().unwrap_or_default();
+            self.cache_dirty = false;
         }
+        let mut downloads = self.cached_downloads.clone();
+        let mut segments = self.cached_segments.clone();
+        apply_pending_segments_overlay(&mut downloads, &mut segments, &self.pending_segments);
         let snapshot = Snapshot {
             downloads,
             segments,
@@ -2334,6 +2252,7 @@ impl EngineState {
                 }
             }),
             wake_seq: self.wake_seq,
+            exit_requested: self.exit_requested,
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             slot.version = slot.version.saturating_add(1);
@@ -2342,64 +2261,31 @@ impl EngineState {
     }
 }
 
-/// File name for a video link that came without one: the YouTube id, else the last path segment.
-fn video_file_name(url: &str) -> String {
-    let id = Url::parse(url)
-        .ok()
-        .and_then(|url| {
-            url.query_pairs()
-                .find(|(key, _)| key == "v")
-                .map(|(_, value)| value.into_owned())
-                .or_else(|| {
-                    url.path_segments()
-                        .and_then(|mut segments| segments.next_back().map(str::to_string))
-                })
-        })
-        .unwrap_or_default();
-    let safe: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let safe = safe.trim_matches('-');
-    if safe.is_empty() {
-        "video.mp4".to_string()
-    } else {
-        format!("{safe}.mp4")
+fn apply_pending_segments_overlay(
+    downloads: &mut [Download],
+    segments: &mut HashMap<i64, Vec<Segment>>,
+    pending_segments: &HashMap<(i64, u32), u64>,
+) {
+    if pending_segments.is_empty() {
+        return;
     }
-}
-
-fn resolve_video_file_name(requested: Option<&str>, url: &str, selector: Option<&str>) -> String {
-    let audio_only = selector.is_some_and(is_audio_only_selector);
-    let raw = requested
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| video_file_name(url));
-    let clean = sanitize_file_name(&raw);
-    let lower = clean.to_ascii_lowercase();
-    if audio_only {
-        if [".m4a", ".mp3", ".opus", ".aac", ".flac", ".ogg", ".wav"]
-            .iter()
-            .any(|ext| lower.ends_with(ext))
+    let mut touched_ids = Vec::new();
+    for ((download_id, idx), done) in pending_segments {
+        if let Some(list) = segments.get_mut(download_id)
+            && let Some(segment) = list.iter_mut().find(|seg| seg.idx == *idx)
         {
-            return clean;
+            segment.done = *done;
+            if !touched_ids.contains(download_id) {
+                touched_ids.push(*download_id);
+            }
         }
-        let stem = if lower.ends_with(".mp4") {
-            &clean[..clean.len() - 4]
-        } else {
-            clean.as_str()
-        };
-        format!("{stem}.m4a")
-    } else if lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".webm") {
-        clean
-    } else {
-        format!("{clean}.mp4")
+    }
+    for id in touched_ids {
+        if let Some(list) = segments.get(&id)
+            && let Some(download) = downloads.iter_mut().find(|d| d.id == id)
+        {
+            download.downloaded = list.iter().map(|seg| seg.done).sum();
+        }
     }
 }
 
@@ -2412,361 +2298,6 @@ fn encrypt_cookie(raw: Option<&str>) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Short-lived Netscape cookie file for `yt-dlp --cookies`, deleted automatically on drop.
-struct TempCookieFile {
-    path: PathBuf,
-}
-
-impl TempCookieFile {
-    fn from_netscape(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim();
-        if !trimmed.starts_with("# Netscape HTTP Cookie File") {
-            return None;
-        }
-        let has_entries = trimmed
-            .lines()
-            .any(|line| !line.is_empty() && !line.starts_with('#') && line.contains('\t'));
-        if !has_entries {
-            return None;
-        }
-
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir();
-        for _ in 0..8 {
-            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = dir.join(format!("lajufile-yt-{pid}-{seq}.cookies"));
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            match opts.open(&path) {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    if file.write_all(trimmed.as_bytes()).is_err() || file.write_all(b"\n").is_err()
-                    {
-                        drop(file);
-                        let _ = std::fs::remove_file(&path);
-                        return None;
-                    }
-                    return Some(Self { path });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return None,
-            }
-        }
-        None
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempCookieFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn format_ytdlp_error(stderr: &str) -> String {
-    let trimmed = stderr.trim();
-    if trimmed.contains("Sign in to confirm you're not a bot") {
-        return "yt-dlp: YouTube requires a signed-in browser session on this network. Log in to YouTube in your browser and retry from the LajuFile extension (paired with this app).".to_string();
-    }
-    if let Some(err_line) = trimmed
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with("ERROR:"))
-    {
-        return format!("yt-dlp: {}", err_line.trim());
-    }
-    if trimmed.is_empty() {
-        "yt-dlp failed".to_string()
-    } else {
-        format!("yt-dlp: {trimmed}")
-    }
-}
-
-/// Resolves a writable working directory for `yt-dlp` child processes so they never
-/// inherit a protected OS directory (such as `C:\Windows\System32`).
-fn ytdlp_work_dir(preferred: Option<&Path>) -> PathBuf {
-    if let Some(dir) = preferred.filter(|p| !p.as_os_str().is_empty() && p.is_absolute())
-        && ensure_dir(dir).is_ok()
-        && dir.is_dir()
-    {
-        return dir.to_path_buf();
-    }
-    let tmp = std::env::temp_dir();
-    let _ = std::fs::create_dir_all(&tmp);
-    tmp
-}
-
-/// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
-fn ytdlp_listing(
-    dir: &Path,
-    url: &str,
-    cookie: Option<&str>,
-    proxy: Option<&str>,
-) -> Result<VideoListing, String> {
-    let cookie_file = cookie.and_then(TempCookieFile::from_netscape);
-    let js_runtime = tools::js_runtime_arg(dir);
-    let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
-    command
-        .current_dir(ytdlp_work_dir(None))
-        .args(["--no-playlist", "-J"]);
-    if let Some(proxy_url) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or(""))? {
-        command.args(["--proxy", &proxy_url]);
-    }
-    if let Some(runtime) = js_runtime.as_deref() {
-        command.args(["--js-runtimes", runtime]);
-    }
-    if let Some(cookies) = cookie_file.as_ref() {
-        command.arg("--cookies").arg(cookies.path());
-    }
-    command
-        .args(["--", url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    tools::no_window(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("yt-dlp: {error}"))?;
-    let stdout = read_all(child.stdout.take());
-    let stderr = read_all(child.stderr.take());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                tools::kill_tree(child.id());
-                let _ = child.wait();
-                return Err("yt-dlp did not answer in time".to_string());
-            }
-            Err(error) => return Err(format!("yt-dlp: {error}")),
-        }
-    };
-    let output = stdout.join().unwrap_or_default();
-    if !status.success() {
-        let error = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).to_string();
-        return Err(format_ytdlp_error(&error));
-    }
-    let json: serde_json::Value =
-        serde_json::from_slice(&output).map_err(|error| format!("yt-dlp: {error}"))?;
-    let listing = video::listing(&json);
-    if listing.choices.is_empty() {
-        return Err("this link has no downloadable formats".to_string());
-    }
-    Ok(listing)
-}
-
-fn read_all<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut buffer = Vec::new();
-        if let Some(mut reader) = reader {
-            let _ = reader.read_to_end(&mut buffer);
-        }
-        buffer
-    })
-}
-
-async fn resolve_public_ips(url: &Url) -> Result<Vec<std::net::SocketAddr>, String> {
-    validate_public_page_url(url)?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "Web page URL is missing a host".to_string())?;
-    let port = url.port_or_known_default().unwrap_or(80);
-    let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| format!("Resolve failed: {error}"))?
-        .collect();
-    if resolved.is_empty() {
-        return Err("Could not resolve host".to_string());
-    }
-    for addr in &resolved {
-        if !is_public_ip(addr.ip()) {
-            return Err("Refusing to scan private or local network address".to_string());
-        }
-    }
-    Ok(resolved)
-}
-
-/// Fetches up to 2 MB of HTML from one public web page and extracts unique link targets.
-async fn fetch_page_links(url: Url, proxy_url: Option<String>) -> Result<Vec<String>, String> {
-    const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
-    const MAX_REDIRECTS: usize = 5;
-
-    let validated_proxy =
-        lajufile_core::http::validate_proxy_url(proxy_url.as_deref().unwrap_or(""))?;
-    let mut current_url = url;
-    let mut response = {
-        let mut hops = 0usize;
-        loop {
-            validate_public_page_url(&current_url)?;
-            let mut builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::none());
-            if let Some(proxy) = &validated_proxy {
-                builder =
-                    builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("Proxy: {e}"))?);
-            } else {
-                let addrs = resolve_public_ips(&current_url).await?;
-                if let Some(url::Host::Domain(domain)) = current_url.host() {
-                    builder = builder.resolve_to_addrs(domain, &addrs);
-                }
-            }
-            let client = builder
-                .build()
-                .map_err(|error| format!("Client failed: {error}"))?;
-            let resp = client
-                .get(current_url.clone())
-                .header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT)
-                .send()
-                .await
-                .map_err(|error| format!("Fetch failed: {error}"))?;
-            if resp.status().is_redirection() {
-                if hops >= MAX_REDIRECTS {
-                    return Err("Too many redirects".to_string());
-                }
-                let location = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or_else(|| "Redirect missing Location header".to_string())?;
-                current_url = current_url
-                    .join(location)
-                    .map_err(|error| format!("Invalid redirect target: {error}"))?;
-                hops += 1;
-                continue;
-            }
-            break resp
-                .error_for_status()
-                .map_err(|error| format!("Fetch failed: {error}"))?;
-        }
-    };
-
-    if let Some(content_type) = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-    {
-        let lower = content_type.to_ascii_lowercase();
-        if !lower.contains("html") && !lower.contains("text/plain") {
-            return Err(format!("Page is not HTML ({content_type})"));
-        }
-    }
-    let final_url = response.url().clone();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("Read failed: {error}"))?
-    {
-        let remaining = MAX_PAGE_BYTES.saturating_sub(bytes.len());
-        if remaining == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-        if bytes.len() >= MAX_PAGE_BYTES {
-            break;
-        }
-    }
-    let html = String::from_utf8_lossy(&bytes);
-    Ok(crate::ui::extract_links_from_html(
-        final_url.as_str(),
-        &html,
-    ))
-}
-
-fn ytdlp_output_template(path: &Path) -> OsString {
-    match path.to_str() {
-        Some(text) => OsString::from(text.replace('%', "%%")),
-        None => path.as_os_str().to_owned(),
-    }
-}
-
-/// yt-dlp arguments for one video job: merge to mp4 next to the target path.
-#[allow(clippy::too_many_arguments)]
-fn video_args(
-    selector: &str,
-    save_path: &Path,
-    url: &str,
-    tools_dir: &Path,
-    subtitles: bool,
-    embed_chapters: bool,
-    js_runtime: Option<&str>,
-    cookie_file: Option<&Path>,
-    proxy: Option<&str>,
-    limit_kbps: u64,
-) -> Vec<OsString> {
-    let audio_only = is_audio_only_selector(selector);
-    let mut args: Vec<OsString> = vec!["--no-playlist".into(), "--newline".into()];
-    if audio_only {
-        args.extend(["-x".into(), "--audio-format".into(), "m4a".into()]);
-    } else {
-        args.extend([
-            "--merge-output-format".into(),
-            "mp4".into(),
-            // Prefer H.264 MP4 + AAC M4A and transcode non-AAC audio so Windows players have sound.
-            "-S".into(),
-            "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
-            "--ppa".into(),
-            "Merger+ffmpeg_o1:-c:a aac".into(),
-        ]);
-    }
-    args.extend(["--ffmpeg-location".into(), tools_dir.as_os_str().to_owned()]);
-    if let Ok(Some(proxy_url)) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or("")) {
-        args.extend(["--proxy".into(), proxy_url.into()]);
-    }
-    if limit_kbps > 0 {
-        args.extend(["--limit-rate".into(), format!("{limit_kbps}K").into()]);
-    }
-    if let Some(runtime) = js_runtime {
-        args.push("--js-runtimes".into());
-        args.push(runtime.into());
-    }
-    if let Some(cookies) = cookie_file {
-        args.push("--cookies".into());
-        args.push(cookies.as_os_str().to_owned());
-    }
-    if subtitles && !audio_only {
-        args.extend([
-            "--write-subs".into(),
-            "--write-auto-subs".into(),
-            "--sub-format".into(),
-            "srt/best".into(),
-            "--embed-subs".into(),
-        ]);
-    }
-    if embed_chapters {
-        args.push("--embed-chapters".into());
-    }
-    args.extend([
-        // Speed up fragmented/DASH streams and work around single-stream server throttling.
-        "-N".into(),
-        "8".into(),
-        "--http-chunk-size".into(),
-        "10M".into(),
-        // Machine-readable progress, one line per update:
-        // "LF <downloaded> <total> <estimate> <filename>", either total may be NA.
-        "--progress-template".into(),
-        "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.filename)s".into(),
-        "-f".into(),
-        selector.into(),
-        "-o".into(),
-        ytdlp_output_template(save_path),
-        "--".into(),
-        url.into(),
-    ]);
-    args
-}
-
 fn compute_smoothed_speed(previous: Option<u64>, instant: u64) -> u64 {
     match previous {
         Some(prev) if prev > 0 => ((prev as f64 * 0.6) + (instant as f64 * 0.4)).round() as u64,
@@ -2774,91 +2305,6 @@ fn compute_smoothed_speed(previous: Option<u64>, instant: u64) -> u64 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedVideoProgress {
-    done: u64,
-    total: Option<u64>,
-    filename: Option<String>,
-}
-
-fn is_auxiliary_media_file(filename: Option<&str>) -> bool {
-    let Some(name) = filename else {
-        return false;
-    };
-    let lower = name.trim().to_ascii_lowercase();
-    let base = lower.strip_suffix(".part").unwrap_or(&lower);
-    [
-        ".vtt",
-        ".srt",
-        ".ass",
-        ".ssa",
-        ".ttml",
-        ".lrc",
-        ".srv1",
-        ".srv2",
-        ".srv3",
-        ".json3",
-        ".description",
-        ".info.json",
-        ".webp",
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".ytdl",
-    ]
-    .iter()
-    .any(|ext| base.ends_with(ext))
-}
-
-fn parse_progress(line: &str) -> Option<ParsedVideoProgress> {
-    let rest = line.strip_prefix("LF ")?;
-    let mut parts = rest.splitn(4, ' ');
-    let done = parts.next()?.parse().ok()?;
-    let total_opt = parts.next().and_then(|text| text.parse().ok());
-    let estimate_opt = parts.next().and_then(|text| text.parse().ok());
-    let filename = parts
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "NA")
-        .map(str::to_string);
-    Some(ParsedVideoProgress {
-        done,
-        total: total_opt.or(estimate_opt),
-        filename,
-    })
-}
-
-fn stop_video(active: &mut ActiveDownload) {
-    if let Some(mut run) = active.video.take() {
-        // yt-dlp's ffmpeg child survives a plain kill and would finish the merge.
-        tools::kill_tree(run.child.id());
-        let _ = run.child.wait();
-        if let Some(join) = run.stdout_join.take() {
-            let _ = join.join();
-        }
-        if let Some(join) = run.stderr_join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-fn resolve_video_output(expected: &Path) -> Option<PathBuf> {
-    if expected.is_file() {
-        return Some(expected.to_path_buf());
-    }
-    let dir = expected.parent()?;
-    let stem = expected.file_stem()?.to_str()?;
-    for ext in ["mp4", "mkv", "webm", "m4a", "mp3", "opus"] {
-        let candidate = dir.join(format!("{stem}.{ext}"));
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Drops the temp files yt-dlp leaves behind: `name.part`, `name.part-Frag<N>`,
-/// `name.ytdl`, `name.f137.mp4.part-Frag<N>` and `name.temp.mp4`.
 fn move_file_safe(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
@@ -2872,54 +2318,6 @@ fn move_file_safe(from: &Path, to: &Path) -> std::io::Result<()> {
             } else {
                 Err(rename_err)
             }
-        }
-    }
-}
-
-fn is_ytdlp_format_suffix(rest: &str) -> bool {
-    let Some(after_dot) = rest.strip_prefix(".f") else {
-        return false;
-    };
-    let digits = after_dot.bytes().take_while(|b| b.is_ascii_digit()).count();
-    digits > 0 && after_dot.as_bytes().get(digits) == Some(&b'.')
-}
-
-fn remove_parts(save_path: &Path) {
-    let (Some(dir), Some(name)) = (
-        save_path.parent(),
-        save_path.file_name().and_then(|name| name.to_str()),
-    ) else {
-        return;
-    };
-    let stem = save_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| name.to_string());
-    let sentinel = format!("{name}.lajufile");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name == name {
-            continue;
-        }
-        if file_name == sentinel {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
-        let matches_name = file_name
-            .strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with('.'));
-        let matches_stem_ytdlp = file_name
-            .strip_prefix(&stem)
-            .is_some_and(|rest| rest.starts_with(".temp.") || is_ytdlp_format_suffix(rest));
-        let temp = file_name.ends_with(".part")
-            || file_name.contains(".part-Frag")
-            || file_name.ends_with(".ytdl")
-            || file_name.ends_with(".temp.mp4");
-        if (matches_name || matches_stem_ytdlp) && temp {
-            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -2941,122 +2339,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_lines_carry_downloaded_bytes_and_total() {
-        assert_eq!(
-            parse_progress("LF 1234 5678 5678"),
-            Some(ParsedVideoProgress {
-                done: 1234,
-                total: Some(5678),
-                filename: None,
-            })
-        );
-        assert_eq!(
-            parse_progress("LF 99 NA 4321 C:/dl/clip with spaces.f137.mp4"),
-            Some(ParsedVideoProgress {
-                done: 99,
-                total: Some(4321),
-                filename: Some("C:/dl/clip with spaces.f137.mp4".to_string()),
-            })
-        );
-        assert_eq!(
-            parse_progress("LF 99 NA NA"),
-            Some(ParsedVideoProgress {
-                done: 99,
-                total: None,
-                filename: None,
-            })
-        );
-        assert_eq!(parse_progress("[youtube] Extracting URL"), None);
-        assert_eq!(parse_progress(""), None);
-    }
-
-    #[test]
-    fn video_stream_tracker_skips_subtitles_and_accumulates_video_and_audio() {
-        assert!(is_auxiliary_media_file(Some("clip.en.vtt")));
-        assert!(is_auxiliary_media_file(Some("clip.id.srt.part")));
-        assert!(!is_auxiliary_media_file(Some("clip.f137.mp4")));
-
-        let mut tracker = VideoStreamTracker::from_seeded(Some(150_000_000));
-        let (done1, sz1) = tracker.record(20_000_000, Some(135_000_000), Some("clip.f137.mp4"));
-        assert_eq!(done1, 20_000_000);
-        assert_eq!(sz1, Some(150_000_000));
-
-        let (done2, _) = tracker.record(135_000_000, Some(135_000_000), Some("clip.f137.mp4"));
-        assert_eq!(done2, 135_000_000);
-
-        let (done3, sz3) = tracker.record(5_000_000, Some(18_000_000), Some("clip.f140.m4a"));
-        assert_eq!(done3, 140_000_000);
-        assert_eq!(sz3, Some(153_000_000));
-    }
-
-    #[test]
-    fn video_args_select_quality_and_target() {
-        let args = video_args(
-            "bv*[height<=360]+ba",
-            Path::new("C:/dl/100% clip.mp4"),
-            "https://youtu.be/x",
-            Path::new("C:/tools"),
-            false,
-            false,
-            Some("node:/usr/bin/node"),
-            Some(Path::new("C:/tmp/cookies.txt")),
-            Some("http://127.0.0.1:8080"),
-            512,
-        );
-        let args: Vec<String> = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        assert_eq!(
-            args[args.iter().position(|a| a == "-f").unwrap() + 1],
-            "bv*[height<=360]+ba"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "-o").unwrap() + 1],
-            "C:/dl/100%% clip.mp4"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--proxy").unwrap() + 1],
-            "http://127.0.0.1:8080/"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--limit-rate").unwrap() + 1],
-            "512K"
-        );
-        assert_eq!(
-            args[args
-                .iter()
-                .position(|a| a == "--merge-output-format")
-                .unwrap()
-                + 1],
-            "mp4"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "-S").unwrap() + 1],
-            "ext:mp4:m4a,vcodec:h264,acodec:aac"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--ppa").unwrap() + 1],
-            "Merger+ffmpeg_o1:-c:a aac"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--js-runtimes").unwrap() + 1],
-            "node:/usr/bin/node"
-        );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--cookies").unwrap() + 1],
-            "C:/tmp/cookies.txt"
-        );
-        assert!(!args.iter().any(|arg| arg == "--embed-subs"));
-        assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
-        assert!(args.iter().any(|arg| arg == "--http-chunk-size"));
-        assert!(args.iter().any(|arg| arg == "--progress-template"));
-        assert_eq!(args[args.len() - 2], "--");
-        assert_eq!(args.last().unwrap(), "https://youtu.be/x");
-    }
-
-    #[test]
     fn smoothed_speed_blends_samples_without_wild_spikes() {
         assert_eq!(compute_smoothed_speed(None, 10_000_000), 10_000_000);
         assert_eq!(
@@ -3066,205 +2348,55 @@ mod tests {
     }
 
     #[test]
-    fn video_args_include_subtitles_and_chapters_when_enabled() {
-        let args: Vec<String> = video_args(
-            "best",
-            Path::new("C:/dl/clip.mp4"),
-            "https://youtu.be/x",
-            Path::new("C:/tools"),
-            true,
-            true,
-            None,
-            None,
-            None,
-            0,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-        for flag in [
-            "--write-subs",
-            "--write-auto-subs",
-            "--embed-subs",
-            "--embed-chapters",
-        ] {
-            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
-        }
-        assert!(!args.iter().any(|arg| arg == "--proxy"));
-        assert!(!args.iter().any(|arg| arg == "--limit-rate"));
-    }
+    fn apply_pending_segments_overlay_updates_segments_and_downloaded_total() {
+        let mut downloads = vec![Download {
+            id: 7,
+            url: "https://example.com/archive.zip".to_string(),
+            final_url: None,
+            file_name: "archive.zip".to_string(),
+            save_path: PathBuf::from("archive.zip"),
+            temp_path: PathBuf::from("archive.zip.lajufile"),
+            size: Some(1_000),
+            downloaded: 100,
+            status: DownloadStatus::Downloading,
+            category: Category::Compressed,
+            kind: "http".to_string(),
+            video_format: None,
+            connections: 2,
+            ranged: true,
+            etag: None,
+            last_modified: None,
+            cookie_enc: None,
+            referrer: None,
+            user_agent: None,
+            error: None,
+            queue_order: 1,
+            created_at: 0,
+            completed_at: None,
+        }];
+        let mut segments = HashMap::from([(
+            7,
+            vec![
+                Segment {
+                    idx: 0,
+                    start: 0,
+                    end: 499,
+                    done: 100,
+                },
+                Segment {
+                    idx: 1,
+                    start: 500,
+                    end: 999,
+                    done: 0,
+                },
+            ],
+        )]);
+        let pending = HashMap::from([((7, 0), 250), ((7, 1), 150), ((99, 0), 50)]);
 
-    #[test]
-    fn video_file_name_uses_the_youtube_id() {
-        assert_eq!(
-            video_file_name("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
-            "dQw4w9WgXcQ.mp4"
-        );
-        assert_eq!(video_file_name("https://youtu.be/abc123"), "abc123.mp4");
-        assert_eq!(video_file_name("not a url"), "video.mp4");
-        assert_eq!(
-            resolve_video_file_name(
-                Some("Song.m4a"),
-                "https://youtu.be/abc123",
-                Some("ba[ext=m4a]/ba")
-            ),
-            "Song.m4a"
-        );
-        assert_eq!(
-            resolve_video_file_name(
-                Some("Song.mp4"),
-                "https://youtu.be/abc123",
-                Some("ba[ext=m4a]/ba")
-            ),
-            "Song.m4a"
-        );
-        assert_eq!(
-            resolve_video_file_name(None, "https://youtu.be/abc123", Some("ba[ext=m4a]/ba")),
-            "abc123.m4a"
-        );
-    }
+        apply_pending_segments_overlay(&mut downloads, &mut segments, &pending);
 
-    #[test]
-    fn video_args_audio_only_extracts_m4a_without_mp4_merge() {
-        assert!(is_audio_only_selector("ba[ext=m4a]/ba"));
-        assert!(!is_audio_only_selector("bv*[height<=1080]+ba/b"));
-
-        let args: Vec<String> = video_args(
-            "ba[ext=m4a]/ba",
-            Path::new("C:/dl/song.m4a"),
-            "https://youtu.be/x",
-            Path::new("C:/tools"),
-            true,
-            true,
-            None,
-            None,
-            None,
-            0,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-
-        assert!(!args.iter().any(|arg| arg == "--merge-output-format"));
-        assert!(!args.iter().any(|arg| arg == "--write-subs"));
-        assert!(args.windows(2).any(|w| w == ["-x", "--audio-format"]));
-        assert!(args.windows(2).any(|w| w == ["--audio-format", "m4a"]));
-        assert!(args.windows(2).any(|w| w == ["-o", "C:/dl/song.m4a"]));
-    }
-
-    #[test]
-    fn remove_parts_keeps_the_target_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let save = dir.path().join("clip.mp4");
-        std::fs::write(&save, b"x").unwrap();
-        let leftovers = [
-            "clip.mp4.part",
-            "clip.mp4.f137.mp4.part",
-            "clip.mp4.part-Frag12",
-            "clip.mp4.ytdl",
-            "clip.mp4.temp.mp4",
-            "clip.mp4.lajufile",
-        ];
-        for name in leftovers {
-            std::fs::write(dir.path().join(name), b"x").unwrap();
-        }
-        std::fs::write(dir.path().join("other.mp4.part"), b"x").unwrap();
-        std::fs::write(dir.path().join("clip.1080p.mp4.lajufile"), b"x").unwrap();
-        std::fs::write(dir.path().join("clip.mp4"), b"final").unwrap();
-
-        remove_parts(&save);
-
-        assert_eq!(std::fs::read(&save).unwrap(), b"final");
-        assert!(dir.path().join("other.mp4.part").exists());
-        assert!(dir.path().join("clip.1080p.mp4.lajufile").exists());
-        for name in leftovers {
-            assert!(!dir.path().join(name).exists(), "{name} should be removed");
-        }
-    }
-
-    #[test]
-    fn resolve_video_output_falls_back_to_remuxed_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let expected = dir.path().join("movie.mp4");
-        let mkv = dir.path().join("movie.mkv");
-        std::fs::write(&mkv, b"mkv-bytes").unwrap();
-        assert_eq!(resolve_video_output(&expected), Some(mkv));
-        assert_eq!(resolve_video_output(&dir.path().join("absent.mp4")), None);
-    }
-
-    #[test]
-    fn ssrf_guard_blocks_loopback_private_and_metadata_urls() {
-        for bad in [
-            "http://127.0.0.1:53841/rules",
-            "http://localhost:8080/",
-            "http://sub.localhost/test",
-            "http://169.254.169.254/latest/meta-data/",
-            "http://10.0.0.1/",
-            "http://192.168.1.1/",
-            "http://172.16.0.5/",
-            "http://100.64.0.1/",
-            "http://[::1]/",
-            "http://[::ffff:127.0.0.1]/",
-            "file:///C:/Windows/System32/drivers/etc/hosts",
-        ] {
-            let parsed = Url::parse(bad).unwrap();
-            assert!(
-                validate_public_page_url(&parsed).is_err(),
-                "{bad} should be blocked"
-            );
-        }
-        let ok = Url::parse("https://example.com/downloads").unwrap();
-        assert!(validate_public_page_url(&ok).is_ok());
-    }
-
-    #[test]
-    fn validate_http_url_rejects_non_http_schemes() {
-        assert!(validate_http_url("https://example.com/a.zip").is_ok());
-        assert!(validate_http_url("http://example.com/a.zip").is_ok());
-        assert!(validate_http_url("file:///tmp/a.zip").is_err());
-        assert!(validate_http_url("javascript:alert(1)").is_err());
-    }
-
-    #[test]
-    fn temp_cookie_file_writes_netscape_cookies_and_cleans_up_on_drop() {
-        assert!(TempCookieFile::from_netscape("SID=abc; HSID=xyz").is_none());
-        assert!(TempCookieFile::from_netscape("# Netscape HTTP Cookie File\n").is_none());
-
-        let netscape =
-            "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tvalue123\n";
-        let path = {
-            let file = TempCookieFile::from_netscape(netscape).expect("valid cookie file");
-            let saved = std::fs::read_to_string(file.path()).unwrap();
-            assert!(saved.contains("SID\tvalue123"));
-            file.path().to_path_buf()
-        };
-        assert!(!path.exists(), "cookie file must be deleted on drop");
-    }
-
-    #[test]
-    fn format_ytdlp_error_clarifies_bot_check_and_picks_error_line() {
-        let bot = "WARNING: foo\nERROR: [youtube] xyz: Sign in to confirm you're not a bot.\nAlso see wiki";
-        assert!(format_ytdlp_error(bot).contains("signed-in browser session"));
-
-        let other = "WARNING: minor\nERROR: [youtube] xyz: Video unavailable";
-        assert_eq!(
-            format_ytdlp_error(other),
-            "yt-dlp: ERROR: [youtube] xyz: Video unavailable"
-        );
-    }
-
-    #[test]
-    fn ytdlp_work_dir_prefers_writable_absolute_dir_and_falls_back_to_temp() {
-        let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("videos/sub");
-        assert_eq!(ytdlp_work_dir(Some(&nested)), nested);
-        assert!(nested.is_dir());
-
-        assert_eq!(ytdlp_work_dir(Some(Path::new(""))), std::env::temp_dir());
-        assert_eq!(
-            ytdlp_work_dir(Some(Path::new("relative-dir"))),
-            std::env::temp_dir()
-        );
-        assert_eq!(ytdlp_work_dir(None), std::env::temp_dir());
+        assert_eq!(segments[&7][0].done, 250);
+        assert_eq!(segments[&7][1].done, 150);
+        assert_eq!(downloads[0].downloaded, 400);
     }
 }

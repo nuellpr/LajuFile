@@ -99,33 +99,6 @@ fn acquire_unix_lock(path: &Path) -> Result<std::fs::File, bool> {
     Err(contended)
 }
 
-#[cfg(unix)]
-fn acquire_unix_lock(path: &Path) -> Result<std::fs::File, bool> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
-
-    unsafe extern "C" {
-        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
-    }
-    const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| false)?;
-    if unsafe { flock(file.as_raw_fd(), LOCK_EX_NB) } == 0 {
-        return Ok(file);
-    }
-    let err = std::io::Error::last_os_error();
-    let contended =
-        err.kind() == std::io::ErrorKind::WouldBlock || matches!(err.raw_os_error(), Some(11 | 35));
-    Err(contended)
-}
-
 #[cfg(windows)]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
@@ -156,7 +129,15 @@ pub fn signal_existing_instance(settings: &Settings) -> bool {
     probe_wake(settings)
 }
 
+pub fn request_graceful_shutdown() -> bool {
+    load_existing_settings().is_some_and(|settings| post_bridge_command(&settings, "/shutdown"))
+}
+
 fn probe_wake(settings: &Settings) -> bool {
+    post_bridge_command(settings, "/wake")
+}
+
+fn post_bridge_command(settings: &Settings, path: &str) -> bool {
     if settings.bridge_port == 0 || settings.bridge_token.len() != 64 {
         return false;
     }
@@ -168,7 +149,7 @@ fn probe_wake(settings: &Settings) -> bool {
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let req = format!(
-        "POST /wake HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 0\r\nx-lajufile-token: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 0\r\nx-lajufile-token: {}\r\nConnection: close\r\n\r\n",
         settings.bridge_port, settings.bridge_token
     );
     if stream.write_all(req.as_bytes()).is_err() {

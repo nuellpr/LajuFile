@@ -45,7 +45,11 @@ function loadBackgroundHarness({
   const sandbox = {
     URL,
     AbortController,
-    setTimeout,
+    setTimeout: (...args) => {
+      const handle = setTimeout(...args);
+      handle.unref?.();
+      return handle;
+    },
     clearTimeout,
     Date,
     Math,

@@ -216,6 +216,7 @@ fn router(state: BridgeAppState) -> Router {
         .route("/video", post(video))
         .route("/video/formats", post(video_formats))
         .route("/wake", post(wake))
+        .route("/shutdown", post(shutdown))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(
             CorsLayer::new()
@@ -239,6 +240,23 @@ async fn wake(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize(&headers, &state.token)?;
     if state.commands.send(Command::WakeWindow).is_err() {
+        return Err(internal("engine stopped"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn shutdown(
+    State(state): State<BridgeAppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if headers.contains_key(header::ORIGIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "forbidden origin" })),
+        ));
+    }
+    authorize(&headers, &state.token)?;
+    if state.commands.send(Command::RequestExit).is_err() {
         return Err(internal("engine stopped"));
     }
     Ok(Json(json!({ "ok": true })))

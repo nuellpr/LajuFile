@@ -15,11 +15,14 @@
 - Mengaktifkan routing **Category Folders** untuk unduhan default (termasuk ekstensi baru `.dmg`, `.deb`, `.rpm`, `.apk`, `.appimage`, `.tgz`), pengecekan duplikat di `insert_video`, serta `Command::Redownload` yang mempertahankan cookie terenkripsi.
 - Meneruskan `--proxy`, `--limit-rate`, escaping `%%` pada template `-o`, dan pemisah `--` ke `yt-dlp`; menunggu thread `stdout`/`stderr` sebelum membaca pesan error, memverifikasi/mendeteksi ekstensi hasil akhir video, serta menjaga file `.part`/`.ytdl` saat Pause/Shutdown.
 - Mengemas payload macOS ke sidecar `Contents/Resources/payload.bin` (`--payload-only`) agar tidak bentrok dengan `codesign`, melewati `package.ps1` saat packing, dan menambahkan single-instance `flock` serta anti-sleep (`caffeinate` / `systemd-inhibit`) untuk Unix.
+- Memperbaiki duplikasi simbol Unix `acquire_unix_lock` (`E0428`) pada Linux/macOS serta menambahkan *graceful shutdown* untuk installer melalui endpoint bridge lokal terautentikasi `POST /shutdown` (menolak header `Origin` browser) sebelum *fallback* `taskkill`/`pkill`.
+- Menambahkan cache *snapshot* in-memory pada `EngineState` dengan *overlay* `pending_segments` agar `publish()` tidak melakukan pemindaian SQLite penuh berulang kali pada setiap tick.
 
 ### UI, Efisiensi, Ekstensi & Metadata
 - Mengurangi penggunaan CPU saat idle (`recv_timeout(500ms)` di engine, repaint UI adaptif `1000ms`, reuse handle `Clipboard`, dan cache drive `roots()` di Folder Picker).
 - Menyinkronkan nama file hasil probe `Content-Disposition` ke dialog *Download File Info* (bila belum diedit pengguna) dan menutup dialog stale bila request ekstensi timeout, serta merapikan badge bahasa *Built-in*/*RTL*, reset kualitas YouTube saat URL diubah, dan batas 512 KiB impor `.txt` Batch.
 - Ekstensi browser kini membaca `remoteCapturedExtensions` dari `/rules` bila filter ekstensi lokal kosong, menangkap unduhan Firefox langsung tanpa delay 1,5 detik pada `onCreated`, merapikan menu YouTube agar responsif, serta memperbarui `README.md` dan `rust-toolchain.toml`.
+- Memecah modul `engine`, `ui/dialogs`, dan `ui/main_window` menjadi sub-modul terfokus (`engine/{mod,ssrf,video}`, `ui/dialogs/{mod,settings,browser_lang,transfers,batch_update}`, `ui/main_window/{mod,chrome,table}`).
 
 ## v1.0.6
 

@@ -589,6 +589,14 @@ fn stop_running_lajufile() {
     if !is_lajufile_running() {
         return;
     }
+    if crate::platform::request_graceful_shutdown() {
+        for _ in 0..20 {
+            if !is_lajufile_running() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
     let _ = std::process::Command::new("taskkill")
         .args(["/IM", "lajufile.exe"])
         .creation_flags(0x0800_0000)
@@ -613,6 +621,18 @@ fn stop_running_lajufile() {
 
 #[cfg(not(windows))]
 fn stop_running_lajufile() {
+    if crate::platform::request_graceful_shutdown() {
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let alive = std::process::Command::new("pkill")
+                .args(["-0", "-x", "lajufile"])
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                return;
+            }
+        }
+    }
     if std::process::Command::new("pkill")
         .args(["-TERM", "-x", "lajufile"])
         .status()
