@@ -61,7 +61,7 @@ pub(super) fn sync_autostart(enabled: bool) {
     }
     #[cfg(target_os = "macos")]
     {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
             return;
         };
         let agents_dir = home.join("Library/LaunchAgents");
@@ -86,7 +86,7 @@ pub(super) fn sync_autostart(enabled: bool) {
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
             return;
         };
         let autostart_dir = home.join(".config/autostart");

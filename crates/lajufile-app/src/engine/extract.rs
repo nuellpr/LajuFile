@@ -104,7 +104,7 @@ fn validate_tar_listing(archive: &Path) -> Result<(), String> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn validate_zip_listing_unix(archive: &Path) -> Result<(), String> {
     let out = Command::new("unzip")
-        .args(["-Z1"])
+        .arg("-Z1")
         .arg(archive)
         .output()
         .map_err(|e| format!("unzip list failed: {e}"))?;
@@ -118,7 +118,7 @@ fn validate_zip_listing_unix(archive: &Path) -> Result<(), String> {
         }
     }
     let verbose = Command::new("unzip")
-        .args(["-Z"])
+        .arg("-Z")
         .arg(archive)
         .output()
         .map_err(|e| format!("unzip inspect failed: {e}"))?;

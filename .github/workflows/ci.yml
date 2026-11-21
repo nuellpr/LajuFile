@@ -30,6 +30,7 @@ jobs:
         shell: bash
         run: |
           node -e 'const fs=require("fs"); const cargo=fs.readFileSync("Cargo.toml","utf8").match(/^version\s*=\s*"([^"]+)"/m)?.[1]; const ext=JSON.parse(fs.readFileSync("extension/manifest.json","utf8")).version; if(!cargo || cargo!==ext) throw new Error(`Version mismatch: Cargo.toml=${cargo} manifest.json=${ext}`);'
+          node --check extension/common.js
           node --check extension/background.js
           node --check extension/content.js
           node --check extension/interceptor.js
