@@ -18,6 +18,8 @@ use crate::tools;
 pub(super) struct VideoRun {
     pub(super) child: std::process::Child,
     pub(super) save_path: PathBuf,
+    pub(super) audio_only: bool,
+    pub(super) started_at: std::time::SystemTime,
     pub(super) last_error: Arc<Mutex<String>>,
     pub(super) stdout_join: Option<JoinHandle<()>>,
     pub(super) stderr_join: Option<JoinHandle<()>>,
@@ -28,6 +30,7 @@ pub(super) struct VideoRun {
 #[derive(Default)]
 pub(super) struct VideoStreamTracker {
     seeded_size: Option<u64>,
+    min_done: u64,
     current_file: Option<String>,
     completed_bytes: u64,
     current_peak: u64,
@@ -35,9 +38,10 @@ pub(super) struct VideoStreamTracker {
 }
 
 impl VideoStreamTracker {
-    pub(super) fn from_seeded(seeded_size: Option<u64>) -> Self {
+    pub(super) fn from_seeded(seeded_size: Option<u64>, previous_done: u64) -> Self {
         Self {
             seeded_size: seeded_size.filter(|s| *s > 0),
+            min_done: previous_done,
             ..Self::default()
         }
     }
@@ -71,14 +75,15 @@ impl VideoStreamTracker {
         {
             self.current_total = t;
         }
-        let cumulative_done = self.completed_bytes.saturating_add(done);
+        let cumulative_done = self.completed_bytes.saturating_add(done).max(self.min_done);
         let observed_total = self
             .completed_bytes
             .saturating_add(self.current_total.max(done));
         let expected_size = if self.current_total > 0 {
             Some(
                 self.seeded_size
-                    .map_or(observed_total, |seeded| seeded.max(observed_total)),
+                    .map_or(observed_total, |seeded| seeded.max(observed_total))
+                    .max(cumulative_done),
             )
         } else {
             self.seeded_size
@@ -208,6 +213,23 @@ impl TempCookieFile {
 impl Drop for TempCookieFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Removes leftover `lajufile-yt-*.cookies` files in `dir` from crashed/killed previous runs.
+pub(super) fn cleanup_stale_cookie_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let own_prefix = format!("lajufile-yt-{}-", std::process::id());
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("lajufile-yt-")
+            && name.ends_with(".cookies")
+            && !name.starts_with(&own_prefix)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -343,11 +365,9 @@ pub(super) fn video_args(
         args.extend([
             "--merge-output-format".into(),
             "mp4".into(),
-            // Prefer H.264 MP4 + AAC M4A and transcode non-AAC audio so Windows players have sound.
+            // Prefer native H.264 MP4 + AAC M4A so ffmpeg stream-copies losslessly without re-encoding.
             "-S".into(),
             "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
-            "--ppa".into(),
-            "Merger+ffmpeg_o1:-c:a aac".into(),
         ]);
     }
     args.extend(["--ffmpeg-location".into(), tools_dir.as_os_str().to_owned()]);
@@ -470,16 +490,33 @@ pub(super) fn stop_video(video: &mut Option<VideoRun>) {
     }
 }
 
-pub(super) fn resolve_video_output(expected: &Path) -> Option<PathBuf> {
+pub(super) fn resolve_video_output(
+    expected: &Path,
+    audio_only: bool,
+    started_at: std::time::SystemTime,
+) -> Option<PathBuf> {
     if expected.is_file() {
         return Some(expected.to_path_buf());
     }
     let dir = expected.parent()?;
     let stem = expected.file_stem()?.to_str()?;
-    for ext in ["mp4", "mkv", "webm", "m4a", "mp3", "opus"] {
+    let exts: &[&str] = if audio_only {
+        &["m4a", "mp3", "opus", "aac", "flac", "ogg", "wav"]
+    } else {
+        &["mp4", "mkv", "webm"]
+    };
+    let cutoff = started_at.checked_sub(Duration::from_secs(2));
+    for ext in exts {
         let candidate = dir.join(format!("{stem}.{ext}"));
         if candidate.is_file() {
-            return Some(candidate);
+            let fresh = cutoff.is_none_or(|min_time| {
+                std::fs::metadata(&candidate)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|mtime| mtime >= min_time)
+            });
+            if fresh {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -575,7 +612,7 @@ mod tests {
         assert!(is_auxiliary_media_file(Some("clip.id.srt.part")));
         assert!(!is_auxiliary_media_file(Some("clip.f137.mp4")));
 
-        let mut tracker = VideoStreamTracker::from_seeded(Some(150_000_000));
+        let mut tracker = VideoStreamTracker::from_seeded(Some(150_000_000), 0);
         let (done1, sz1) = tracker.record(20_000_000, Some(135_000_000), Some("clip.f137.mp4"));
         assert_eq!(done1, 20_000_000);
         assert_eq!(sz1, Some(150_000_000));
@@ -586,6 +623,13 @@ mod tests {
         let (done3, sz3) = tracker.record(5_000_000, Some(18_000_000), Some("clip.f140.m4a"));
         assert_eq!(done3, 140_000_000);
         assert_eq!(sz3, Some(153_000_000));
+
+        // Resuming directly on the audio stream must not jump progress backwards.
+        let mut resumed = VideoStreamTracker::from_seeded(Some(150_000_000), 140_000_000);
+        let (resumed_done, resumed_sz) =
+            resumed.record(5_000_000, Some(18_000_000), Some("clip.f140.m4a"));
+        assert_eq!(resumed_done, 140_000_000);
+        assert_eq!(resumed_sz, Some(150_000_000));
     }
 
     #[test]
@@ -635,10 +679,7 @@ mod tests {
             args[args.iter().position(|a| a == "-S").unwrap() + 1],
             "ext:mp4:m4a,vcodec:h264,acodec:aac"
         );
-        assert_eq!(
-            args[args.iter().position(|a| a == "--ppa").unwrap() + 1],
-            "Merger+ffmpeg_o1:-c:a aac"
-        );
+        assert!(!args.iter().any(|arg| arg == "--ppa"));
         assert_eq!(
             args[args.iter().position(|a| a == "--js-runtimes").unwrap() + 1],
             "node:/usr/bin/node"
@@ -782,13 +823,43 @@ mod tests {
     }
 
     #[test]
-    fn resolve_video_output_falls_back_to_remuxed_extension() {
+    fn resolve_video_output_falls_back_by_media_kind_and_freshness() {
         let dir = tempfile::tempdir().unwrap();
+        let started = std::time::SystemTime::now();
         let expected = dir.path().join("movie.mp4");
         let mkv = dir.path().join("movie.mkv");
         std::fs::write(&mkv, b"mkv-bytes").unwrap();
-        assert_eq!(resolve_video_output(&expected), Some(mkv));
-        assert_eq!(resolve_video_output(&dir.path().join("absent.mp4")), None);
+        assert_eq!(resolve_video_output(&expected, false, started), Some(mkv));
+        assert_eq!(
+            resolve_video_output(&dir.path().join("movie.m4a"), true, started),
+            None,
+            "audio-only job must not hijack an existing video file with the same stem"
+        );
+        assert_eq!(
+            resolve_video_output(&dir.path().join("absent.mp4"), false, started),
+            None
+        );
+
+        let stale_check = started + Duration::from_secs(60);
+        assert_eq!(
+            resolve_video_output(&expected, false, stale_check),
+            None,
+            "older unrelated file must not be picked as a fresh output"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_cookie_files_removes_other_pid_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("lajufile-yt-99999999-0.cookies");
+        let keep = dir.path().join("unrelated.cookies");
+        std::fs::write(&stale, b"secret").unwrap();
+        std::fs::write(&keep, b"keep").unwrap();
+
+        cleanup_stale_cookie_files(dir.path());
+
+        assert!(!stale.exists());
+        assert!(keep.exists());
     }
 
     #[test]

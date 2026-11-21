@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const EXT_ID = "lajufile-test-extension-id";
 const EXT_ORIGIN = `chrome-extension://${EXT_ID}/`;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const COMMON_PATH = path.resolve(__dirname, "../../../extension/common.js");
 const BG_PATH = path.resolve(__dirname, "../../../extension/background.js");
 
 function loadBackgroundHarness({
@@ -105,8 +106,9 @@ function loadBackgroundHarness({
     },
   };
 
-  const code = fs.readFileSync(BG_PATH, "utf8");
-  vm.runInNewContext(code, sandbox, { filename: BG_PATH });
+  const context = vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(COMMON_PATH, "utf8"), context, { filename: COMMON_PATH });
+  vm.runInContext(fs.readFileSync(BG_PATH, "utf8"), context, { filename: BG_PATH });
   assert.equal(listeners.length, 1, "expected exactly one onMessage listener");
   return {
     onMessage: listeners[0],
@@ -286,4 +288,79 @@ test("firefox onCreated captures immediately when onDeterminingFilename is absen
   const dlCalls = fetchCalls.filter((c) => c.url.endsWith("/downloads"));
   assert.equal(dlCalls.length, 1);
   assert.equal(JSON.parse(dlCalls[0].init.body).url, "https://example.org/archive.zip");
+});
+
+test("onDeterminingFilename prefers finalUrl over initial redirect url", async () => {
+  const { onDetermining, fetchCalls } = loadBackgroundHarness({
+    rules: { excluded_domains: "", captured_extensions: "zip" },
+  });
+
+  await new Promise((resolve) => {
+    onDetermining(
+      {
+        id: 99,
+        state: "in_progress",
+        url: "https://example.org/redirect-download",
+        finalUrl: "https://cdn.example.org/files/release.zip?sig=abc",
+        filename: "release.zip",
+      },
+      resolve,
+    );
+  });
+
+  const dlCalls = fetchCalls.filter((c) => c.url.endsWith("/downloads"));
+  assert.equal(dlCalls.length, 1);
+  assert.equal(
+    JSON.parse(dlCalls[0].init.body).url,
+    "https://cdn.example.org/files/release.zip?sig=abc",
+  );
+});
+
+test("common.js validates Quick-Pair payloads, ports, tokens, and host exclusions", () => {
+  const sandbox = { URL, String, Number, Boolean, Array, JSON };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(COMMON_PATH, "utf8"), context, { filename: COMMON_PATH });
+  const common = context.LajuFileCommon;
+
+  const validToken = "a".repeat(64);
+  const parsed = common.parseQuickPair(JSON.stringify({ port: 53841, token: validToken }));
+  assert.equal(parsed.port, 53841);
+  assert.equal(parsed.token, validToken);
+  assert.throws(() => common.parseQuickPair("not-json"));
+  assert.throws(() => common.parseQuickPair(JSON.stringify({ port: 80, token: validToken })));
+  assert.throws(() => common.parseQuickPair(JSON.stringify({ port: 53841, token: "short" })));
+  assert.equal(common.isHostExcluded("sub.internal.net", "*.internal.net, example.com"), true);
+  assert.equal(common.isHostExcluded("other.org", "*.internal.net, example.com"), false);
+  assert.equal(common.isSupportedVideoPage("https://vimeo.com/123456789"), true);
+  assert.equal(common.isSupportedVideoPage("https://www.twitch.tv/videos/98765"), true);
+  assert.equal(common.isSupportedVideoPage("https://evil.example/watch"), false);
+});
+
+test("video-formats supports multi-site platforms like Vimeo and capture-media requires ownPage", async () => {
+  const { onMessage, fetchCalls } = loadBackgroundHarness();
+  const vimeoUrl = "https://vimeo.com/123456789";
+
+  const fromVimeo = await dispatch(
+    onMessage,
+    { type: "video-formats", url: vimeoUrl },
+    { id: EXT_ID, tab: { id: 8, url: vimeoUrl }, url: vimeoUrl, frameId: 0 },
+  );
+  assert.equal(fromVimeo.ret, true);
+  assert.equal(fromVimeo.reply.status, 200);
+
+  // capture-media must reject web page senders and allow extension popup.
+  const fromWeb = await dispatch(
+    onMessage,
+    { type: "capture-media", url: "https://cdn.example.org/stream.m3u8" },
+    { id: EXT_ID, tab: { id: 9, url: "https://example.org/" }, url: "https://example.org/", frameId: 0 },
+  );
+  assert.equal(fromWeb.ret, false);
+
+  const fromPopup = await dispatch(
+    onMessage,
+    { type: "capture-media", url: "https://cdn.example.org/stream.m3u8" },
+    { id: EXT_ID, url: `${EXT_ORIGIN}popup.html` },
+  );
+  assert.equal(fromPopup.ret, true);
+  assert.ok(fetchCalls.some((c) => c.url.endsWith("/video")));
 });

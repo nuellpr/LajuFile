@@ -1,3 +1,6 @@
+mod actions;
+mod helpers;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -5,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use lajufile_core::checksum::sha256_file;
 use lajufile_core::paths;
-use lajufile_core::settings::{Settings, Theme, generate_token, is_valid_token};
+use lajufile_core::settings::{Settings, Theme, generate_token};
 use lajufile_core::store::{Category, DownloadStatus};
 use lajufile_core::video::VideoListing;
 
@@ -16,12 +19,13 @@ use crate::ui::dialogs::{
     AddDraft, BatchDraft, BatchMode, PropertiesDraft, UpdateUiState,
     clipboard_download_url_with_rules,
 };
-use crate::ui::download_info::{DownloadInfoChoice, DownloadInfoDraft, category_label};
+use crate::ui::download_info::{DownloadInfoChoice, DownloadInfoDraft};
 use crate::ui::folder_picker::{FolderChoice, FolderPicker};
 use crate::ui::format::format_speed;
 use crate::ui::theme::apply_theme;
 use crate::ui::{self, Action, Filter, SortOrder, extract_urls_from_text};
 use crate::updater;
+use helpers::*;
 
 #[derive(Debug, Clone)]
 pub(crate) enum FolderTarget {
@@ -69,6 +73,11 @@ pub struct LajuFileApp {
     pub(crate) tray_tooltip: String,
     pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
     pub(crate) formats: Option<tokio::sync::oneshot::Receiver<Result<VideoListing, String>>>,
+    pub(crate) hf_files: Option<
+        tokio::sync::oneshot::Receiver<
+            Result<Vec<crate::engine::huggingface::HfModelFile>, String>,
+        >,
+    >,
     pub(crate) page_links: Option<tokio::sync::oneshot::Receiver<Result<Vec<String>, String>>>,
     pub(crate) folder_picker: Option<FolderPicker>,
     pub(crate) folder_picker_target: Option<FolderTarget>,
@@ -96,7 +105,7 @@ pub struct LajuFileApp {
 impl LajuFileApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let data_dir = paths::data_dir();
-        let settings = Settings::load_or_create(&data_dir).unwrap_or_default();
+        let (settings, settings_warn) = load_settings_with_backup(&data_dir);
         if settings.autostart {
             sync_autostart(true);
         }
@@ -108,9 +117,10 @@ impl LajuFileApp {
         apply_theme(&cc.egui_ctx, &theme);
         apply_scale(&cc.egui_ctx, ui_scale_pct);
 
-        let icon =
-            eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/icon-32.png"))
-                .ok();
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+            "../../../../assets/icons/icon-32.png"
+        ))
+        .ok();
         let tray = icon
             .as_ref()
             .and_then(|icon| tray::create(icon, &cc.egui_ctx));
@@ -134,9 +144,11 @@ impl LajuFileApp {
                 wake_ctx.request_repaint();
             }));
         }
-        let toast = engine
-            .is_none()
-            .then(|| ("Engine failed to start".to_string(), Instant::now()));
+        let toast = if engine.is_none() {
+            Some(("Engine failed to start".to_string(), Instant::now()))
+        } else {
+            settings_warn.map(|msg| (msg, Instant::now()))
+        };
 
         Self {
             engine,
@@ -178,6 +190,7 @@ impl LajuFileApp {
             tray_tooltip: String::new(),
             bridge_test: None,
             formats: None,
+            hf_files: None,
             page_links: None,
             folder_picker: None,
             folder_picker_target: None,
@@ -446,6 +459,34 @@ impl LajuFileApp {
         }
     }
 
+    fn poll_hf_files(&mut self) {
+        let received = self.hf_files.as_mut().map(|rx| rx.try_recv());
+        match received {
+            Some(Ok(Ok(files))) => {
+                self.hf_files = None;
+                if let Some(first) = files.first() {
+                    self.add_draft.file_name = first.file_name.clone();
+                    if let Some(sha) = &first.sha256 {
+                        self.add_draft.expected_sha256 = sha.clone();
+                    }
+                    self.add_draft.hf_selected = Some(0);
+                }
+                let count = files.len();
+                self.add_draft.hf_files = files;
+                self.toast = Some((
+                    format!("Loaded {count} HuggingFace model file(s)"),
+                    Instant::now(),
+                ));
+            }
+            Some(Ok(Err(error))) => {
+                self.hf_files = None;
+                self.toast = Some((error, Instant::now()));
+            }
+            Some(Err(tokio::sync::oneshot::error::TryRecvError::Closed)) => self.hf_files = None,
+            _ => {}
+        }
+    }
+
     fn poll_page_links(&mut self) {
         let received = self.page_links.as_mut().map(|rx| rx.try_recv());
         match received {
@@ -549,7 +590,7 @@ impl LajuFileApp {
                 snapshot
                     .settings
                     .category_dirs
-                    .get(crate::ui::download_info::category_label(category))
+                    .get(category.label())
                     .cloned()
                     .unwrap_or_else(|| snapshot.settings.download_dir.clone())
             })
@@ -686,20 +727,6 @@ impl LajuFileApp {
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
-    }
-
-    fn handle_add(&mut self, request: AddRequest) {
-        let prompt = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| should_prompt_for_folder(&snapshot.settings, true))
-            .unwrap_or(false);
-        if prompt && request.save_dir.is_none() {
-            self.pending_add = Some(request);
-            self.folder_picker = Some(FolderPicker::new(self.default_save_dir()));
-            return;
-        }
-        self.send(Command::Add(request));
     }
 
     fn poll_folder_picker(&mut self, ctx: &egui::Context) {
@@ -842,11 +869,14 @@ impl LajuFileApp {
                     file_name: Some(file_name),
                     start_now,
                 });
-                if remember && let Some(snapshot) = &self.snapshot {
+                if remember
+                    && !folder.as_os_str().is_empty()
+                    && let Some(snapshot) = &self.snapshot
+                {
                     let mut settings = snapshot.settings.clone();
                     settings
                         .category_dirs
-                        .insert(category_label(draft.category).to_string(), folder);
+                        .insert(draft.category.label().to_string(), folder);
                     self.send(Command::UpdateSettings(settings));
                 }
             }
@@ -855,352 +885,6 @@ impl LajuFileApp {
                 self.send(Command::CaptureFolderDecision { key, path: None });
             }
             None => self.capture_info = Some((key, draft)),
-        }
-    }
-
-    fn handle_actions(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
-        for action in actions {
-            match action {
-                Action::Select(id) => {
-                    self.selected = Some(id);
-                    self.selected_ids.clear();
-                    self.selected_ids.insert(id);
-                }
-                Action::SelectRow { id, ctrl, shift } => {
-                    let visible_ids: Vec<i64> = self
-                        .snapshot
-                        .as_ref()
-                        .map(|snapshot| {
-                            ui::main_window::visible_downloads(self, &snapshot.downloads)
-                                .into_iter()
-                                .map(|d| d.id)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    apply_row_click(
-                        &visible_ids,
-                        &mut self.selected,
-                        &mut self.selected_ids,
-                        id,
-                        ctrl,
-                        shift,
-                    );
-                }
-                Action::SelectAll => {
-                    let visible_ids: Vec<i64> = self
-                        .snapshot
-                        .as_ref()
-                        .map(|snapshot| {
-                            ui::main_window::visible_downloads(self, &snapshot.downloads)
-                                .into_iter()
-                                .map(|d| d.id)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    self.selected_ids = visible_ids.iter().copied().collect();
-                    if self.selected.is_none()
-                        || !self
-                            .selected
-                            .is_some_and(|id| self.selected_ids.contains(&id))
-                    {
-                        self.selected = visible_ids.first().copied();
-                    }
-                }
-                Action::Pause(id) => self.send(Command::Pause(id)),
-                Action::Resume(id) => self.send(Command::Resume(id)),
-                Action::UpdateUrlAndResume { id, url } => {
-                    self.send(Command::UpdateUrlAndResume { id, url });
-                }
-                Action::MoveRename { id, file_name, dir } => {
-                    self.send(Command::MoveRename { id, file_name, dir });
-                    self.properties_id = None;
-                }
-                Action::BrowseMoveDir(id) => {
-                    let start = self
-                        .path_for(id)
-                        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                        .unwrap_or_else(|| self.default_save_dir());
-                    self.folder_picker_target = Some(FolderTarget::MoveDownload);
-                    self.folder_picker = Some(FolderPicker::new(start));
-                }
-                Action::BrowseCategoryDir(cat) => {
-                    let start = self
-                        .settings_draft
-                        .category_dirs
-                        .get(&cat)
-                        .cloned()
-                        .unwrap_or_else(|| self.settings_draft.download_dir.clone());
-                    self.folder_picker_target = Some(FolderTarget::Category(cat));
-                    self.folder_picker = Some(FolderPicker::new(start));
-                }
-                Action::VerifyChecksum(id) => {
-                    if let Some(path) = self.path_for(id) {
-                        let (tx, rx) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let res = sha256_file(&path).map_err(|e| e.to_string());
-                            let _ = tx.send(res);
-                        });
-                        self.checksum_rx = Some((id, rx));
-                        self.checksum_result = None;
-                    }
-                }
-                Action::CopyChecksum(hash) => {
-                    self.last_clipboard = Some(hash.clone());
-                    ctx.copy_text(hash);
-                    self.toast = Some(("SHA-256 copied".to_string(), Instant::now()));
-                }
-                Action::ConfirmRemove(ids, delete_file) => {
-                    if !ids.is_empty() {
-                        self.delete_confirm = Some((ids, delete_file));
-                    }
-                }
-                Action::RemoveWithFile { ids, delete_file } => {
-                    for id in ids {
-                        self.remove_download(id, delete_file);
-                    }
-                }
-                Action::RemoveCompleted => {
-                    self.send(Command::RemoveCompleted);
-                    self.completed_id = None;
-                }
-                Action::ShowProgress(id) => {
-                    self.progress_id = Some(id);
-                    if self.hidden_progress_id == Some(id) {
-                        self.hidden_progress_id = None;
-                    }
-                }
-                Action::HideProgress(id) => {
-                    if self.progress_id == Some(id) {
-                        self.progress_id = None;
-                    }
-                    self.hidden_progress_id = Some(id);
-                }
-                Action::OpenUpdateChecker => {
-                    self.show_update_dialog = true;
-                    if matches!(
-                        self.update_state,
-                        UpdateUiState::Idle | UpdateUiState::UpToDate(_) | UpdateUiState::Failed(_)
-                    ) {
-                        self.start_update_check();
-                    }
-                }
-                Action::CheckUpdatesNow => {
-                    self.start_update_check();
-                }
-                Action::StartSelfUpdate { url, file_name } => {
-                    if let UpdateUiState::Available(info) = &self.update_state {
-                        let checksums_url = info.checksums_url.clone();
-                        let proxy = self.configured_proxy();
-                        self.update_state = UpdateUiState::Downloading {
-                            info: info.clone(),
-                            downloaded: 0,
-                            total: info.asset_size,
-                        };
-                        let (tx, rx) = mpsc::channel();
-                        self.update_rx = Some(rx);
-                        updater::spawn_download(url, file_name, checksums_url, proxy, tx);
-                    }
-                }
-                Action::OpenProperties(id) => {
-                    self.open_properties(id);
-                }
-                Action::Redownload(id) => {
-                    self.send(Command::Redownload(id));
-                    self.toast = Some(("Redownload queued".to_string(), Instant::now()));
-                }
-                Action::PauseAll => self.send(Command::PauseAll),
-                Action::ResumeAll => self.send(Command::ResumeAll),
-                Action::Exit => {
-                    self.allow_exit = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                Action::Open(id) => {
-                    if let Some(path) = self.path_for(id) {
-                        open_file(&path);
-                    }
-                }
-                Action::OpenWith(id) => {
-                    if let Some(path) = self.path_for(id) {
-                        open_with(&path);
-                    }
-                }
-                Action::OpenFolder(id) => {
-                    if let Some(path) = self.path_for(id) {
-                        open_folder(&path);
-                    }
-                }
-                Action::CopyUrl(url) => {
-                    self.last_clipboard = Some(url.clone());
-                    ctx.copy_text(url);
-                    self.toast = Some(("URL copied".to_string(), Instant::now()));
-                }
-                Action::CopyPath(path) => {
-                    let text = path.display().to_string();
-                    self.last_clipboard = Some(text.clone());
-                    ctx.copy_text(text);
-                    self.toast = Some(("File path copied".to_string(), Instant::now()));
-                }
-                Action::FocusSearch => {
-                    self.search_focus = true;
-                }
-                Action::ExportLinks => {
-                    self.export_links(ctx);
-                }
-                Action::OpenAdd => {
-                    self.add_draft = self.fresh_add_draft();
-                    self.add_focus = true;
-                    self.show_add = true;
-                }
-                Action::OpenBatch => {
-                    self.batch_draft = self.fresh_batch_draft();
-                    self.show_batch = true;
-                }
-                Action::OpenSettings => {
-                    if let Some(snapshot) = &self.snapshot {
-                        self.settings_draft = snapshot.settings.clone();
-                    }
-                    self.show_settings = true;
-                }
-                Action::OpenBrowserWizard => {
-                    if !self.show_settings
-                        && let Some(snapshot) = &self.snapshot
-                    {
-                        self.settings_draft = snapshot.settings.clone();
-                    }
-                    self.show_settings = false;
-                    self.show_browser_wizard = true;
-                }
-                Action::OpenExtensionFolder => {
-                    if let Some(dir) = crate::tools::extension_dir() {
-                        open_file(&dir);
-                    } else {
-                        self.toast = Some((
-                            "Extension folder not found next to LajuFile".to_string(),
-                            Instant::now(),
-                        ));
-                    }
-                }
-                Action::LaunchBrowser {
-                    browser_name,
-                    extensions_url,
-                } => {
-                    if let Some(browser) = crate::tools::detect_installed_browsers()
-                        .into_iter()
-                        .find(|b| b.name == browser_name)
-                        && let Some(exe) = browser.executable
-                    {
-                        let _ = std::process::Command::new(exe).spawn();
-                    }
-                    self.toast = Some((
-                        format!("Quick-Pair JSON copied — open {extensions_url} in {browser_name}"),
-                        Instant::now(),
-                    ));
-                }
-                Action::OpenLanguagePicker => {
-                    self.show_language_picker = true;
-                }
-                Action::SetLanguage(code) => {
-                    self.language = code.clone();
-                    self.settings_draft.language = code.clone();
-                    crate::i18n::install_system_fonts_for_language(ctx, &code);
-                    crate::i18n::set_ctx_lang(ctx, &code);
-                    if let Some(snapshot) = &self.snapshot {
-                        let mut settings = snapshot.settings.clone();
-                        settings.language = code;
-                        self.send(Command::UpdateSettings(settings));
-                    }
-                    let eff = crate::i18n::effective_code(&self.language);
-                    let name = crate::i18n::find_language(&eff)
-                        .map(|info| info.native_name)
-                        .unwrap_or("English");
-                    self.toast = Some((format!("Language: {name}"), Instant::now()));
-                }
-                Action::Add(request) => self.handle_add(request),
-                Action::AddBatch(requests) => {
-                    let count = requests.len();
-                    for request in requests {
-                        self.send(Command::Add(request));
-                    }
-                    if count > 0 {
-                        self.toast =
-                            Some((format!("Queued {count} batch downloads"), Instant::now()));
-                    }
-                }
-                Action::LoadFormats(url) => {
-                    let (reply, rx) = tokio::sync::oneshot::channel();
-                    self.send(Command::VideoFormats {
-                        url,
-                        cookie: None,
-                        reply,
-                    });
-                    self.formats = Some(rx);
-                }
-                Action::GrabPageLinks(url) => {
-                    let (reply, rx) = tokio::sync::oneshot::channel();
-                    self.send(Command::GrabPageLinks { url, reply });
-                    self.page_links = Some(rx);
-                }
-                Action::OpenFolderPicker => self.open_folder_picker(),
-                Action::SaveSettings(mut settings) => {
-                    normalize_settings(&mut settings);
-                    sync_autostart(settings.autostart);
-                    self.settings_draft = settings.clone();
-                    self.theme = settings.theme.clone();
-                    self.ui_scale_pct = settings.ui_scale_pct;
-                    apply_theme(ctx, &self.theme);
-                    apply_scale(ctx, self.ui_scale_pct);
-                    self.send(Command::UpdateSettings(settings));
-                }
-                Action::SetScale(pct) => {
-                    let clamped = pct.clamp(80, 150);
-                    self.ui_scale_pct = clamped;
-                    self.settings_draft.ui_scale_pct = clamped;
-                    apply_scale(ctx, clamped);
-                    if let Some(snapshot) = &self.snapshot {
-                        let mut settings = snapshot.settings.clone();
-                        settings.ui_scale_pct = clamped;
-                        self.send(Command::UpdateSettings(settings));
-                    }
-                    self.toast = Some((format!("Interface size: {clamped}%"), Instant::now()));
-                }
-                Action::SetSpeedLimit(kbps) => {
-                    if let Some(snapshot) = &self.snapshot {
-                        let mut settings = snapshot.settings.clone();
-                        settings.global_speed_limit_kbps = kbps;
-                        normalize_settings(&mut settings);
-                        let applied = settings.global_speed_limit_kbps;
-                        self.settings_draft.global_speed_limit_kbps = applied;
-                        self.custom_speed_kbps = applied.to_string();
-                        self.send(Command::UpdateSettings(settings));
-                        let msg = if applied == 0 {
-                            "Speed limit: Unlimited".to_string()
-                        } else {
-                            format!("Speed limit: {}", format_speed(Some(applied * 1024)))
-                        };
-                        self.toast = Some((msg, Instant::now()));
-                    }
-                }
-                Action::SetTheme(theme) => {
-                    self.theme = theme.clone();
-                    apply_theme(ctx, &theme);
-                    if let Some(snapshot) = &self.snapshot {
-                        let mut settings = snapshot.settings.clone();
-                        settings.theme = theme;
-                        self.send(Command::UpdateSettings(settings));
-                    }
-                }
-                Action::TestBridge(port) => {
-                    let (tx, rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(bridge::health_check(port, Duration::from_secs(2)));
-                    });
-                    self.bridge_test = Some(rx);
-                }
-                Action::RegenerateToken => {
-                    self.settings_draft.bridge_token = generate_token();
-                }
-                Action::UpdateTools => self.send(Command::UpdateTools),
-            }
         }
     }
 
@@ -1217,271 +901,6 @@ impl LajuFileApp {
             .iter()
             .find(|download| download.id == id)
             .map(|download| download.save_path.clone())
-    }
-
-    fn remove_download(&mut self, id: i64, delete_file: bool) {
-        self.send(Command::RemoveWithFile { id, delete_file });
-        self.selected_ids.remove(&id);
-        if self.selected == Some(id) {
-            self.selected = self.selected_ids.iter().next().copied();
-        }
-        if self.progress_id == Some(id) {
-            self.progress_id = None;
-        }
-        if self.completed_id == Some(id) {
-            self.completed_id = None;
-        }
-        if self.properties_id == Some(id) {
-            self.properties_id = None;
-            self.properties_draft = None;
-        }
-        self.speed_history.remove(&id);
-    }
-
-    fn export_links(&mut self, ctx: &egui::Context) {
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let visible = ui::main_window::visible_downloads(self, &snapshot.downloads);
-        let use_selected = self.selected_ids.len() > 1;
-        let mut urls = Vec::new();
-        let mut seen = HashSet::new();
-        for d in visible {
-            if use_selected && !self.selected_ids.contains(&d.id) {
-                continue;
-            }
-            if seen.insert(d.url.clone()) {
-                urls.push(d.url.clone());
-            }
-        }
-        if urls.is_empty() {
-            self.toast = Some(("No links to export".to_string(), Instant::now()));
-            return;
-        }
-        let content = urls.join("\n");
-        let dir = self.default_save_dir();
-        let _ = paths::ensure_dir(&dir);
-        let out_path = dir.join("lajufile-links.txt");
-        self.last_clipboard = Some(content.clone());
-        ctx.copy_text(content.clone());
-        match std::fs::write(&out_path, content) {
-            Ok(()) => {
-                self.toast = Some((
-                    format!("Exported {} links to {}", urls.len(), out_path.display()),
-                    Instant::now(),
-                ));
-            }
-            Err(err) => {
-                self.toast = Some((
-                    format!("Copied {} links (write failed: {err})", urls.len()),
-                    Instant::now(),
-                ));
-            }
-        }
-    }
-
-    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
-        if dropped.is_empty() {
-            return;
-        }
-        const MAX_DROP_BYTES: u64 = 512 * 1024;
-        let mut collected = Vec::new();
-        for file in dropped {
-            let path = file.path();
-            if !path.as_os_str().is_empty() {
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_ascii_lowercase());
-                let allowed_ext = matches!(ext.as_deref(), Some("url" | "txt" | "ef2" | "md"));
-                let size_ok = std::fs::metadata(path)
-                    .map(|m| m.len() <= MAX_DROP_BYTES)
-                    .unwrap_or(false);
-                if allowed_ext
-                    && size_ok
-                    && let Ok(text) = std::fs::read_to_string(path)
-                {
-                    collected.extend(extract_urls_from_text(&text));
-                }
-            } else if let Ok(bytes) = file.bytes()
-                && bytes.len() <= MAX_DROP_BYTES as usize
-                && let Ok(text) = std::str::from_utf8(&bytes)
-            {
-                collected.extend(extract_urls_from_text(text));
-            }
-        }
-        let mut unique = Vec::new();
-        let mut seen = HashSet::new();
-        for url in collected {
-            if seen.insert(url.clone()) {
-                unique.push(url);
-            }
-        }
-        match unique.len() {
-            0 => {
-                self.toast = Some((
-                    "Drop a .url shortcut or .txt link list with HTTP/HTTPS URLs".to_string(),
-                    Instant::now(),
-                ));
-            }
-            1 => {
-                self.add_draft = self.fresh_add_draft();
-                self.add_draft.url = unique.into_iter().next().unwrap_or_default();
-                self.add_focus = true;
-                self.show_add = true;
-            }
-            _ => {
-                self.batch_draft = self.fresh_batch_draft();
-                self.batch_draft.mode = BatchMode::UrlList;
-                self.batch_draft.urls_text = unique.join("\n");
-                self.show_batch = true;
-            }
-        }
-    }
-
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            if self.delete_confirm.is_some() {
-                self.delete_confirm = None;
-                return;
-            }
-            if self.properties_id.is_some() {
-                self.properties_id = None;
-                return;
-            }
-            if self.show_speed_popover {
-                self.show_speed_popover = false;
-                return;
-            }
-            if !self.search_query.is_empty() {
-                self.search_query.clear();
-                return;
-            }
-        }
-
-        let blocking_modal = self.show_add
-            || self.show_batch
-            || self.show_settings
-            || self.delete_confirm.is_some()
-            || self.properties_id.is_some()
-            || self.capture_info.is_some()
-            || self.folder_picker.is_some();
-        if blocking_modal {
-            return;
-        }
-
-        let mut actions = Vec::new();
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            actions.push(Action::FocusSearch);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
-            actions.push(Action::OpenAdd);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)) {
-            actions.push(Action::OpenBatch);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
-            actions.push(Action::OpenSettings);
-        }
-
-        if !ctx.egui_wants_keyboard_input() {
-            let visible_ids: Vec<i64> = self
-                .snapshot
-                .as_ref()
-                .map(|snapshot| {
-                    ui::main_window::visible_downloads(self, &snapshot.downloads)
-                        .into_iter()
-                        .map(|d| d.id)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
-                actions.push(Action::SelectAll);
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
-            {
-                if let Some(next_id) = step_selection(&visible_ids, self.selected, 1) {
-                    self.selected = Some(next_id);
-                    self.selected_ids.clear();
-                    self.selected_ids.insert(next_id);
-                }
-            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-                && let Some(prev_id) = step_selection(&visible_ids, self.selected, -1)
-            {
-                self.selected = Some(prev_id);
-                self.selected_ids.clear();
-                self.selected_ids.insert(prev_id);
-            }
-
-            let target_ids: Vec<i64> = if !self.selected_ids.is_empty() {
-                visible_ids
-                    .iter()
-                    .copied()
-                    .filter(|id| self.selected_ids.contains(id))
-                    .collect()
-            } else {
-                self.selected.into_iter().collect()
-            };
-
-            if !target_ids.is_empty()
-                && let Some(snapshot) = &self.snapshot
-            {
-                let anchor_id = self.selected.unwrap_or(target_ids[0]);
-                if ctx.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::ALT, egui::Key::Enter)
-                        || i.consume_key(egui::Modifiers::COMMAND, egui::Key::M)
-                }) {
-                    actions.push(Action::OpenProperties(anchor_id));
-                } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-                    && let Some(anchor) = snapshot.downloads.iter().find(|d| d.id == anchor_id)
-                {
-                    if anchor.status == DownloadStatus::Done {
-                        actions.push(Action::Open(anchor_id));
-                    } else {
-                        actions.push(Action::ShowProgress(anchor_id));
-                    }
-                } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
-                {
-                    let any_active = target_ids.iter().any(|id| {
-                        snapshot.downloads.iter().any(|d| {
-                            d.id == *id
-                                && matches!(
-                                    d.status,
-                                    DownloadStatus::Downloading | DownloadStatus::Queued
-                                )
-                        })
-                    });
-                    for id in target_ids {
-                        if any_active {
-                            actions.push(Action::Pause(id));
-                        } else {
-                            actions.push(Action::Resume(id));
-                        }
-                    }
-                } else if ctx
-                    .input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Delete))
-                {
-                    actions.push(Action::ConfirmRemove(target_ids, true));
-                } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
-                {
-                    actions.push(Action::ConfirmRemove(target_ids, false));
-                } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)) {
-                    let urls: Vec<String> = target_ids
-                        .iter()
-                        .filter_map(|id| snapshot.downloads.iter().find(|d| d.id == *id))
-                        .map(|d| d.url.clone())
-                        .collect();
-                    if !urls.is_empty() {
-                        actions.push(Action::CopyUrl(urls.join("\n")));
-                    }
-                }
-            }
-        }
-
-        if !actions.is_empty() {
-            self.handle_actions(ctx, actions);
-        }
     }
 
     fn intercept_close(&mut self, ctx: &egui::Context) -> bool {
@@ -1513,6 +932,7 @@ impl eframe::App for LajuFileApp {
         self.poll_clipboard(ctx);
         self.poll_bridge_test();
         self.poll_formats();
+        self.poll_hf_files();
         self.poll_page_links();
         self.poll_checksum();
         self.poll_updater(ctx);
@@ -1528,6 +948,7 @@ impl eframe::App for LajuFileApp {
         let is_busy = has_active_downloads
             || self.bridge_test.is_some()
             || self.formats.is_some()
+            || self.hf_files.is_some()
             || self.page_links.is_some()
             || self.checksum_rx.is_some()
             || self.update_rx.is_some()
@@ -1749,6 +1170,41 @@ impl eframe::App for LajuFileApp {
 
         self.poll_capture_info(&ctx);
         self.poll_folder_picker(&ctx);
+
+        if let Some((pending_action, deadline_ms)) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.pending_queue_action)
+        {
+            let remaining_s =
+                ((deadline_ms - lajufile_core::store::now_millis()).max(0) + 999) / 1000;
+            let verb = match pending_action {
+                lajufile_core::settings::QueueCompleteAction::ExitApp => "Closing LajuFile",
+                lajufile_core::settings::QueueCompleteAction::Sleep => "Sleeping computer",
+                lajufile_core::settings::QueueCompleteAction::Shutdown => "Shutting down computer",
+                lajufile_core::settings::QueueCompleteAction::None => "",
+            };
+            if !verb.is_empty() {
+                egui::Window::new("Scheduled Action")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 18.0))
+                    .show(&ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "All downloads finished — {verb} in {remaining_s}s"
+                                ))
+                                .strong(),
+                            );
+                            if ui.button("Cancel").clicked() {
+                                self.handle_actions(&ctx, vec![Action::CancelQueueComplete]);
+                            }
+                        });
+                    });
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        }
     }
 }
 
@@ -1758,317 +1214,5 @@ impl Drop for LajuFileApp {
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
         }
-    }
-}
-
-fn open_file(path: &std::path::Path) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-}
-
-fn open_with(path: &std::path::Path) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("rundll32.exe")
-        .args([
-            std::ffi::OsStr::new("shell32.dll,OpenAs_RunDLL"),
-            path.as_os_str(),
-        ])
-        .spawn();
-    #[cfg(not(windows))]
-    open_file(path);
-}
-
-fn open_folder(path: &std::path::Path) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open")
-        .args(["-R", &path.to_string_lossy()])
-        .spawn();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    if let Some(parent) = path.parent() {
-        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
-    }
-}
-
-fn sync_autostart(enabled: bool) {
-    #[cfg(windows)]
-    {
-        const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut command = std::process::Command::new("reg.exe");
-        crate::tools::no_window(&mut command);
-        if enabled {
-            let Ok(exe) = std::env::current_exe() else {
-                return;
-            };
-            let quoted = format!("\"{}\"", exe.display());
-            command.args([
-                "add", RUN_KEY, "/v", "LajuFile", "/t", "REG_SZ", "/d", &quoted, "/f",
-            ]);
-        } else {
-            command.args(["delete", RUN_KEY, "/v", "LajuFile", "/f"]);
-        }
-        let _ = command.status();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        let agents_dir = home.join("Library/LaunchAgents");
-        let plist = agents_dir.join("io.lajufile.app.plist");
-        if enabled {
-            let Ok(exe) = std::env::current_exe() else {
-                return;
-            };
-            let _ = std::fs::create_dir_all(&agents_dir);
-            let escaped = exe
-                .to_string_lossy()
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            let body = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>io.lajufile.app</string><key>ProgramArguments</key><array><string>{escaped}</string></array><key>RunAtLoad</key><true/></dict></plist>\n"
-            );
-            let _ = std::fs::write(plist, body);
-        } else {
-            let _ = std::fs::remove_file(plist);
-        }
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        let autostart_dir = home.join(".config/autostart");
-        let desktop_file = autostart_dir.join("lajufile.desktop");
-        if enabled {
-            let Ok(exe) = std::env::current_exe() else {
-                return;
-            };
-            let _ = std::fs::create_dir_all(&autostart_dir);
-            let content = format!(
-                "[Desktop Entry]\nType=Application\nName=LajuFile\nExec=\"{}\"\nTerminal=false\n",
-                exe.display()
-            );
-            let _ = std::fs::write(desktop_file, content);
-        } else {
-            let _ = std::fs::remove_file(desktop_file);
-        }
-    }
-}
-
-fn apply_scale(ctx: &egui::Context, pct: u32) {
-    let factor = (pct.clamp(80, 150) as f32) / 100.0;
-    ctx.set_zoom_factor(factor);
-}
-
-fn apply_row_click(
-    visible_ids: &[i64],
-    anchor: &mut Option<i64>,
-    selected_ids: &mut HashSet<i64>,
-    id: i64,
-    ctrl: bool,
-    shift: bool,
-) {
-    if shift {
-        let start_pos = anchor
-            .and_then(|a| visible_ids.iter().position(|&v| v == a))
-            .unwrap_or(0);
-        if let Some(end_pos) = visible_ids.iter().position(|&v| v == id) {
-            if !ctrl {
-                selected_ids.clear();
-            }
-            let (lo, hi) = if start_pos <= end_pos {
-                (start_pos, end_pos)
-            } else {
-                (end_pos, start_pos)
-            };
-            for &row_id in &visible_ids[lo..=hi] {
-                selected_ids.insert(row_id);
-            }
-            if anchor.is_none() {
-                *anchor = Some(id);
-            }
-            return;
-        }
-    }
-    if ctrl {
-        if !selected_ids.remove(&id) {
-            selected_ids.insert(id);
-            *anchor = Some(id);
-        } else if *anchor == Some(id) {
-            *anchor = selected_ids.iter().next().copied();
-        }
-    } else {
-        selected_ids.clear();
-        selected_ids.insert(id);
-        *anchor = Some(id);
-    }
-}
-
-fn step_selection(ids: &[i64], current: Option<i64>, delta: isize) -> Option<i64> {
-    if ids.is_empty() {
-        return None;
-    }
-    let Some(curr_id) = current else {
-        return if delta >= 0 {
-            ids.first().copied()
-        } else {
-            ids.last().copied()
-        };
-    };
-    let Some(pos) = ids.iter().position(|&id| id == curr_id) else {
-        return ids.first().copied();
-    };
-    let next = (pos as isize + delta).clamp(0, ids.len() as isize - 1) as usize;
-    ids.get(next).copied()
-}
-
-fn should_prompt_for_folder(settings: &Settings, manual: bool) -> bool {
-    manual && settings.ask_where_to_save
-}
-
-const AUTO_UPDATE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
-
-fn should_auto_check_updates(enabled: bool, last_check_ms: i64, now_ms: i64) -> bool {
-    enabled
-        && (last_check_ms <= 0 || now_ms.saturating_sub(last_check_ms) >= AUTO_UPDATE_INTERVAL_MS)
-}
-
-fn normalize_settings(settings: &mut Settings) {
-    if settings.download_dir.as_os_str().is_empty() {
-        settings.download_dir = paths::default_download_dir();
-    }
-    settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
-    settings.max_connections = settings.max_connections.clamp(1, 32);
-    settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
-    settings.ui_scale_pct = settings.ui_scale_pct.clamp(80, 150);
-    settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
-    settings.proxy_url = settings.proxy_url.trim().to_string();
-    if !is_valid_token(&settings.bridge_token) {
-        settings.bridge_token = generate_token();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui::dialogs::AddDraft;
-
-    #[test]
-    fn add_draft_trims_empty_values() {
-        let draft = AddDraft {
-            url: " https://example.com/a.bin ".into(),
-            file_name: "  ".into(),
-            folder: " ".into(),
-            start_now: true,
-            ..AddDraft::default()
-        };
-        let request = draft.into_request();
-        assert_eq!(request.url, "https://example.com/a.bin");
-        assert_eq!(request.file_name, None);
-        assert_eq!(request.save_dir, None);
-    }
-
-    #[test]
-    fn normalize_settings_clamps_limits() {
-        let mut settings = Settings {
-            max_concurrent: 0,
-            max_connections: 99,
-            global_speed_limit_kbps: 2_000_000,
-            proxy_url: " http://127.0.0.1:7890 ".into(),
-            ..Settings::default()
-        };
-        normalize_settings(&mut settings);
-        assert_eq!(settings.max_concurrent, 1);
-        assert_eq!(settings.max_connections, 32);
-        assert_eq!(settings.global_speed_limit_kbps, 1_000_000);
-        assert_eq!(settings.proxy_url, "http://127.0.0.1:7890");
-    }
-
-    #[test]
-    fn should_auto_check_updates_respects_flag_and_24h_cooldown() {
-        let now = 2_000_000_000_000i64;
-        assert!(!should_auto_check_updates(false, 0, now));
-        assert!(should_auto_check_updates(true, 0, now));
-        assert!(!should_auto_check_updates(true, now - 60_000, now));
-        assert!(should_auto_check_updates(
-            true,
-            now - 24 * 60 * 60 * 1000 - 1,
-            now
-        ));
-    }
-
-    #[test]
-    fn normalize_settings_raises_zero_connections() {
-        let mut settings = Settings {
-            max_connections: 0,
-            ..Settings::default()
-        };
-        normalize_settings(&mut settings);
-        assert_eq!(settings.max_connections, 1);
-    }
-
-    #[test]
-    fn normalize_settings_clamps_bridge_port() {
-        let mut settings = Settings {
-            bridge_port: 0,
-            ..Settings::default()
-        };
-        normalize_settings(&mut settings);
-        assert_eq!(settings.bridge_port, 1024);
-        settings.bridge_port = 65_535;
-        normalize_settings(&mut settings);
-        assert_eq!(settings.bridge_port, 65_535);
-    }
-
-    #[test]
-    fn ask_prompt_only_when_enabled_and_manual() {
-        let mut settings = Settings {
-            ask_where_to_save: true,
-            ..Settings::default()
-        };
-        assert!(should_prompt_for_folder(&settings, true));
-        assert!(!should_prompt_for_folder(&settings, false));
-        settings.ask_where_to_save = false;
-        assert!(!should_prompt_for_folder(&settings, true));
-    }
-
-    #[test]
-    fn step_selection_moves_safely_within_visible_ids() {
-        assert_eq!(step_selection(&[], None, 1), None);
-        assert_eq!(step_selection(&[10, 20, 30], None, 1), Some(10));
-        assert_eq!(step_selection(&[10, 20, 30], None, -1), Some(30));
-        assert_eq!(step_selection(&[10, 20, 30], Some(10), 1), Some(20));
-        assert_eq!(step_selection(&[10, 20, 30], Some(30), 1), Some(30));
-        assert_eq!(step_selection(&[10, 20, 30], Some(20), -1), Some(10));
-        assert_eq!(step_selection(&[10, 20, 30], Some(99), 1), Some(10));
-    }
-
-    #[test]
-    fn apply_row_click_handles_plain_ctrl_and_shift_range() {
-        let visible = [1, 2, 3, 4, 5];
-        let mut anchor = None;
-        let mut set = HashSet::new();
-
-        apply_row_click(&visible, &mut anchor, &mut set, 2, false, false);
-        assert_eq!(anchor, Some(2));
-        assert_eq!(set, HashSet::from([2]));
-
-        apply_row_click(&visible, &mut anchor, &mut set, 4, false, true);
-        assert_eq!(set, HashSet::from([2, 3, 4]));
-
-        apply_row_click(&visible, &mut anchor, &mut set, 1, true, false);
-        assert_eq!(set, HashSet::from([1, 2, 3, 4]));
-
-        apply_row_click(&visible, &mut anchor, &mut set, 3, true, false);
-        assert_eq!(set, HashSet::from([1, 2, 4]));
     }
 }

@@ -9,6 +9,16 @@ pub const DEFAULT_CAPTURE_EXTENSIONS: &str = "zip rar 7z tar gz bz2 xz tgz exe m
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum QueueCompleteAction {
+    #[default]
+    None,
+    ExitApp,
+    Sleep,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DuplicatePolicy {
     #[default]
     Reject,
@@ -69,6 +79,26 @@ pub struct Settings {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub last_update_check_ms: i64,
+    #[serde(default)]
+    pub schedule_enabled: bool,
+    #[serde(default = "default_schedule_start")]
+    pub schedule_start: String,
+    #[serde(default = "default_schedule_stop")]
+    pub schedule_stop: String,
+    #[serde(default)]
+    pub on_queue_complete: QueueCompleteAction,
+    #[serde(default)]
+    pub hf_token: String,
+    #[serde(default)]
+    pub auto_extract_archives: bool,
+}
+
+fn default_schedule_start() -> String {
+    "00:00".to_string()
+}
+
+fn default_schedule_stop() -> String {
+    "06:00".to_string()
 }
 
 fn default_true() -> bool {
@@ -117,7 +147,34 @@ impl Default for Settings {
             proxy_url: String::new(),
             auto_check_updates: true,
             last_update_check_ms: 0,
+            schedule_enabled: false,
+            schedule_start: default_schedule_start(),
+            schedule_stop: default_schedule_stop(),
+            on_queue_complete: QueueCompleteAction::None,
+            hf_token: String::new(),
+            auto_extract_archives: false,
         }
+    }
+}
+
+/// Parses `"HH:MM"` (24-hour clock) into minutes since midnight (`0..1440`).
+pub fn parse_hhmm(raw: &str) -> Option<u16> {
+    let (h, m) = raw.trim().split_once(':')?;
+    let hour: u16 = h.trim().parse().ok()?;
+    let minute: u16 = m.trim().parse().ok()?;
+    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+}
+
+/// Returns true when `now_mins` falls inside `[start_mins, stop_mins)`, including
+/// overnight spans like `23:00` → `06:00`. Equal start and stop means always active.
+pub fn is_within_schedule(now_mins: u16, start_mins: u16, stop_mins: u16) -> bool {
+    if start_mins == stop_mins {
+        return true;
+    }
+    if start_mins < stop_mins {
+        now_mins >= start_mins && now_mins < stop_mins
+    } else {
+        now_mins >= start_mins || now_mins < stop_mins
     }
 }
 
@@ -321,5 +378,26 @@ mod tests {
         settings.save(dir.path()).unwrap();
         let loaded = Settings::load_or_create(dir.path()).unwrap();
         assert!(loaded.ask_where_to_save);
+    }
+
+    #[test]
+    fn schedule_parsing_and_overnight_windows_work() {
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("12:60"), None);
+        assert_eq!(parse_hhmm("nope"), None);
+
+        // Daytime window 09:00..17:00
+        assert!(!is_within_schedule(8 * 60 + 59, 9 * 60, 17 * 60));
+        assert!(is_within_schedule(9 * 60, 9 * 60, 17 * 60));
+        assert!(is_within_schedule(16 * 60 + 59, 9 * 60, 17 * 60));
+        assert!(!is_within_schedule(17 * 60, 9 * 60, 17 * 60));
+
+        // Overnight window 23:00..06:00
+        assert!(!is_within_schedule(22 * 60 + 59, 23 * 60, 6 * 60));
+        assert!(is_within_schedule(23 * 60, 23 * 60, 6 * 60));
+        assert!(is_within_schedule(2 * 60, 23 * 60, 6 * 60));
+        assert!(!is_within_schedule(6 * 60, 23 * 60, 6 * 60));
     }
 }

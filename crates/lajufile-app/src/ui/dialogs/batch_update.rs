@@ -8,7 +8,7 @@ use crate::engine::AddRequest;
 
 use super::super::format::format_size;
 use super::super::{Action, extract_urls_from_text};
-use super::{SettingsPalette, figma_button, non_empty, settings_card, youtube_url};
+use super::{SettingsPalette, figma_button, is_video_site_url, non_empty, settings_card};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchMode {
@@ -102,7 +102,7 @@ impl BatchDraft {
         self.expand_urls()
             .into_iter()
             .map(|url| {
-                let video_format = youtube_url(&url).then(|| DEFAULT_SELECTOR.to_string());
+                let video_format = is_video_site_url(&url).then(|| DEFAULT_SELECTOR.to_string());
                 AddRequest {
                     url,
                     file_name: None,
@@ -114,6 +114,7 @@ impl BatchDraft {
                     cookie: None,
                     video_format,
                     video_size: None,
+                    expected_sha256: None,
                 }
             })
             .collect()
@@ -208,8 +209,13 @@ pub fn batch_dialog(
                         ui.label("Import .txt:");
                         ui.add_sized(
                             [ui.available_width() - 90.0, 26.0],
-                            egui::TextEdit::singleline(&mut draft.import_path)
-                                .hint_text("C:\\path\\to\\urls.txt"),
+                            egui::TextEdit::singleline(&mut draft.import_path).hint_text(
+                                if cfg!(windows) {
+                                    "C:\\path\\to\\urls.txt"
+                                } else {
+                                    "/path/to/urls.txt"
+                                },
+                            ),
                         );
                         if ui.button("Load file").clicked() {
                             let path_str = draft.import_path.trim();
@@ -281,8 +287,11 @@ pub fn batch_dialog(
             ui.horizontal(|ui| {
                 ui.add_sized(
                     [ui.available_width() - 96.0, 28.0],
-                    egui::TextEdit::singleline(&mut draft.folder)
-                        .hint_text("Default: Downloads\\LajuFile"),
+                    egui::TextEdit::singleline(&mut draft.folder).hint_text(if cfg!(windows) {
+                        "Default: Downloads\\LajuFile"
+                    } else {
+                        "Default: Downloads/LajuFile"
+                    }),
                 );
                 if ui.button("Browse...").clicked() {
                     action = Some(Action::OpenFolderPicker);

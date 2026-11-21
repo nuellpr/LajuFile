@@ -51,7 +51,7 @@ $manifestPath = Join-Path $firefoxStage "manifest.json"
 $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
 $manifest.PSObject.Properties.Remove("minimum_chrome_version") | Out-Null
 $manifest.description = "Send downloads, PDFs, and YouTube videos from Firefox to LajuFile Desktop on Windows, macOS, and Linux."
-$manifest.background = @{ scripts = @("background.js") }
+$manifest.background = @{ scripts = @("common.js", "background.js") }
 $manifest | Add-Member -NotePropertyName "browser_specific_settings" -NotePropertyValue @{
     gecko = @{
         id = "lajufile@lajufile.app"

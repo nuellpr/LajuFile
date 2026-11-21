@@ -1,10 +1,12 @@
-const DEFAULTS = {
-  port: 53841,
-  token: "",
-  autoCapture: true,
-  excludedDomains: "",
-  fileTypes: "",
-};
+if (typeof globalThis.LajuFileCommon === "undefined" && typeof importScripts === "function") {
+  importScripts("common.js");
+}
+const {
+  DEFAULTS,
+  parseTokens: parseRuleTokens,
+  isHostExcluded: hostMatchesExcluded,
+  isSupportedVideoPage,
+} = globalThis.LajuFileCommon;
 const HEALTH_TTL_MS = 5000;
 const RULES_TTL_MS = 5000;
 const BYPASS_TTL_MS = 10000;
@@ -176,22 +178,6 @@ function basename(value) {
   return name || undefined;
 }
 
-function parseRuleTokens(raw) {
-  return String(raw || "")
-    .split(/[\s,;]+/)
-    .map((token) => token.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function hostMatchesExcluded(host, rulesRaw) {
-  if (!host) return false;
-  const normalizedHost = host.toLowerCase();
-  return parseRuleTokens(rulesRaw).some((token) => {
-    const domain = token.replace(/^\*\.|^\./, "");
-    return domain && (normalizedHost === domain || normalizedHost.endsWith(`.${domain}`));
-  });
-}
-
 function urlHost(rawUrl) {
   try {
     return rawUrl ? new URL(rawUrl).hostname.toLowerCase() : "";
@@ -304,7 +290,7 @@ async function capture(item, allowBrowserFallback) {
     return { status: 0, skipped: true, reason: "unreachable" };
   }
 
-  const url = item.url || item.finalUrl || item.linkUrl;
+  const url = item.finalUrl || item.url || item.linkUrl;
   if (!url || !/^https?:/i.test(url)) {
     return { status: 0, skipped: true, reason: "unsupported-url" };
   }
@@ -402,11 +388,12 @@ if (chrome.downloads.onDeterminingFilename) {
       }
     };
 
+    const candidateUrl = item.finalUrl || item.url;
     if (
       handledIds.has(item.id) ||
       !isLiveDownload(item) ||
-      !item.url ||
-      !/^https?:/i.test(item.url)
+      !candidateUrl ||
+      !/^https?:/i.test(candidateUrl)
     ) {
       finish();
       return false;
@@ -499,26 +486,19 @@ function isOwnExtensionPage(sender) {
   );
 }
 
-function isYouTubeVideoUrl(rawUrl) {
+function isSupportedVideoSiteUrl(rawUrl) {
+  return isHttpUrl(rawUrl) && isSupportedVideoPage(rawUrl);
+}
+
+function isSupportedVideoSenderUrl(rawUrl) {
   if (!isHttpUrl(rawUrl)) return false;
-  try {
-    const parsed = new URL(rawUrl);
-    const host = parsed.hostname.toLowerCase();
-    if (host === "youtu.be") {
-      return parsed.pathname.length > 1;
-    }
-    if (isYouTubeHost(host)) {
-      return parsed.pathname === "/watch" && parsed.searchParams.has("v");
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  if (isYouTubePageUrl(rawUrl)) return true;
+  return isSupportedVideoPage(rawUrl);
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "lajufile-download" || !info.linkUrl) return;
-  if (isYouTubeVideoUrl(info.linkUrl)) {
+  if (isSupportedVideoSiteUrl(info.linkUrl)) {
     try {
       const cookie = await netscapeCookies(info.linkUrl);
       const result = await post("video", {
@@ -622,8 +602,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "video-formats") {
     if (
-      !(ownPage || (fromPage && topFrame && isYouTubePageUrl(senderUrl))) ||
-      !isYouTubeVideoUrl(message.url)
+      !(ownPage || (fromPage && topFrame && isSupportedVideoSenderUrl(senderUrl))) ||
+      !isSupportedVideoSiteUrl(message.url)
     ) {
       return false;
     }
@@ -640,8 +620,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "video-download") {
     if (
-      !(ownPage || (fromPage && topFrame && isYouTubePageUrl(senderUrl))) ||
-      !isYouTubeVideoUrl(message.url) ||
+      !(ownPage || (fromPage && topFrame && isSupportedVideoSenderUrl(senderUrl))) ||
+      !isSupportedVideoSiteUrl(message.url) ||
       typeof message.selector !== "string" ||
       !message.selector.trim()
     ) {
@@ -662,6 +642,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             : undefined,
         cookie: cookie || undefined,
       });
+    })()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ status: 0, error: String(error) }));
+    return true;
+  }
+  if (message.type === "capture-media") {
+    if (!ownPage || !isHttpUrl(message.url)) return false;
+    const safeReferrer = isHttpUrl(message.referrer) ? message.referrer : undefined;
+    const isStream = /\.(m3u8|mpd)(\?|$)/i.test(message.url) || isSupportedVideoSiteUrl(message.url);
+    (async () => {
+      if (isStream) {
+        const cookie = await netscapeCookies(message.url);
+        return post("video", {
+          url: message.url,
+          video_format: "bv*+ba/b",
+          filename: typeof message.filename === "string" ? message.filename : undefined,
+          cookie: cookie || undefined,
+        });
+      }
+      return capture(
+        {
+          url: message.url,
+          referrer: safeReferrer,
+          filename: typeof message.filename === "string" ? message.filename : undefined,
+        },
+        false,
+      );
     })()
       .then(sendResponse)
       .catch((error) => sendResponse({ status: 0, error: String(error) }));

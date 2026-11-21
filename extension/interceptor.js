@@ -94,7 +94,10 @@ function isInlineCatchAllowed(urlObj) {
 function openBypassed(anchor, url) {
   chrome.runtime.sendMessage({ type: "bypass-url", url }).catch(() => {}).finally(() => {
     if (anchor && anchor.target === "_blank") {
-      window.open(url, "_blank", "noopener");
+      const opened = window.open(url, "_blank", "noopener");
+      if (!opened) {
+        window.location.assign(url);
+      }
     } else {
       window.location.assign(url);
     }
@@ -156,3 +159,33 @@ document.addEventListener(
   },
   true,
 );
+
+// On-demand media sniffer queried by the extension popup for <video>/<audio> sources.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== "sniff-page-media" || !sender || sender.id !== chrome.runtime.id) {
+    return false;
+  }
+  const seen = new Set();
+  const items = [];
+  const pushUrl = (raw, kind) => {
+    if (!raw || typeof raw !== "string") return;
+    let parsed;
+    try {
+      parsed = new URL(raw, location.href);
+    } catch {
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+    if (seen.has(parsed.href)) return;
+    seen.add(parsed.href);
+    const name = decodeURIComponent(parsed.pathname.split("/").pop() || "") || kind;
+    items.push({ url: parsed.href, kind, label: name.slice(0, 42) });
+  };
+  document.querySelectorAll("video, audio").forEach((el) => {
+    const kind = el.tagName.toLowerCase();
+    pushUrl(el.currentSrc || el.src, kind);
+    el.querySelectorAll("source[src]").forEach((src) => pushUrl(src.src, kind));
+  });
+  sendResponse({ items: items.slice(0, 6) });
+  return false;
+});

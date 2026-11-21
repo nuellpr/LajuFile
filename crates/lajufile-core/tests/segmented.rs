@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use lajufile_core::http::{RequestOptions, build_client};
 use lajufile_core::segment::plan_segments;
-use lajufile_core::segmented::{SegmentedError, SegmentedSpec, download_segmented, prefix_matches};
+use lajufile_core::segmented::{
+    SegmentedError, SegmentedSpec, download_segmented, download_segmented_with_splits,
+    prefix_matches,
+};
 use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::Segment;
 use url::Url;
@@ -31,6 +34,7 @@ fn spec(
         options: RequestOptions::default(),
         if_range,
         limiter: Arc::new(RateLimiter::new(0)),
+        item_limiter: None,
         retry_delays,
     }
 }
@@ -356,4 +360,87 @@ async fn permanent_http_status_does_not_sleep_on_retries() {
         error,
         SegmentedError::Download(lajufile_core::download::DownloadError::Status(404))
     ));
+}
+
+#[tokio::test]
+async fn resume_with_if_range_requires_existing_temp_file_of_sufficient_size() {
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let missing_temp = dir.path().join("missing.bin.lajufile");
+    let final_path = dir.path().join("missing.bin");
+    let mut segs = segments();
+    segs[0].done = 512 * 1024;
+    let missing_spec = spec(
+        &base,
+        "/seg",
+        missing_temp,
+        final_path.clone(),
+        segs.clone(),
+        Vec::new(),
+        Some("\"seg-v1\"".to_string()),
+    );
+    let err = download_segmented(&client(), &missing_spec, |_, _, _| {})
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SegmentedError::RestartRequired));
+    assert!(!final_path.exists());
+
+    // Truncated temp file below saved segment offset must also trigger restart instead of zero-fill.
+    let truncated_temp = dir.path().join("trunc.bin.lajufile");
+    let truncated_final = dir.path().join("trunc.bin");
+    std::fs::write(&truncated_temp, &seg_payload()[..1024]).unwrap();
+    let trunc_spec = spec(
+        &base,
+        "/seg",
+        truncated_temp,
+        truncated_final.clone(),
+        segs,
+        Vec::new(),
+        Some("\"seg-v1\"".to_string()),
+    );
+    let err = download_segmented(&client(), &trunc_spec, |_, _, _| {})
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SegmentedError::RestartRequired));
+    assert!(!truncated_final.exists());
+}
+
+#[tokio::test]
+async fn dynamic_segment_splitting_steals_slow_segment_and_assembles_exact_file() {
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join("split.bin.lajufile");
+    let final_path = dir.path().join("split.bin");
+    let segs = plan_segments(SEG_SIZE as u64, true, 2);
+    let split_spec = spec(
+        &base,
+        "/seg-uneven",
+        temp,
+        final_path.clone(),
+        segs,
+        Vec::new(),
+        None,
+    );
+    let splits = Arc::new(Mutex::new(Vec::<Vec<Segment>>::new()));
+    let splits_seen = Arc::clone(&splits);
+
+    let outcome = download_segmented_with_splits(
+        &client(),
+        &split_spec,
+        |_, _, _| {},
+        move |snapshot| {
+            splits_seen.lock().unwrap().push(snapshot);
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.bytes, SEG_SIZE as u64);
+    assert_eq!(std::fs::read(&final_path).unwrap(), seg_payload());
+    let recorded = splits.lock().unwrap();
+    assert!(
+        !recorded.is_empty(),
+        "expected fast worker to steal trailing bytes from slow segment 0"
+    );
+    assert!(recorded.last().unwrap().len() >= 3);
 }

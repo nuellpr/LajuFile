@@ -120,6 +120,23 @@ pub(super) async fn fetch_page_links(
                 .timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none());
             if let Some(proxy) = &validated_proxy {
+                // Best-effort local DNS SSRF check even when a proxy is configured:
+                // block domains that resolve locally to private/loopback IPs, while allowing
+                // remote-only DNS (e.g. corporate/Tor proxies) when local lookup fails.
+                if let Ok(addrs) = tokio::net::lookup_host((
+                    current_url.host_str().unwrap_or_default(),
+                    current_url.port_or_known_default().unwrap_or(80),
+                ))
+                .await
+                {
+                    for addr in addrs {
+                        if !is_public_ip(addr.ip()) {
+                            return Err(
+                                "Refusing to scan private or local network address".to_string()
+                            );
+                        }
+                    }
+                }
                 builder =
                     builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("Proxy: {e}"))?);
             } else {

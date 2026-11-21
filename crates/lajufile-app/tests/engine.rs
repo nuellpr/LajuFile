@@ -49,6 +49,7 @@ fn add_probes_and_inserts() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -88,6 +89,7 @@ fn add_missing_url_keeps_store_empty() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -129,6 +131,7 @@ fn add_duplicate_active_is_rejected() {
         cookie: None,
         video_format: None,
         video_size: None,
+        expected_sha256: None,
     };
     handle.send(Command::Add(request)).unwrap();
     let first = wait_for(
@@ -154,6 +157,7 @@ fn add_duplicate_active_is_rejected() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     let second = wait_for(
@@ -196,6 +200,7 @@ fn back_to_back_duplicate_is_rejected() {
                 cookie: None,
                 video_format: None,
                 video_size: None,
+                expected_sha256: None,
             }))
             .unwrap();
     }
@@ -237,6 +242,7 @@ fn same_explicit_name_gets_distinct_paths() {
                 cookie: None,
                 video_format: None,
                 video_size: None,
+                expected_sha256: None,
             }))
             .unwrap();
     }
@@ -282,13 +288,18 @@ fn pause_persists_every_segment_before_status_change() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     let snap = wait_for(
         &handle,
         |s| {
             s.downloads.first().is_some_and(|d| {
-                d.status == DownloadStatus::Downloading && d.downloaded >= 256 * 1024
+                d.status == DownloadStatus::Downloading
+                    && d.downloaded >= 256 * 1024
+                    && s.segments
+                        .get(&d.id)
+                        .is_some_and(|segs| segs.len() == 4 && segs.iter().all(|seg| seg.done > 0))
             })
         },
         Duration::from_secs(15),
@@ -307,7 +318,11 @@ fn pause_persists_every_segment_before_status_change() {
     let download = store.get_download(id).unwrap();
     let segments = store.segments(id).unwrap();
     assert_eq!(segments.len(), 4);
-    assert!(segments.iter().all(|segment| segment.done > 0));
+    assert!(
+        segments.iter().all(|segment| segment.done > 0),
+        "expected all segments > 0, got {segments:?} (downloaded={})",
+        download.downloaded
+    );
     let sum: u64 = segments.iter().map(|segment| segment.done).sum();
     assert_eq!(download.downloaded, sum);
 }
@@ -339,6 +354,8 @@ fn corrupt_cookie_marks_download_error() {
             user_agent: None,
             queue_order: 0,
             created_at: now_millis(),
+            speed_limit_kbps: 0,
+            expected_sha256: None,
             segments: vec![Segment {
                 idx: 0,
                 start: 0,
@@ -368,6 +385,8 @@ fn corrupt_cookie_marks_download_error() {
             user_agent: None,
             queue_order: 1,
             created_at: now_millis(),
+            speed_limit_kbps: 0,
+            expected_sha256: None,
             segments: vec![Segment {
                 idx: 0,
                 start: 0,
@@ -455,6 +474,8 @@ fn video_row_without_tools_marks_error() {
             user_agent: None,
             queue_order: 0,
             created_at: now_millis(),
+            speed_limit_kbps: 0,
+            expected_sha256: None,
             segments: vec![Segment {
                 idx: 0,
                 start: 0,
@@ -544,6 +565,7 @@ fn add_start_now_downloads_file() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -595,6 +617,7 @@ fn queue_never_exceeds_max_concurrent() {
                 cookie: None,
                 video_format: None,
                 video_size: None,
+                expected_sha256: None,
             }))
             .unwrap();
     }
@@ -661,6 +684,7 @@ fn pause_wins_over_late_finish_and_resume_completes() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -722,6 +746,7 @@ fn remove_deletes_record_and_temp() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     let snap = wait_for(
@@ -776,6 +801,7 @@ fn segmented_download_uses_multiple_ranges_and_completes() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -820,6 +846,7 @@ fn range_ignored_falls_back_to_single() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -865,13 +892,18 @@ fn pause_and_resume_continue_from_offset() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     let snap = wait_for(
         &handle,
         |s| {
             s.downloads.first().is_some_and(|d| {
-                d.status == DownloadStatus::Downloading && d.downloaded >= 256 * 1024
+                d.status == DownloadStatus::Downloading
+                    && d.downloaded >= 256 * 1024
+                    && s.segments
+                        .get(&d.id)
+                        .is_some_and(|segs| segs.len() == 4 && segs.iter().all(|seg| seg.done > 0))
             })
         },
         Duration::from_secs(15),
@@ -950,6 +982,7 @@ fn add_records_requested_connections() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1025,6 +1058,8 @@ fn startup_resumes_a_crashed_download() {
             user_agent: None,
             queue_order: 0,
             created_at: now_millis(),
+            speed_limit_kbps: 0,
+            expected_sha256: None,
             segments: vec![
                 Segment {
                     idx: 0,
@@ -1110,6 +1145,7 @@ fn remove_completed_clears_done_rows_and_keeps_files() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
     handle
@@ -1124,6 +1160,7 @@ fn remove_completed_clears_done_rows_and_keeps_files() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1187,6 +1224,7 @@ fn remove_with_file_deletes_saved_file_when_requested() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1238,6 +1276,7 @@ fn move_rename_moves_completed_file_and_updates_store() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1302,6 +1341,7 @@ fn update_url_and_resume_completes_with_refreshed_url() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1363,6 +1403,7 @@ fn duplicate_policy_resume_and_numbered_behavior() {
         cookie: None,
         video_format: None,
         video_size: None,
+        expected_sha256: None,
     };
 
     let first_url = format!("{}/file.bin", server.base);
@@ -1474,6 +1515,7 @@ fn category_dirs_routes_default_downloads_by_category() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1518,6 +1560,7 @@ fn chunked_download_persists_final_byte_size() {
             cookie: None,
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1558,6 +1601,7 @@ fn redownload_preserves_encrypted_cookie_and_headers() {
             cookie: Some("session=abc".to_string()),
             video_format: None,
             video_size: None,
+            expected_sha256: None,
         }))
         .unwrap();
 
@@ -1580,5 +1624,293 @@ fn redownload_preserves_encrypted_cookie_and_headers() {
     );
     assert_eq!(second.downloads.len(), 2);
     assert_ne!(second.downloads[0].save_path, second.downloads[1].save_path);
+    handle.shutdown();
+}
+
+#[test]
+fn redownload_on_paused_download_succeeds_under_reject_policy() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(dir.path());
+    settings.duplicate_policy = DuplicatePolicy::Reject;
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("paused.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    let first = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let paused_id = first.downloads[0].id;
+
+    handle.send(Command::Redownload(paused_id)).unwrap();
+    let second = wait_for(
+        &handle,
+        |s| s.downloads.len() == 2 && s.downloads.iter().any(|d| d.status == DownloadStatus::Done),
+        Duration::from_secs(15),
+    );
+    assert_eq!(second.downloads.len(), 2);
+    assert_ne!(second.downloads[0].save_path, second.downloads[1].save_path);
+    handle.shutdown();
+}
+
+#[test]
+fn one_time_200_url_streams_directly_from_probe_without_second_request() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/once.bin", server.base),
+            file_name: None,
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    let saved = std::fs::read(&done.downloads[0].save_path).unwrap();
+    assert_eq!(saved, b"one-time-payload-bytes-0123456789".repeat(128));
+    assert_eq!(server.once_hits(), 1);
+    handle.shutdown();
+}
+
+#[test]
+fn move_to_top_and_force_start_prioritize_queued_downloads() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(dir.path());
+    settings.max_concurrent = 1;
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    for (q, name) in [("first", "first.bin"), ("second", "second.bin")] {
+        handle
+            .send(Command::Add(AddRequest {
+                url: format!("{}/slow.bin?{q}", server.base),
+                file_name: Some(name.to_string()),
+                save_dir: None,
+                start_now: true,
+                connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
+                video_format: None,
+                video_size: None,
+                expected_sha256: None,
+            }))
+            .unwrap();
+    }
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.downloads.len() == 2
+                && s.downloads
+                    .iter()
+                    .any(|d| d.status == DownloadStatus::Downloading)
+                && s.downloads
+                    .iter()
+                    .any(|d| d.status == DownloadStatus::Queued)
+        },
+        Duration::from_secs(15),
+    );
+    let queued_id = snap
+        .downloads
+        .iter()
+        .find(|d| d.status == DownloadStatus::Queued)
+        .unwrap()
+        .id;
+
+    // ForceStart bypasses max_concurrent=1 and moves the row to top of queue order.
+    handle.send(Command::ForceStart(queued_id)).unwrap();
+    let forced = wait_for(
+        &handle,
+        |s| {
+            s.downloads.len() == 2
+                && s.downloads
+                    .iter()
+                    .find(|d| d.id == queued_id)
+                    .is_some_and(|d| {
+                        matches!(d.status, DownloadStatus::Downloading | DownloadStatus::Done)
+                    })
+                && s.downloads[0].id == queued_id
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(forced.downloads[0].id, queued_id);
+    handle.shutdown();
+}
+
+#[test]
+fn auto_verify_sha256_marks_verified_on_match_and_error_on_mismatch() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    let expected_ok = lajufile_core::checksum::sha256_bytes(&b"LajuFile".repeat(1024 * 128));
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin?good", server.base),
+            file_name: Some("good.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: Some(format!("sha256:{expected_ok}")),
+        }))
+        .unwrap();
+
+    let good = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .find(|d| d.file_name == "good.bin")
+                .is_some_and(|d| d.checksum_status.as_deref() == Some("verified"))
+        },
+        Duration::from_secs(15),
+    );
+    let good_row = good
+        .downloads
+        .iter()
+        .find(|d| d.file_name == "good.bin")
+        .unwrap();
+    assert_eq!(good_row.status, DownloadStatus::Done);
+    assert!(good_row.save_path.exists());
+
+    // Wrong digest marks Error + mismatch while preserving the downloaded file on disk.
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin?bad", server.base),
+            file_name: Some("bad.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: Some("0".repeat(64)),
+        }))
+        .unwrap();
+
+    let bad = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .find(|d| d.file_name == "bad.bin")
+                .is_some_and(|d| d.checksum_status.as_deref() == Some("mismatch"))
+        },
+        Duration::from_secs(15),
+    );
+    let bad_row = bad
+        .downloads
+        .iter()
+        .find(|d| d.file_name == "bad.bin")
+        .unwrap();
+    assert_eq!(bad_row.status, DownloadStatus::Error);
+    assert!(bad_row.save_path.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn per_item_speed_limit_persists_and_applies_live() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("capped.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    let paused = wait_for(&handle, |s| s.downloads.len() == 1, Duration::from_secs(15));
+    let id = paused.downloads[0].id;
+    handle
+        .send(Command::SetItemSpeedLimit { id, kbps: 256 })
+        .unwrap();
+    let updated = wait_for(
+        &handle,
+        |s| s.downloads[0].speed_limit_kbps == 256,
+        Duration::from_secs(15),
+    );
+    assert_eq!(updated.downloads[0].speed_limit_kbps, 256);
     handle.shutdown();
 }

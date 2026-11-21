@@ -166,17 +166,31 @@ pub fn settings_dialog(
             draw_h_divider(ui, sp.border);
 
             // Footer bar (Figma 9:455 - 9:458)
+            let proxy_err = lajufile_core::http::validate_proxy_url(&settings.proxy_url).err();
+            let schedule_err = if settings.schedule_enabled
+                && (lajufile_core::settings::parse_hhmm(&settings.schedule_start).is_none()
+                    || lajufile_core::settings::parse_hhmm(&settings.schedule_stop).is_none())
+            {
+                Some("Schedule times must use HH:MM (24-hour format).".to_string())
+            } else {
+                None
+            };
+            let validation_err = proxy_err.or(schedule_err);
             egui::Frame::new()
                 .fill(sp.dialog_bg)
                 .inner_margin(Margin::symmetric(24, 12))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Click Done to save and apply changes")
-                                .size(10.5)
-                                .color(sp.faint),
-                        );
+                        if let Some(err) = &validation_err {
+                            ui.label(RichText::new(err).size(10.5).color(sp.red));
+                        } else {
+                            ui.label(
+                                RichText::new("Click Done to save and apply changes")
+                                    .size(10.5)
+                                    .color(sp.faint),
+                            );
+                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if figma_button(
                                 ui,
@@ -185,7 +199,8 @@ pub fn settings_dialog(
                                 34.0,
                                 true,
                                 &sp,
-                            ) {
+                            ) && validation_err.is_none()
+                            {
                                 action = Some(Action::SaveSettings(settings.clone()));
                                 *open = false;
                             }
@@ -385,7 +400,11 @@ fn draw_settings_tab(
                     let native = crate::i18n::find_language(os_code)
                         .map(|i| i.native_name)
                         .unwrap_or("English");
-                    format!("Windows' language ({native})")
+                    if cfg!(windows) {
+                        format!("Windows' language ({native})")
+                    } else {
+                        format!("System language ({native})")
+                    }
                 } else {
                     crate::i18n::find_language(&settings.language)
                         .map(|i| format!("{} · {}", i.native_name, i.english_name))
@@ -615,6 +634,33 @@ fn draw_performance_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPale
                         .hint_text("http://127.0.0.1:7890 or socks5://127.0.0.1:1080"),
                 );
             });
+        if let Err(err) = lajufile_core::http::validate_proxy_url(&settings.proxy_url) {
+            ui.add_space(4.0);
+            ui.label(RichText::new(err).size(10.0).color(sp.red));
+        }
+        ui.add_space(12.0);
+        card_kicker(
+            ui,
+            "HUGGINGFACE ACCESS TOKEN (OPTIONAL, FOR GATED AI MODELS)",
+            sp,
+        );
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(sp.field_bg)
+            .stroke(Stroke::new(1.0, sp.border))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width((ui.available_width() - 22.0).max(160.0));
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut settings.hf_token)
+                        .password(true)
+                        .frame(egui::Frame::NONE)
+                        .background_color(Color32::TRANSPARENT)
+                        .hint_text("hf_... (sent only to huggingface.co)"),
+                );
+            });
     });
 }
 
@@ -659,7 +705,7 @@ fn draw_browser_capture_card(
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if figma_button(ui, "Test connection", 118.0, 30.0, false, sp) {
-                    *action = Some(Action::TestBridge(settings.bridge_port));
+                    *action = Some(Action::TestBridge(bound_port));
                 }
                 ui.add_space(8.0);
                 let pair_label = if settings.browser_paired {
@@ -814,7 +860,11 @@ fn draw_behavior_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPalette
         ui.add_space(8.0);
         toggle_row(
             ui,
-            "Start LajuFile with Windows",
+            if cfg!(windows) {
+                "Start LajuFile with Windows"
+            } else {
+                "Start LajuFile at login"
+            },
             "settings_autostart",
             &mut settings.autostart,
             sp,
@@ -883,6 +933,14 @@ fn draw_behavior_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPalette
             &mut settings.video_chapters,
             sp,
         );
+        ui.add_space(8.0);
+        toggle_row(
+            ui,
+            "Auto-extract downloaded archives (.zip, .tar.gz) into subfolder",
+            "settings_auto_extract",
+            &mut settings.auto_extract_archives,
+            sp,
+        );
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.set_width(ui.available_width());
@@ -897,6 +955,93 @@ fn draw_behavior_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPalette
             ui.label(RichText::new("Theme").size(12.0).color(sp.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 segmented_theme(ui, &mut settings.theme, sp);
+            });
+        });
+        ui.add_space(12.0);
+        draw_h_divider(ui, sp.border);
+        ui.add_space(10.0);
+        card_kicker(ui, "SCHEDULER & QUEUE COMPLETION", sp);
+        ui.add_space(8.0);
+        toggle_row(
+            ui,
+            "Download only during scheduled hours (local time)",
+            "settings_scheduler",
+            &mut settings.schedule_enabled,
+            sp,
+        );
+        if settings.schedule_enabled {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Start (HH:MM)").size(11.0).color(sp.muted));
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(sp.field_bg)
+                    .stroke(Stroke::new(1.0, sp.border))
+                    .corner_radius(6)
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(64.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut settings.schedule_start)
+                                .frame(egui::Frame::NONE)
+                                .hint_text("00:00"),
+                        );
+                    });
+                ui.add_space(14.0);
+                ui.label(RichText::new("Stop (HH:MM)").size(11.0).color(sp.muted));
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(sp.field_bg)
+                    .stroke(Stroke::new(1.0, sp.border))
+                    .corner_radius(6)
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(64.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut settings.schedule_stop)
+                                .frame(egui::Frame::NONE)
+                                .hint_text("06:00"),
+                        );
+                    });
+            });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("When all downloads finish (one-shot)")
+                    .size(12.0)
+                    .color(sp.text),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                segmented_options(
+                    ui,
+                    &mut settings.on_queue_complete,
+                    "queue_complete_action",
+                    &[
+                        (
+                            lajufile_core::settings::QueueCompleteAction::None,
+                            "Off",
+                            44.0,
+                        ),
+                        (
+                            lajufile_core::settings::QueueCompleteAction::ExitApp,
+                            "Exit",
+                            48.0,
+                        ),
+                        (
+                            lajufile_core::settings::QueueCompleteAction::Sleep,
+                            "Sleep",
+                            54.0,
+                        ),
+                        (
+                            lajufile_core::settings::QueueCompleteAction::Shutdown,
+                            "Shutdown",
+                            74.0,
+                        ),
+                    ],
+                    sp,
+                );
             });
         });
     });

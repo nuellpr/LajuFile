@@ -56,6 +56,8 @@ async fn probe_insert_download_and_finish() {
         user_agent: Some(DEFAULT_USER_AGENT.to_string()),
         queue_order: 1,
         created_at: now_millis(),
+        speed_limit_kbps: 0,
+        expected_sha256: None,
         segments: vec![segment],
     };
     let id = store.insert_download(&new).unwrap();

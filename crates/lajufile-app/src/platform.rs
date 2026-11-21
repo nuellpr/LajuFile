@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lajufile_core::paths;
-use lajufile_core::settings::Settings;
+use lajufile_core::settings::{QueueCompleteAction, Settings};
 
 /// Holds the OS single-instance lock for the lifetime of the desktop process.
 pub struct SingleInstanceGuard {
@@ -390,6 +390,92 @@ pub fn trim_process_memory() {
     unsafe {
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+/// Returns local wall-clock minutes since midnight (`0..1440`) for the download scheduler.
+pub fn local_minutes_since_midnight() -> Option<u16> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            millis: u16,
+        }
+        unsafe extern "system" {
+            fn GetLocalTime(lp_system_time: *mut SystemTime);
+        }
+        let mut st = SystemTime {
+            year: 0,
+            month: 0,
+            day_of_week: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            millis: 0,
+        };
+        unsafe { GetLocalTime(&mut st) };
+        Some(st.hour * 60 + st.minute)
+    }
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("date")
+            .arg("+%H:%M")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        lajufile_core::settings::parse_hhmm(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// Triggers an OS power action after all queued downloads finish.
+pub fn trigger_power_action(action: QueueCompleteAction) {
+    use std::process::Command;
+    match action {
+        QueueCompleteAction::None | QueueCompleteAction::ExitApp => {}
+        QueueCompleteAction::Sleep => {
+            #[cfg(windows)]
+            {
+                let _ = Command::new("rundll32.exe")
+                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = Command::new("pmset").arg("sleepnow").spawn();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = Command::new("systemctl").arg("suspend").spawn();
+            }
+        }
+        QueueCompleteAction::Shutdown => {
+            #[cfg(windows)]
+            {
+                let _ = Command::new("shutdown")
+                    .args(["/s", "/t", "5", "/c", "LajuFile downloads completed"])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to shut down"])
+                    .spawn();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = Command::new("systemctl").arg("poweroff").spawn();
+            }
+        }
     }
 }
 

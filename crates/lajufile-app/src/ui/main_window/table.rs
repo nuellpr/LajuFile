@@ -112,7 +112,13 @@ pub(super) fn draw_table(
                 });
                 row.col(|ui| {
                     paint_row_edge(ui, is_selected, false, palette);
-                    status_cell(ui, download.status, lang, palette);
+                    status_cell(
+                        ui,
+                        download.status,
+                        download.checksum_status.as_deref(),
+                        lang,
+                        palette,
+                    );
                 });
                 row.col(|ui| {
                     paint_row_edge(ui, is_selected, false, palette);
@@ -238,6 +244,20 @@ pub(super) fn draw_table(
                         .clicked()
                     {
                         actions.push(Action::Resume(download.id));
+                        ui.close();
+                    }
+                    if download.status != DownloadStatus::Done
+                        && ui.button("Move to top of queue").clicked()
+                    {
+                        actions.push(Action::MoveToTop(download.id));
+                        ui.close();
+                    }
+                    if matches!(
+                        download.status,
+                        DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Error
+                    ) && ui.button("Force start now").clicked()
+                    {
+                        actions.push(Action::ForceStart(download.id));
                         ui.close();
                     }
                     if ui
@@ -518,7 +538,13 @@ fn paint_skewed_shimmer(painter: &egui::Painter, rect: Rect, cycle: f32) {
     }
 }
 
-fn status_cell(ui: &mut egui::Ui, status: DownloadStatus, lang: &str, palette: &Palette) {
+fn status_cell(
+    ui: &mut egui::Ui,
+    status: DownloadStatus,
+    checksum_status: Option<&str>,
+    lang: &str,
+    palette: &Palette,
+) {
     ui.add_space(8.0);
     let (en_label, fg) = match status {
         DownloadStatus::Downloading => ("Downloading", palette.sky),
@@ -527,7 +553,12 @@ fn status_cell(ui: &mut egui::Ui, status: DownloadStatus, lang: &str, palette: &
         DownloadStatus::Done => ("Completed", palette.emerald_bright),
         DownloadStatus::Error => ("Error", palette.red_bright),
     };
-    let label = crate::i18n::translate(lang, en_label).into_owned();
+    let mut label = crate::i18n::translate(lang, en_label).into_owned();
+    if checksum_status == Some("verified") && status == DownloadStatus::Done {
+        label.push_str(" ✓");
+    } else if checksum_status == Some("mismatch") {
+        label.push_str(" ✗");
+    }
     let galley = ui
         .painter()
         .layout_no_wrap(label, FontId::proportional(9.5), fg);
@@ -561,7 +592,7 @@ fn paint_status_icon(ui: &egui::Ui, rect: Rect, status: DownloadStatus, color: C
     let c = rect.center();
     match status {
         DownloadStatus::Downloading => {
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
             let t = ui.ctx().input(|i| i.time);
             painter.circle_stroke(c, 4.1, Stroke::new(1.2, color.gamma_multiply(0.25)));
             paint_arc(
@@ -582,7 +613,7 @@ fn paint_status_icon(ui: &egui::Ui, rect: Rect, status: DownloadStatus, color: C
             );
         }
         DownloadStatus::Queued => {
-            ui.ctx().request_repaint_after(Duration::from_millis(30));
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
             let t = ui.ctx().input(|i| i.time);
             let phase = (t * 1.3).fract() as f32;
             painter.circle_filled(c, 2.0, color);
@@ -634,7 +665,7 @@ fn progress_cell(ui: &mut egui::Ui, download: &Download, lang: &str, palette: &P
     let fraction = progress_fraction(download.size, download.downloaded, download.status);
     let is_downloading = download.status == DownloadStatus::Downloading;
     if is_downloading {
-        ui.ctx().request_repaint_after(Duration::from_millis(16));
+        ui.ctx().request_repaint_after(Duration::from_millis(80));
     }
 
     let (cell_rect, _) = ui.allocate_exact_size(Vec2::new(148.0, 20.0), Sense::hover());
@@ -788,7 +819,7 @@ fn speed_cell(
             Vec2::splat(10.0),
         );
         if active {
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
             let t = ui.ctx().input(|i| i.time);
             let pulse = 0.5 + 0.5 * (t * 5.0).sin() as f32;
             painter.circle_filled(

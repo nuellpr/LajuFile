@@ -270,6 +270,13 @@ pub enum Action {
     SelectAll,
     Pause(i64),
     Resume(i64),
+    MoveToTop(i64),
+    ForceStart(i64),
+    SetItemSpeedLimit {
+        id: i64,
+        kbps: u64,
+    },
+    CancelQueueComplete,
     UpdateUrlAndResume {
         id: i64,
         url: String,
@@ -321,6 +328,7 @@ pub enum Action {
     Add(AddRequest),
     AddBatch(Vec<AddRequest>),
     LoadFormats(String),
+    LoadHfFiles(String),
     GrabPageLinks(String),
     SaveSettings(Settings),
     SetSpeedLimit(u64),
@@ -365,6 +373,9 @@ mod tests {
             queue_order: 0,
             created_at: 0,
             completed_at: None,
+            speed_limit_kbps: 0,
+            expected_sha256: None,
+            checksum_status: None,
         }
     }
 

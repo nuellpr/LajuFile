@@ -22,6 +22,8 @@ fn sample(url: &str, size: u64) -> NewDownload {
         user_agent: Some("test-agent".to_string()),
         queue_order: 1,
         created_at: 1_700_000_000_000,
+        speed_limit_kbps: 0,
+        expected_sha256: None,
         segments: vec![Segment {
             idx: 0,
             start: 0,
@@ -415,4 +417,37 @@ fn update_location_renames_and_updates_paths() {
     assert_eq!(d.file_name, "ubuntu.iso");
     assert_eq!(d.save_path, save);
     assert_eq!(d.temp_path, temp);
+}
+
+#[test]
+fn move_to_top_speed_limit_and_checksum_status_persist() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut a = sample("https://example.com/a.iso", 100);
+    a.queue_order = 10;
+    let id_a = store.insert_download(&a).unwrap();
+
+    let mut b = sample("https://example.com/b.iso", 200);
+    b.queue_order = 20;
+    b.speed_limit_kbps = 512;
+    b.expected_sha256 = Some("a".repeat(64));
+    let id_b = store.insert_download(&b).unwrap();
+
+    store.move_to_top(id_b).unwrap();
+    let rows = store.list_downloads().unwrap();
+    assert_eq!(rows[0].id, id_b);
+    assert_eq!(rows[1].id, id_a);
+
+    store.update_speed_limit(id_b, 1024).unwrap();
+    store
+        .update_checksum_result(id_b, "mismatch", Some("SHA-256 mismatch"))
+        .unwrap();
+    let updated = store.get_download(id_b).unwrap();
+    assert_eq!(updated.speed_limit_kbps, 1024);
+    assert_eq!(
+        updated.expected_sha256.as_deref(),
+        Some("a".repeat(64).as_str())
+    );
+    assert_eq!(updated.checksum_status.as_deref(), Some("mismatch"));
+    assert_eq!(updated.status, DownloadStatus::Error);
+    assert_eq!(updated.error.as_deref(), Some("SHA-256 mismatch"));
 }

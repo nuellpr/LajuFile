@@ -3,7 +3,7 @@ members = ["crates/lajufile-core", "crates/lajufile-app"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.8"
+version = "1.0.9"
 authors = ["Nuel Wallep"]
 edition = "2024"
 license = "MIT"

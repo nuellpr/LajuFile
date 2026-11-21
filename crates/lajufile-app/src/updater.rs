@@ -15,7 +15,7 @@ use crate::installer::APP_BIN;
 pub const GITHUB_LATEST_API: &str = "https://api.github.com/repos/nuellpr/LajuFile/releases/latest";
 pub const GITHUB_RELEASES_PAGE: &str = "https://github.com/nuellpr/LajuFile/releases";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
     pub browser_download_url: String,
@@ -544,7 +544,7 @@ mod tests {
             select_asset_for_target(&assets, "linux", "aarch64").map(|a| a.name.as_str()),
             Some("LajuFile-v1.0.1-linux-arm64-setup.run")
         );
-        assert!(select_asset_for_target(&assets, "windows", "aarch64").is_none());
+        assert_eq!(select_asset_for_target(&assets, "windows", "aarch64"), None);
     }
 
     #[test]

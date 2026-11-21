@@ -35,10 +35,6 @@ pub enum DownloadInfoChoice {
     Cancel,
 }
 
-pub fn category_label(category: Category) -> &'static str {
-    category.label()
-}
-
 pub fn download_info_dialog(
     ctx: &egui::Context,
     draft: &mut DownloadInfoDraft,
@@ -106,7 +102,7 @@ pub fn download_info_dialog(
                                 ui.horizontal(|ui| {
                                     badge_pill(
                                         ui,
-                                        &crate::i18n::t_ctx(ctx, category_label(draft.category)),
+                                        &crate::i18n::t_ctx(ctx, draft.category.label()),
                                         sp.accent,
                                         &sp,
                                     );
@@ -213,10 +209,7 @@ pub fn download_info_dialog(
                         ui.add_space(12.0);
                         toggle_row(
                             ui,
-                            &format!(
-                                "Remember folder for {} category",
-                                category_label(draft.category)
-                            ),
+                            &format!("Remember folder for {} category", draft.category.label()),
                             "download_info_remember_cat",
                             &mut draft.remember,
                             &sp,

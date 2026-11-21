@@ -151,11 +151,145 @@ where
     Err(DownloadError::Status(0))
 }
 
+pub async fn download_single_from_response_or_retry<F>(
+    client: &reqwest::Client,
+    initial_response: Option<reqwest::Response>,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    item_limiter: Option<Arc<RateLimiter>>,
+    retry_delays: &[Duration],
+    mut on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    if let Some(response) = initial_response {
+        match download_single_from_response_with_item(
+            response,
+            spec,
+            limiter.clone(),
+            item_limiter.clone(),
+            &mut on_progress,
+        )
+        .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) if !retry_delays.is_empty() && is_retryable_error(&err) => {
+                let delay = retry_delays[0];
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                return download_single_with_retry_inner(
+                    client,
+                    spec,
+                    limiter,
+                    item_limiter,
+                    &retry_delays[1..],
+                    on_progress,
+                )
+                .await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    download_single_with_retry_inner(
+        client,
+        spec,
+        limiter,
+        item_limiter,
+        retry_delays,
+        on_progress,
+    )
+    .await
+}
+
+async fn download_single_with_retry_inner<F>(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    item_limiter: Option<Arc<RateLimiter>>,
+    retry_delays: &[Duration],
+    mut on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    for attempt in 0..=retry_delays.len() {
+        match download_single_with_limiters(
+            client,
+            spec,
+            limiter.clone(),
+            item_limiter.clone(),
+            &mut on_progress,
+        )
+        .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) if attempt < retry_delays.len() && is_retryable_error(&err) => {
+                let delay = retry_delays[attempt];
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(DownloadError::Status(0))
+}
+
+pub async fn download_single_from_response<F>(
+    response: reqwest::Response,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    mut on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    download_single_from_response_with_item(response, spec, limiter, None, &mut on_progress).await
+}
+
+async fn download_single_from_response_with_item<F>(
+    response: reqwest::Response,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    item_limiter: Option<Arc<RateLimiter>>,
+    on_progress: &mut F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    if spec.final_path.exists() {
+        return Err(DownloadError::DestinationExists(spec.final_path.clone()));
+    }
+    if let Some(expected) = spec.expected_size {
+        ensure_disk_space(&spec.temp_path, expected)?;
+    }
+    if let Some(parent) = spec.temp_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let file = tokio::fs::File::create(&spec.temp_path).await?;
+    write_single_response(response, file, spec, limiter, item_limiter, on_progress).await
+}
+
 pub async fn download_single_with_limiter<F>(
     client: &reqwest::Client,
     spec: &DownloadSpec,
     limiter: Option<Arc<RateLimiter>>,
     mut on_progress: F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
+    download_single_with_limiters(client, spec, limiter, None, &mut on_progress).await
+}
+
+async fn download_single_with_limiters<F>(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    item_limiter: Option<Arc<RateLimiter>>,
+    on_progress: &mut F,
 ) -> Result<DownloadOutcome, DownloadError>
 where
     F: FnMut(u64) + Send,
@@ -175,11 +309,25 @@ where
     if let Some(parent) = spec.temp_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let mut file = tokio::fs::File::create(&spec.temp_path).await?;
+    let file = tokio::fs::File::create(&spec.temp_path).await?;
 
     let response = apply_headers(client.get(spec.url.clone()), &spec.options)
         .send()
         .await?;
+    write_single_response(response, file, spec, limiter, item_limiter, on_progress).await
+}
+
+async fn write_single_response<F>(
+    response: reqwest::Response,
+    mut file: tokio::fs::File,
+    spec: &DownloadSpec,
+    limiter: Option<Arc<RateLimiter>>,
+    item_limiter: Option<Arc<RateLimiter>>,
+    on_progress: &mut F,
+) -> Result<DownloadOutcome, DownloadError>
+where
+    F: FnMut(u64) + Send,
+{
     let status = response.status();
     if status != reqwest::StatusCode::OK && status != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(DownloadError::Status(status.as_u16()));
@@ -245,6 +393,9 @@ where
         }
         if let Some(limiter) = &limiter {
             limiter.throttle(length).await;
+        }
+        if let Some(item_limiter) = &item_limiter {
+            item_limiter.throttle(length).await;
         }
         write_buf.extend_from_slice(&chunk);
         if !write_buf.is_empty()

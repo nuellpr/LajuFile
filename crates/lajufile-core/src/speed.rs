@@ -29,6 +29,11 @@ impl RateLimiter {
 
     pub fn set_kbps(&self, kbps: u64) {
         self.kbps.store(kbps, Ordering::Relaxed);
+        if kbps == 0
+            && let Ok(mut bucket) = self.bucket.lock()
+        {
+            bucket.tokens = bucket.tokens.max(0.0);
+        }
     }
 
     pub fn kbps(&self) -> u64 {
@@ -51,19 +56,18 @@ impl RateLimiter {
                 let elapsed = now.duration_since(bucket.last).as_secs_f64();
                 bucket.tokens = (bucket.tokens + elapsed * rate).min(rate);
                 bucket.last = now;
-                if bucket.tokens >= slice as f64 {
-                    bucket.tokens -= slice as f64;
+                // Reserve tokens up front so concurrent connections queue FIFO instead of starving.
+                bucket.tokens -= slice as f64;
+                if bucket.tokens >= 0.0 {
                     None
                 } else {
-                    Some(Duration::from_secs_f64(
-                        (slice as f64 - bucket.tokens) / rate,
-                    ))
+                    Some(Duration::from_secs_f64(-bucket.tokens / rate))
                 }
             };
-            match wait {
-                Some(wait) => tokio::time::sleep(wait).await,
-                None => bytes -= slice,
+            if let Some(wait) = wait {
+                tokio::time::sleep(wait).await;
             }
+            bytes -= slice;
         }
     }
 }
@@ -119,5 +123,25 @@ mod tests {
             .await
             .expect("lowering the limit must not hang an in-flight throttle")
             .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_waiters_complete_fairly_without_starvation() {
+        let limiter = std::sync::Arc::new(RateLimiter::new(16)); // 16 KB/s
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let worker = std::sync::Arc::clone(&limiter);
+            tasks.push(tokio::spawn(async move {
+                worker.throttle(16 * 1024).await;
+            }));
+        }
+        let start = tokio::time::Instant::now();
+        for task in tasks {
+            tokio::time::timeout(Duration::from_secs(12), task)
+                .await
+                .expect("no waiter may starve")
+                .unwrap();
+        }
+        assert!(start.elapsed() >= Duration::from_secs(6));
     }
 }

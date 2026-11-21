@@ -606,7 +606,11 @@ pub fn language_dialog(
                                             Align2::LEFT_CENTER,
                                             format!(
                                                 "{} ({os_label})",
-                                                crate::i18n::t_ctx(ctx, "Windows' language")
+                                                if cfg!(windows) {
+                                                    crate::i18n::t_ctx(ctx, "Windows' language")
+                                                } else {
+                                                    crate::i18n::t_ctx(ctx, "System language")
+                                                }
                                             ),
                                             FontId::proportional(12.0),
                                             if is_sel { sp.accent } else { sp.text },

@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
-use super::ui::format::{eta_seconds, format_eta};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumberStyle {
     /// English / IDM style: `10200`, `1.50 MB`
@@ -1129,10 +1127,6 @@ pub fn format_speed_locale(bytes_per_sec: Option<u64>, lang: &str) -> String {
 pub fn format_percent_locale(fraction: f32, lang: &str) -> String {
     let pct = format!("{:.0}%", (fraction * 100.0).clamp(0.0, 100.0));
     format_decimal_locale(pct, lang)
-}
-
-pub fn format_eta_locale(size: Option<u64>, downloaded: u64, speed: Option<u64>) -> String {
-    format_eta(eta_seconds(size, downloaded, speed.unwrap_or(0)))
 }
 
 static EXTERNAL_TSV: OnceLock<RwLock<HashMap<String, HashMap<String, String>>>> = OnceLock::new();

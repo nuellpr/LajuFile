@@ -438,15 +438,24 @@ pub fn install_tools_with_proxy(dir: &Path, proxy: Option<&str>) -> Result<(), S
         make_executable(&ffmpeg);
     }
 
-    if js_runtime_arg(dir).is_none() {
-        let _ = install_deno(&rt, &client, dir);
+    let mut deno_err = None;
+    if js_runtime_arg(dir).is_none()
+        && let Err(err) = install_deno(&rt, &client, dir)
+    {
+        deno_err = Some(err);
     }
 
-    if tools_ready(dir) {
-        Ok(())
-    } else {
-        Err("tools are still missing after install".to_string())
+    if !tools_ready(dir) {
+        return Err("tools are still missing after install".to_string());
     }
+    if let Some(err) = deno_err
+        && js_runtime_arg(dir).is_none()
+    {
+        return Err(format!(
+            "yt-dlp and ffmpeg installed, but JS runtime (deno) failed: {err}"
+        ));
+    }
+    Ok(())
 }
 
 fn install_deno(

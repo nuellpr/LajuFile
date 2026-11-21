@@ -140,6 +140,9 @@ pub struct Download {
     pub queue_order: i64,
     pub created_at: i64,
     pub completed_at: Option<i64>,
+    pub speed_limit_kbps: u64,
+    pub expected_sha256: Option<String>,
+    pub checksum_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +166,8 @@ pub struct NewDownload {
     pub user_agent: Option<String>,
     pub queue_order: i64,
     pub created_at: i64,
+    pub speed_limit_kbps: u64,
+    pub expected_sha256: Option<String>,
     pub segments: Vec<Segment>,
 }
 

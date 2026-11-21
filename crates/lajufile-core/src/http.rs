@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, COOKIE, HeaderMap, REFERER, USER_AGENT,
+    ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, COOKIE, HeaderMap, REFERER,
+    USER_AGENT,
 };
 
 pub const DEFAULT_USER_AGENT: &str = concat!("LajuFile/", env!("CARGO_PKG_VERSION"));
@@ -11,6 +12,7 @@ pub struct RequestOptions {
     pub user_agent: Option<String>,
     pub referrer: Option<String>,
     pub cookie: Option<String>,
+    pub authorization: Option<String>,
 }
 
 pub fn validate_proxy_url(raw: &str) -> Result<Option<String>, String> {
@@ -85,6 +87,9 @@ pub fn apply_headers(
     }
     if let Some(cookie) = &opts.cookie {
         builder = builder.header(COOKIE, cookie);
+    }
+    if let Some(auth) = &opts.authorization {
+        builder = builder.header(AUTHORIZATION, auth);
     }
     builder
 }
@@ -171,6 +176,7 @@ mod tests {
             user_agent: Some("TestAgent/1".into()),
             referrer: Some("https://ref.example/".into()),
             cookie: Some("session=abc".into()),
+            authorization: Some("Bearer hf_secret".into()),
         };
         let request = request(&options);
         let headers = request.headers();
@@ -178,6 +184,7 @@ mod tests {
         assert_eq!(headers.get(USER_AGENT).unwrap(), "TestAgent/1");
         assert_eq!(headers.get(REFERER).unwrap(), "https://ref.example/");
         assert_eq!(headers.get(COOKIE).unwrap(), "session=abc");
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer hf_secret");
     }
 
     #[test]

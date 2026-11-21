@@ -1,50 +1,14 @@
-const DEFAULTS = {
-  port: 53841,
-  token: "",
-  autoCapture: true,
-  excludedDomains: "",
-};
+const {
+  DEFAULTS,
+  parseTokens,
+  isHostExcluded,
+  isSupportedVideoPage,
+  parseQuickPair,
+  probeBridge,
+} = globalThis.LajuFileCommon;
 const $ = (id) => document.getElementById(id);
 let activeHost = "";
-
-function parseTokens(raw) {
-  return String(raw || "")
-    .split(/[\s,;]+/)
-    .map((t) => t.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function isHostExcluded(host, rawList) {
-  if (!host) return false;
-  const h = host.toLowerCase();
-  return parseTokens(rawList).some((t) => {
-    const clean = t.replace(/^\*\.|^\./, "");
-    return clean && (h === clean || h.endsWith(`.${clean}`));
-  });
-}
-
-async function probeBridge(port, token) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2000);
-  try {
-    const health = await fetch(`http://127.0.0.1:${port}/health`, {
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!health.ok) return { reachable: false, paired: false };
-    if (!token) return { reachable: true, paired: false };
-    const rules = await fetch(`http://127.0.0.1:${port}/rules`, {
-      headers: { "x-lajufile-token": token },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    return { reachable: true, paired: rules.ok };
-  } catch {
-    return { reachable: false, paired: false };
-  } finally {
-    clearTimeout(timer);
-  }
-}
+let activeTab = null;
 
 function setStatus(reachable, paired, port, hasToken) {
   $("dot").className = `dot ${reachable ? "ok" : "bad"}`;
@@ -80,6 +44,7 @@ function updateSiteButton(excludedRaw) {
 async function loadActiveTabHost() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    activeTab = tab || null;
     if (tab && tab.url && /^https?:/i.test(tab.url)) {
       const host = new URL(tab.url).hostname.toLowerCase();
       if (host && host !== "localhost" && host !== "127.0.0.1") {
@@ -89,8 +54,75 @@ async function loadActiveTabHost() {
   } catch {}
 }
 
+async function refreshPageMedia() {
+  const card = $("mediaCard");
+  const list = $("mediaList");
+  const feedback = $("mediaFeedback");
+  list.textContent = "";
+  feedback.textContent = "";
+  if (!activeTab || !activeTab.url || !/^https?:/i.test(activeTab.url)) {
+    card.classList.add("hidden");
+    return;
+  }
+  const entries = [];
+  if (isSupportedVideoPage(activeTab.url)) {
+    entries.push({
+      url: activeTab.url,
+      label: activeTab.title ? activeTab.title.slice(0, 36) : "Download page video",
+      badge: "yt-dlp",
+    });
+  }
+  if (typeof activeTab.id === "number") {
+    try {
+      const res = await chrome.tabs.sendMessage(activeTab.id, { type: "sniff-page-media" });
+      if (res && Array.isArray(res.items)) {
+        for (const item of res.items) {
+          if (!entries.some((e) => e.url === item.url)) {
+            entries.push({ url: item.url, label: item.label, badge: item.kind });
+          }
+        }
+      }
+    } catch {}
+  }
+  if (entries.length === 0) {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+  for (const entry of entries.slice(0, 4)) {
+    const row = document.createElement("div");
+    row.className = "media-item";
+    const lbl = document.createElement("span");
+    lbl.className = "media-label";
+    lbl.textContent = entry.label;
+    lbl.title = entry.url;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ghost-btn";
+    btn.textContent = `Download (${entry.badge})`;
+    btn.addEventListener("click", async () => {
+      feedback.textContent = "Sending…";
+      const res = await chrome.runtime.sendMessage({
+        type: "capture-media",
+        url: entry.url,
+        referrer: activeTab.url,
+      });
+      if (res && res.status === 201) {
+        feedback.textContent = "Added!";
+      } else if (res && res.status === 409) {
+        feedback.textContent = "Already queued";
+      } else {
+        feedback.textContent = (res && res.body && res.body.error) || "Failed";
+      }
+    });
+    row.append(lbl, btn);
+    list.append(row);
+  }
+}
+
 async function refresh() {
   await loadActiveTabHost();
+  await refreshPageMedia();
   const stored = await chrome.storage.local.get(DEFAULTS);
   const port = Number(stored.port) || DEFAULTS.port;
   const token = String(stored.token || "").trim();
@@ -125,15 +157,7 @@ async function applyQuickPair() {
   const feedback = $("pairFeedback");
   if (!raw) return;
   try {
-    const data = JSON.parse(raw);
-    const port = Number(data.port);
-    const token = String(data.token || "").trim();
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-      throw new Error("Invalid port in Quick-Pair code.");
-    }
-    if (!/^[0-9a-fA-F]{64}$/.test(token)) {
-      throw new Error("Invalid token in Quick-Pair code.");
-    }
+    const { port, token } = parseQuickPair(raw);
     await chrome.storage.local.set({ port, token });
     await chrome.runtime.sendMessage({ type: "config-updated" });
     const check = await probeBridge(port, token);

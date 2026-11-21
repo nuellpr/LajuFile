@@ -568,6 +568,7 @@ pub struct PropertiesDraft {
     pub file_name: String,
     pub folder: String,
     pub checksum_input: String,
+    pub speed_limit_kbps: u64,
 }
 
 impl PropertiesDraft {
@@ -581,7 +582,8 @@ impl PropertiesDraft {
                 .parent()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
-            checksum_input: String::new(),
+            checksum_input: download.expected_sha256.clone().unwrap_or_default(),
+            speed_limit_kbps: download.speed_limit_kbps,
         }
     }
 }
@@ -670,7 +672,10 @@ pub fn properties_dialog(
                                         format!(
                                             "{} ({} bytes)",
                                             format_size(s),
-                                            format_bytes_commas(s)
+                                            crate::i18n::format_grouped_int(
+                                                s,
+                                                crate::i18n::NumberStyle::CommaDot
+                                            )
                                         )
                                     })
                                     .unwrap_or_else(|| "(unknown)".to_string());
@@ -770,7 +775,60 @@ pub fn properties_dialog(
                                             );
                                             ui.end_row();
                                         }
+                                        if let Some(cs) = download.checksum_status.as_deref() {
+                                            ui.label(
+                                                RichText::new("SHA-256")
+                                                    .size(11.5)
+                                                    .color(sp.muted),
+                                            );
+                                            let (text, color) = match cs {
+                                                "verified" => ("Verified ✓", sp.green),
+                                                _ => ("Mismatch ✗", sp.red),
+                                            };
+                                            ui.label(
+                                                RichText::new(text)
+                                                    .size(11.5)
+                                                    .strong()
+                                                    .color(color),
+                                            );
+                                            ui.end_row();
+                                        }
                                     });
+
+                                ui.add_space(8.0);
+                                draw_h_divider(ui, sp.border);
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Per-download speed limit (KB/s, 0 = unlimited)")
+                                            .size(11.0)
+                                            .color(sp.muted),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if figma_button(ui, "Apply", 64.0, 26.0, false, &sp) {
+                                            action = Some(Action::SetItemSpeedLimit {
+                                                id: download.id,
+                                                kbps: draft.speed_limit_kbps,
+                                            });
+                                        }
+                                        ui.add_space(6.0);
+                                        egui::Frame::new()
+                                            .fill(sp.field_bg)
+                                            .stroke(Stroke::new(1.0, sp.border))
+                                            .corner_radius(6)
+                                            .inner_margin(Margin::symmetric(8, 3))
+                                            .show(ui, |ui| {
+                                                ui.set_width(86.0);
+                                                ui.add(
+                                                    egui::DragValue::new(
+                                                        &mut draft.speed_limit_kbps,
+                                                    )
+                                                    .range(0..=1_000_000)
+                                                    .speed(32),
+                                                );
+                                            });
+                                    });
+                                });
 
                                 if let Some(error) = download.error.as_deref() {
                                     ui.add_space(8.0);
@@ -1082,18 +1140,6 @@ pub fn properties_dialog(
         });
 
     (keep_open, action)
-}
-
-pub(super) fn format_bytes_commas(bytes: u64) -> String {
-    let s = bytes.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (idx, ch) in s.chars().enumerate() {
-        if idx > 0 && (s.len() - idx) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 pub(super) fn format_utc_timestamp(millis: i64) -> String {

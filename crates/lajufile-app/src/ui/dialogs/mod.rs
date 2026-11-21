@@ -22,6 +22,7 @@ use lajufile_core::settings::Settings;
 use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice, is_audio_only_selector};
 
 use crate::engine::AddRequest;
+use crate::engine::huggingface::{HfModelFile, parse_hf_repo_url};
 
 use super::Action;
 use super::format::format_size;
@@ -38,6 +39,9 @@ pub struct AddDraft {
     /// Pre-estimated byte size for the selected quality choice.
     pub quality_size: Option<u64>,
     pub formats: Vec<QualityChoice>,
+    pub hf_files: Vec<HfModelFile>,
+    pub hf_selected: Option<usize>,
+    pub expected_sha256: String,
 }
 
 impl Default for AddDraft {
@@ -51,6 +55,9 @@ impl Default for AddDraft {
             quality: None,
             quality_size: None,
             formats: Vec::new(),
+            hf_files: Vec::new(),
+            hf_selected: None,
+            expected_sha256: String::new(),
         }
     }
 }
@@ -64,14 +71,23 @@ impl AddDraft {
     }
 
     pub fn into_request(self) -> AddRequest {
-        let is_youtube = youtube_url(&self.url);
-        let video_format = is_youtube.then(|| {
+        let chosen_hf = self
+            .hf_selected
+            .and_then(|idx| self.hf_files.get(idx))
+            .cloned();
+        let target_url = chosen_hf
+            .as_ref()
+            .map(|f| f.download_url.clone())
+            .unwrap_or_else(|| self.url.trim().to_string());
+        let is_video = chosen_hf.is_none() && is_video_site_url(&target_url);
+        let video_format = is_video.then(|| {
             self.quality
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
         });
         let audio_only = video_format.as_deref().is_some_and(is_audio_only_selector);
-        let mut file_name = non_empty(self.file_name);
+        let mut file_name =
+            non_empty(self.file_name).or_else(|| chosen_hf.as_ref().map(|f| f.file_name.clone()));
         if audio_only
             && let Some(ref mut name) = file_name
             && name.to_ascii_lowercase().ends_with(".mp4")
@@ -79,14 +95,22 @@ impl AddDraft {
             let stem = &name[..name.len() - 4];
             *name = format!("{stem}.m4a");
         }
-        let video_size = is_youtube
+        let video_size = is_video
             .then(|| {
                 self.quality_size
                     .or_else(|| self.formats.first().and_then(|c| c.size))
             })
             .flatten();
+        let expected_sha256 = {
+            let norm = lajufile_core::checksum::normalize_checksum_input(&self.expected_sha256);
+            if !norm.is_empty() {
+                Some(norm)
+            } else {
+                chosen_hf.and_then(|f| f.sha256)
+            }
+        };
         AddRequest {
-            url: self.url.trim().to_string(),
+            url: target_url,
             file_name,
             save_dir: non_empty(self.folder).map(PathBuf::from),
             start_now: self.start_now,
@@ -96,6 +120,7 @@ impl AddDraft {
             cookie: None,
             video_format,
             video_size,
+            expected_sha256,
         }
     }
 }
@@ -109,6 +134,39 @@ pub fn youtube_url(url: &str) -> bool {
         url.host_str(),
         Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be")
     )
+}
+
+/// True for video/audio platforms handled by yt-dlp (YouTube, Vimeo, Twitch, TikTok, X, etc.).
+pub fn is_video_site_url(url: &str) -> bool {
+    if youtube_url(url) {
+        return true;
+    }
+    let Ok(parsed) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let path = parsed.path();
+    if path.len() <= 1 {
+        return false;
+    }
+    const VIDEO_DOMAINS: &[&str] = &[
+        "vimeo.com",
+        "twitch.tv",
+        "tiktok.com",
+        "x.com",
+        "twitter.com",
+        "dailymotion.com",
+        "soundcloud.com",
+        "bilibili.com",
+        "reddit.com",
+        "instagram.com",
+        "facebook.com",
+    ];
+    VIDEO_DOMAINS
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
 pub fn add_dialog(
@@ -135,6 +193,8 @@ pub fn add_dialog(
                 draft.formats.clear();
                 draft.quality = None;
                 draft.quality_size = None;
+                draft.hf_files.clear();
+                draft.hf_selected = None;
             }
             if *focus {
                 url.request_focus();
@@ -153,13 +213,34 @@ pub fn add_dialog(
             ui.horizontal(|ui| {
                 ui.add_sized(
                     [ui.available_width() - 96.0, 30.0],
-                    egui::TextEdit::singleline(&mut draft.folder)
-                        .hint_text("Default: Downloads\\LajuFile"),
+                    egui::TextEdit::singleline(&mut draft.folder).hint_text(if cfg!(windows) {
+                        "Default: Downloads\\LajuFile"
+                    } else {
+                        "Default: Downloads/LajuFile"
+                    }),
                 );
                 if ui.button("Browse...").clicked() {
                     action = Some(Action::OpenFolderPicker);
                 }
             });
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Expected SHA-256 (optional)").strong());
+            ui.add_sized(
+                [ui.available_width(), 28.0],
+                egui::TextEdit::singleline(&mut draft.expected_sha256)
+                    .hint_text("Auto-verify file integrity after download (64 hex chars)"),
+            );
+            let sha_norm =
+                lajufile_core::checksum::normalize_checksum_input(&draft.expected_sha256);
+            let sha_invalid = !sha_norm.is_empty()
+                && (sha_norm.len() != 64 || !sha_norm.bytes().all(|b| b.is_ascii_hexdigit()));
+            if sha_invalid {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "Expected SHA-256 must be 64 hexadecimal characters.",
+                );
+            }
 
             ui.add_space(12.0);
             ui.add(egui::Slider::new(&mut draft.connections, 1..=32).text("Connections"));
@@ -169,7 +250,48 @@ pub fn add_dialog(
                     .color(ui.visuals().weak_text_color()),
             );
 
-            if youtube_url(&draft.url) {
+            if parse_hf_repo_url(&draft.url).is_some() {
+                ui.add_space(8.0);
+                ui.label(RichText::new("HuggingFace model file").strong());
+                if draft.hf_files.is_empty() {
+                    if ui.button("Load model files").clicked() {
+                        action = Some(Action::LoadHfFiles(draft.url.trim().to_string()));
+                    }
+                } else {
+                    let current_idx = draft.hf_selected.unwrap_or(0).min(draft.hf_files.len() - 1);
+                    let mut selected = current_idx;
+                    let fmt_item = |f: &HfModelFile| {
+                        let sha_tag = if f.sha256.is_some() {
+                            " · SHA-256"
+                        } else {
+                            ""
+                        };
+                        if f.size > 0 {
+                            format!("{} ({}){sha_tag}", f.path, format_size(f.size))
+                        } else {
+                            format!("{}{sha_tag}", f.path)
+                        }
+                    };
+                    egui::ComboBox::from_id_salt("hf_model_file")
+                        .width(ui.available_width())
+                        .selected_text(fmt_item(&draft.hf_files[selected]))
+                        .show_ui(ui, |ui| {
+                            for (index, file) in draft.hf_files.iter().enumerate() {
+                                ui.selectable_value(&mut selected, index, fmt_item(file));
+                            }
+                        });
+                    if draft.hf_selected != Some(selected) {
+                        draft.hf_selected = Some(selected);
+                        let chosen = &draft.hf_files[selected];
+                        draft.file_name = chosen.file_name.clone();
+                        if let Some(sha) = &chosen.sha256 {
+                            draft.expected_sha256 = sha.clone();
+                        }
+                    }
+                }
+            }
+
+            if is_video_site_url(&draft.url) {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Video quality").strong());
                 if draft.formats.is_empty() {
@@ -224,7 +346,7 @@ pub fn add_dialog(
 
             ui.add_space(12.0);
             ui.separator();
-            let can_add = !draft.url.trim().is_empty();
+            let can_add = !draft.url.trim().is_empty() && !sha_invalid;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add_enabled(can_add, egui::Button::new("Add download"))
@@ -666,7 +788,7 @@ pub(super) fn mask_token(token: &str) -> String {
 mod tests {
     use super::*;
     use batch_update::{MAX_BATCH_IMPORT_BYTES, load_batch_import_file};
-    use transfers::{format_bytes_commas, format_utc_timestamp};
+    use transfers::format_utc_timestamp;
 
     #[test]
     fn clipboard_detects_downloadable_urls_and_respects_rules() {
@@ -812,13 +934,6 @@ mod tests {
         assert_eq!(mask_token("abcdefgh"), "abcd…efgh");
         assert_eq!(mask_token("abc"), "…");
         assert_eq!(mask_token(""), "not generated");
-    }
-
-    #[test]
-    fn formats_bytes_with_commas() {
-        assert_eq!(format_bytes_commas(0), "0");
-        assert_eq!(format_bytes_commas(999), "999");
-        assert_eq!(format_bytes_commas(1_234_567), "1,234,567");
     }
 
     #[test]

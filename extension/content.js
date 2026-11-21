@@ -65,7 +65,7 @@ function formatQualityDescription(format) {
 
 function errorText(result) {
   if (result && result.body && result.body.error) return result.body.error;
-  return "Tidak dapat terhubung ke LajuFile. Pastikan aplikasi LajuFile sedang berjalan.";
+  return "Could not connect to LajuFile. Make sure LajuFile Desktop is running.";
 }
 
 function showStatusRow(menu, message, isError = false) {
@@ -89,7 +89,7 @@ function styleMenuRow(row) {
 }
 
 async function download(url, selector, label, title, menu, sizeBytes) {
-  showStatusRow(menu, `Mengirim "${truncateTitle(title, 28)}" (${label}) ke LajuFile...`);
+  showStatusRow(menu, `Sending "${truncateTitle(title, 28)}" (${label}) to LajuFile...`);
   const ext = /audio/i.test(label) ? "m4a" : "mp4";
   const baseTitle = title || pageVideoTitle();
   const result = await chrome.runtime.sendMessage({
@@ -101,13 +101,13 @@ async function download(url, selector, label, title, menu, sizeBytes) {
   });
   const status = result ? result.status : 0;
   if (status === 401) {
-    showStatusRow(menu, "Pasangkan token ekstensi LajuFile di menu Options terlebih dahulu.", true);
+    showStatusRow(menu, "Pair the LajuFile extension token in Options first.", true);
   } else if (status === 409) {
-    showStatusRow(menu, "Video ini sudah ada di antrean LajuFile.");
+    showStatusRow(menu, "This video is already in LajuFile.");
   } else if (status !== 201) {
     showStatusRow(menu, errorText(result), true);
   } else {
-    showStatusRow(menu, `Berhasil ditambahkan ke LajuFile (${label}).`);
+    showStatusRow(menu, `Added to LajuFile (${label}).`);
     setTimeout(() => {
       menu.style.display = "none";
     }, 1500);
@@ -115,7 +115,7 @@ async function download(url, selector, label, title, menu, sizeBytes) {
 }
 
 async function showFormats(menu, url) {
-  showStatusRow(menu, "Memuat daftar kualitas video...");
+  showStatusRow(menu, "Loading video qualities...");
   const result = await chrome.runtime.sendMessage({ type: "video-formats", url });
   const formats = result && result.body ? result.body.formats : null;
   const rawTitle =

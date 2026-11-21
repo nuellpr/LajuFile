@@ -7,7 +7,7 @@
 **Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows, macOS & Linux.**  
 *Fast, lightweight, secure, multi-connection download manager built with Rust.*
 
-[![Version](https://img.shields.io/badge/version-v1.0.8-3B82F6?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.0.9-3B82F6?style=flat-square)](#)
 [![Rust](https://img.shields.io/badge/Rust-2024%20%2F%20MSRV%201.85-orange?style=flat-square)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--pembaruan-windows-macos--linux)
@@ -38,9 +38,9 @@
 
 Unduh installer sesuai sistem operasi & arsitektur dari halaman [Releases](../../releases):
 
-- **Windows:** Jalankan **`LajuFile-v1.0.8-windows-x64-setup.exe`**, setujui lisensi, lalu klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
-- **macOS:** Buka **`LajuFile-v1.0.8-macos-arm64-setup.dmg`** (atau build `x64` sesuai Mac Anda) dan jalankan **`LajuFile Setup.app`**, yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
-- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.8-linux-x64-setup.run && ./LajuFile-v1.0.8-linux-x64-setup.run`** (tersedia pula varian `arm64` di rilis ARM), memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop`, dan symlink `~/.local/bin/lajufile`.
+- **Windows:** Jalankan **`LajuFile-v1.0.9-windows-x64-setup.exe`**, setujui lisensi, lalu klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
+- **macOS:** Buka **`LajuFile-v1.0.9-macos-arm64-setup.dmg`** (atau build `x64` sesuai Mac Anda) dan jalankan **`LajuFile Setup.app`**, yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
+- **Linux:** Jalankan **`chmod +x LajuFile-v1.0.9-linux-x64-setup.run && ./LajuFile-v1.0.9-linux-x64-setup.run`** (tersedia pula varian `arm64` di rilis ARM), memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop`, dan symlink `~/.local/bin/lajufile`.
 
 **Memperbarui versi terpasang:**
 - **Langsung dari aplikasi (`v1.0.1+`):** Buka **Bantuan -> Periksa pembaruan...** (`Help -> Check for updates...`), lalu klik **Update now** — LajuFile mengunduh installer resmi sesuai arsitektur CPU dari GitHub Releases, memverifikasi `SHA256SUMS.txt`, memasangnya otomatis, dan memulai ulang aplikasi tanpa menghapus daftar unduhan atau pengaturan.
@@ -66,7 +66,7 @@ node --test crates/lajufile-app/tests/extension_sender.mjs
 # Jalankan aplikasi desktop langsung
 cargo run -p lajufile-app --bin lajufile
 
-# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.8-Windows-x64-Setup.exe
+# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v1.0.9-Windows-x64-Setup.exe
 powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 

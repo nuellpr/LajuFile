@@ -12,10 +12,16 @@ const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 
 const DOWNLOAD_COLUMNS: &str = "id, url, final_url, file_name, save_path, temp_path, size, \
 downloaded, status, category, kind, video_format, connections, ranged, etag, last_modified, \
-cookie_enc, referrer, user_agent, error, queue_order, created_at, completed_at";
+cookie_enc, referrer, user_agent, error, queue_order, created_at, completed_at, \
+speed_limit_kbps, expected_sha256, checksum_status";
 
 const SCHEMA_V2: &str = "ALTER TABLE downloads ADD COLUMN kind TEXT NOT NULL DEFAULT 'http';
 ALTER TABLE downloads ADD COLUMN video_format TEXT;";
+
+const SCHEMA_V3: &str =
+    "ALTER TABLE downloads ADD COLUMN speed_limit_kbps INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE downloads ADD COLUMN expected_sha256 TEXT;
+ALTER TABLE downloads ADD COLUMN checksum_status TEXT;";
 
 pub struct Store {
     conn: Connection,
@@ -73,18 +79,27 @@ impl Store {
                 let tx = conn.transaction()?;
                 tx.execute_batch(SCHEMA_V1)?;
                 tx.execute_batch(SCHEMA_V2)?;
-                tx.pragma_update(None, "user_version", 2)?;
+                tx.execute_batch(SCHEMA_V3)?;
+                tx.pragma_update(None, "user_version", 3)?;
                 tx.commit()?;
                 Ok(())
             }
             1 => {
                 let tx = conn.transaction()?;
                 tx.execute_batch(SCHEMA_V2)?;
-                tx.pragma_update(None, "user_version", 2)?;
+                tx.execute_batch(SCHEMA_V3)?;
+                tx.pragma_update(None, "user_version", 3)?;
                 tx.commit()?;
                 Ok(())
             }
-            2 => Ok(()),
+            2 => {
+                let tx = conn.transaction()?;
+                tx.execute_batch(SCHEMA_V3)?;
+                tx.pragma_update(None, "user_version", 3)?;
+                tx.commit()?;
+                Ok(())
+            }
+            3 => Ok(()),
             other => Err(StoreError::UnsupportedSchema(other)),
         }
     }
@@ -95,8 +110,8 @@ impl Store {
             "INSERT INTO downloads (
                 url, final_url, file_name, save_path, temp_path, size, status, category,
                 kind, video_format, connections, ranged, etag, last_modified, cookie_enc,
-                referrer, user_agent, queue_order, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                referrer, user_agent, queue_order, created_at, speed_limit_kbps, expected_sha256
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 new.url,
                 new.final_url,
@@ -117,6 +132,8 @@ impl Store {
                 new.user_agent,
                 new.queue_order,
                 new.created_at,
+                new.speed_limit_kbps as i64,
+                new.expected_sha256,
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -311,6 +328,96 @@ impl Store {
         Ok(total)
     }
 
+    /// Moves a download ahead of every other row in queue order.
+    pub fn move_to_top(&mut self, id: i64) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        let top: i64 = tx.query_row(
+            "SELECT COALESCE(MIN(queue_order), 1) - 1 FROM downloads",
+            [],
+            |row| row.get(0),
+        )?;
+        let changed = tx.execute(
+            "UPDATE downloads SET queue_order = ?1 WHERE id = ?2",
+            params![top, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_speed_limit(&mut self, id: i64, kbps: u64) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE downloads SET speed_limit_kbps = ?1 WHERE id = ?2",
+            params![kbps as i64, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn update_checksum_result(
+        &mut self,
+        id: i64,
+        checksum_status: &str,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let changed = if let Some(err) = error {
+            self.conn.execute(
+                "UPDATE downloads SET checksum_status = ?1, status = 'error', error = ?2 WHERE id = ?3",
+                params![checksum_status, err, id],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE downloads SET checksum_status = ?1 WHERE id = ?2",
+                params![checksum_status, id],
+            )?
+        };
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    /// Replaces the segment layout after dynamic segment splitting while preserving `ranged`.
+    pub fn upsert_segments(&mut self, id: i64, segments: &[Segment]) -> Result<u64, StoreError> {
+        let tx = self.conn.transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.execute("DELETE FROM segments WHERE download_id = ?1", [id])?;
+        let mut total = 0u64;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO segments (download_id, idx, start, end, done)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for segment in segments {
+                insert.execute(params![
+                    id,
+                    segment.idx as i64,
+                    segment.start as i64,
+                    segment.end as i64,
+                    segment.done as i64
+                ])?;
+                total = total.saturating_add(segment.done);
+            }
+        }
+        tx.execute(
+            "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
+            params![total as i64, id],
+        )?;
+        tx.commit()?;
+        Ok(total)
+    }
+
     /// Fills in a size discovered after the row was created (HTTP probe).
     pub fn set_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
         self.conn.execute(
@@ -483,6 +590,9 @@ fn row_to_download(row: &Row<'_>) -> Result<Download, StoreError> {
         queue_order: row.get(20)?,
         created_at: row.get(21)?,
         completed_at: row.get(22)?,
+        speed_limit_kbps: row.get::<_, i64>(23)?.max(0) as u64,
+        expected_sha256: row.get(24)?,
+        checksum_status: row.get(25)?,
     })
 }
 
@@ -511,6 +621,9 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "http");
         assert_eq!(rows[0].video_format, None);
+        assert_eq!(rows[0].speed_limit_kbps, 0);
+        assert_eq!(rows[0].expected_sha256, None);
+        assert_eq!(rows[0].checksum_status, None);
     }
 
     #[test]
@@ -537,6 +650,8 @@ mod tests {
             user_agent: None,
             queue_order: 1,
             created_at: 0,
+            speed_limit_kbps: 0,
+            expected_sha256: None,
             segments: segs,
         };
         let id1 = store

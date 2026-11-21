@@ -54,6 +54,7 @@ pub async fn start_server_with_ranges() -> (String, Arc<Mutex<Vec<u64>>>) {
         .route("/short", get(short))
         .route("/long", get(long))
         .route("/seg", get(seg))
+        .route("/seg-uneven", get(seg_uneven))
         .route("/seg-ignore", get(seg_ignore))
         .route("/seg-bad-range", get(seg_bad_range))
         .route("/seg-flaky", get(seg_flaky))
@@ -371,4 +372,35 @@ async fn plain_flaky(State(state): State<SegState>) -> Response {
 
 async fn seg_always_500() -> Response {
     response(StatusCode::INTERNAL_SERVER_ERROR, Body::empty(), &[])
+}
+
+async fn seg_uneven(headers: HeaderMap) -> Response {
+    use tokio_stream::StreamExt;
+    let Some((start, end)) = parse_range(&headers) else {
+        return seg_full();
+    };
+    if start > 0 {
+        return seg_range(&headers, start, end);
+    }
+    let slice = seg_payload()[start..=end].to_vec();
+    let chunks: Vec<Bytes> = slice
+        .chunks(64 * 1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stream = tokio_stream::iter(chunks).then(|chunk| async move {
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        Ok::<Bytes, std::io::Error>(chunk)
+    });
+    response_strings(
+        StatusCode::PARTIAL_CONTENT,
+        Body::from_stream(stream),
+        &[
+            (
+                header::CONTENT_RANGE,
+                format!("bytes {start}-{end}/{SEG_SIZE}"),
+            ),
+            (header::CONTENT_LENGTH, (end - start + 1).to_string()),
+            (header::ETAG, "\"seg-v1\"".to_string()),
+        ],
+    )
 }

@@ -1,10 +1,5 @@
-const DEFAULTS = {
-  port: 53841,
-  token: "",
-  autoCapture: true,
-  excludedDomains: "",
-  fileTypes: "",
-};
+const { DEFAULTS, parsePort, isValidToken, parseQuickPair, parseTokens, probeBridge } =
+  globalThis.LajuFileCommon;
 const $ = (id) => document.getElementById(id);
 
 function setStatus(text, kind) {
@@ -19,55 +14,13 @@ function setPill(text, kind) {
   pill.className = `pill ${kind}`;
 }
 
-function parsePort(value) {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-    throw new Error("Port must be between 1024 and 65535.");
-  }
-  return port;
-}
-
-async function testBridge(port, token) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2000);
-  try {
-    const health = await fetch(`http://127.0.0.1:${port}/health`, {
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!health.ok) return { reachable: false, paired: false };
-    if (!token) return { reachable: true, paired: false };
-    const rules = await fetch(`http://127.0.0.1:${port}/rules`, {
-      headers: { "x-lajufile-token": token },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    return { reachable: true, paired: rules.ok };
-  } catch {
-    return { reachable: false, paired: false };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function applyQuickPair(raw) {
-  let data;
-  try {
-    data = JSON.parse(String(raw || "").trim());
-  } catch {
-    setStatus("Quick-Pair expects JSON from LajuFile Setup Wizard.", "bad");
-    return false;
-  }
   let port;
+  let token;
   try {
-    port = parsePort(data.port);
+    ({ port, token } = parseQuickPair(raw));
   } catch (error) {
     setStatus(error.message, "bad");
-    return false;
-  }
-  const token = String(data.token || "").trim();
-  if (!/^[0-9a-fA-F]{64}$/.test(token)) {
-    setStatus("Quick-Pair token must be 64 hexadecimal characters.", "bad");
     return false;
   }
   $("port").value = port;
@@ -87,7 +40,7 @@ async function load() {
   $("excludedDomains").value = stored.excludedDomains || "";
   syncChips();
   const token = String(stored.token || "").trim();
-  const res = await testBridge(Number(stored.port) || DEFAULTS.port, token);
+  const res = await probeBridge(Number(stored.port) || DEFAULTS.port, token);
   if (res.paired) {
     setPill("Paired & Online", "ok");
   } else if (res.reachable) {
@@ -100,7 +53,7 @@ async function load() {
 async function persistCurrentSettings() {
   const port = parsePort($("port").value);
   const token = $("token").value.trim();
-  if (token && !/^[0-9a-fA-F]{64}$/.test(token)) {
+  if (token && !isValidToken(token)) {
     throw new Error("Token must be 64 hexadecimal characters. Copy it from LajuFile Settings.");
   }
   await chrome.storage.local.set({
@@ -135,7 +88,7 @@ async function test() {
   }
   const token = $("token").value.trim();
   setStatus("Checking connection & pairing…");
-  const { reachable, paired } = await testBridge(port, token);
+  const { reachable, paired } = await probeBridge(port, token);
   if (paired) {
     setPill("Paired & Online", "ok");
     setStatus(`Paired cleanly with LajuFile on 127.0.0.1:${port}.`, "ok");
@@ -152,10 +105,7 @@ async function test() {
 }
 
 function parseExtList(raw) {
-  return String(raw || "")
-    .split(/[\s,;]+/)
-    .map((s) => s.trim().replace(/^\./, "").toLowerCase())
-    .filter(Boolean);
+  return parseTokens(raw).map((s) => s.replace(/^\./, "")).filter(Boolean);
 }
 
 function syncChips() {

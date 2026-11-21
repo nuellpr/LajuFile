@@ -18,12 +18,15 @@ const CHUNK: usize = 64 * 1024;
 #[derive(Clone)]
 struct ServerState {
     ranges: Arc<Mutex<Vec<u64>>>,
+    once_hits: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub struct TestServer {
     pub base: String,
     #[allow(dead_code)] // Used by the engine test target only.
     ranges: Arc<Mutex<Vec<u64>>>,
+    #[allow(dead_code)] // Used by the engine test target only.
+    once_hits: Arc<std::sync::atomic::AtomicUsize>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -32,6 +35,11 @@ impl TestServer {
     #[allow(dead_code)] // Used by the engine test target only.
     pub fn ranges(&self) -> Vec<u64> {
         self.ranges.lock().unwrap().clone()
+    }
+
+    #[allow(dead_code)] // Used by the engine test target only.
+    pub fn once_hits(&self) -> usize {
+        self.once_hits.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -51,8 +59,10 @@ pub fn start_server() -> TestServer {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let state = ServerState {
         ranges: Arc::new(Mutex::new(Vec::new())),
+        once_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let server_ranges = Arc::clone(&state.ranges);
+    let server_once_hits = Arc::clone(&state.once_hits);
 
     let join = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -78,6 +88,7 @@ pub fn start_server() -> TestServer {
     TestServer {
         base: format!("http://{addr}"),
         ranges: server_ranges,
+        once_hits: server_once_hits,
         shutdown: Some(shutdown_tx),
         join: Some(join),
     }
@@ -94,13 +105,55 @@ fn app(state: ServerState) -> Router {
         .route("/slow-probe.bin", get(slow_probe))
         .route("/auth.bin", get(auth_bin))
         .route("/chunked.bin", get(chunked_bin))
+        .route("/once.bin", get(once_bin))
         .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
         .with_state(state)
 }
 
-async fn slow() -> impl axum::response::IntoResponse {
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    file().await
+async fn once_bin(State(state): State<ServerState>) -> Response {
+    let hit = state
+        .once_hits
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if hit > 0 {
+        let mut gone = Response::new(Body::empty());
+        *gone.status_mut() = StatusCode::GONE;
+        return gone;
+    }
+    let body = b"one-time-payload-bytes-0123456789".repeat(128);
+    let mut response = Response::new(Body::from(body));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"once.bin\""),
+    );
+    response
+}
+
+async fn slow() -> Response {
+    let body = b"LajuFile".repeat(1024 * 128);
+    let total = body.len();
+    let half = total / 2;
+    let first = Bytes::copy_from_slice(&body[..half]);
+    let second = Bytes::copy_from_slice(&body[half..]);
+    let stream = tokio_stream::iter([(50_u64, first), (450_u64, second)]).then(
+        |(delay_ms, chunk)| async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            Ok::<Bytes, std::io::Error>(chunk)
+        },
+    );
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&total.to_string()).unwrap(),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"file.bin\""),
+    );
+    response
 }
 
 async fn slow_headers() -> impl axum::response::IntoResponse {

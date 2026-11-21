@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.9
+
+### Fitur Baru
+- **Dynamic Segment Splitting (Work Stealing):** Saat satu segmen unduhan selesai lebih cepat, worker secara otomatis membelah sisa rentang byte dari segmen lain yang masih berjalan (selama sisa `>= 1 MiB`) sehingga bandwidth tetap penuh hingga akhir unduhan tanpa bottleneck ekor (*tail latency*).
+- **Scheduler & Aksi Selesai Antrean (*One-Shot*):** Menambahkan penjadwal jam aktif unduhan (*Start/Stop Hour*, termasuk jendela lintas tengah malam) serta aksi otomatis sekali jalan saat seluruh antrean selesai (**Keluar Aplikasi**, **Tidur / Sleep**, atau **Matikan Komputer / Shutdown** lintas Windows, macOS, dan Linux) lengkap dengan banner hitung mundur 10 detik dan tombol **Batalkan**.
+- **Priority Queue & Batas Kecepatan Per-Item:** Mendukung **Pindahkan ke Atas Antrean** (*Move to Top*), **Paksa Mulai** (*Force Start* melewati batas konkurensi), dan batas kecepatan khusus per unduhan (`speed_limit_kbps`, migrasi skema SQLite `v3`) yang bekerja bersama pembatas kecepatan global.
+- **Verifikasi SHA-256 Otomatis:** Kolom opsional **Expected SHA-256** pada dialog *Add Download* dan *Download File Info* yang otomatis mencocokkan hash berkas saat unduhan selesai dan menandai hasilnya di status & Properties.
+- **AI Model Downloader (HuggingFace):** Menempel URL repositori HuggingFace (`https://huggingface.co/{owner}/{repo}`) di *Add Download* kini memuat daftar berkas model (termasuk bobot `.gguf`/`.safetensors`) lengkap dengan ukuran dan auto-isi checksum **SHA-256** (`lfs.oid`), serta dukungan **HuggingFace Access Token** bertopeng di Settings yang hanya dikirim ke host `*.huggingface.co`.
+- **Multi-Site Media Sniffer:** Memperluas deteksi situs media di desktop dan ekstensi browser ke YouTube, Vimeo, Twitch, TikTok, X/Twitter, Dailymotion, SoundCloud, Bilibili, Reddit, Instagram, dan Facebook, ditambah deteksi stream `<video>`/`<audio>`/`.m3u8` langsung di popup ekstensi.
+- **Ekstraksi Arsip Otomatis yang Aman (*Auto-Extract*):** Opsi **Auto-extract archives** di Settings untuk mengekstrak `.zip`, `.tar`, `.tar.gz`, dan `.tgz` secara otomatis ke folder bernama sama setelah selesai (dan lolos verifikasi SHA-256), dengan validasi pra-ekstraksi ketat terhadap *Zip-Slip* (*path traversal*) dan *symlink*.
+
+### Keamanan, Stabilitas & Perbaikan
+- **Streaming Langsung dari Probe `200 OK`:** `probe()` kini menyimpan *live stream* pada respons `200 OK` (dengan batas waktu segar 30 detik dan fallback GET baru bila kedaluwarsa), sehingga tautan *signed/one-time* dan file tanpa dukungan `Range` tidak lagi mengunduh dua kali atau gagal 403/410.
+- **Keamanan & Validasi:** Penolakan absolut `file://` dan symlink escape pada arsip; SSRF *Web Page Grabber* menolak loopback/private/CGNAT di setiap hop; *self-updater* memverifikasi nama berkas aset secara ketat tanpa wildcard longgar; `deno` dan alat video memakai URL versi yang dipin dengan verifikasi **SHA-256** wajib; dan perbaikan race condition saat pause segmen di bawah beban CPU tinggi.
+- **Ekstensi, CI & Struktur Kode:** Mengekstrak utilitas bersama ekstensi ke `extension/common.js` (termasuk dukungan packaging & pengujian `extension_sender.mjs`), memecah `app.rs` (`app/{mod,actions,helpers}`) dan `engine/mod.rs` (`engine/{mod,intake,actions,speed,ssrf,video,huggingface,extract}`) menjadi modul terfokus, serta memperbarui matriks runner Linux ARM64 (`ubuntu-24.04-arm`) dan macOS Intel (`macos-15-intel`) pada workflow rilis GitHub Actions.
+
 ## v1.0.8
 
 ### Optimasi Memori (RAM) & Efisiensi

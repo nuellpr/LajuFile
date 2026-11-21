@@ -848,33 +848,32 @@ fn unregister_installation() {
 }
 
 #[cfg(windows)]
-fn schedule_self_cleanup(install_dir: &Path) {
+fn build_self_cleanup_command(install_dir: &Path) -> std::process::Command {
     use std::os::windows::process::CommandExt;
+    let uninst = install_dir.join(UNINSTALL_BIN);
+    // Pass paths via environment variables and -LiteralPath to prevent shell metacharacter injection (e.g. '&').
+    // Never pass -Recurse: preserve unrelated user files if install_dir is shared.
+    let script = concat!(
+        "Start-Sleep -Seconds 2; ",
+        "if (Test-Path -LiteralPath $env:LAJU_UNINST) { Remove-Item -LiteralPath $env:LAJU_UNINST -Force -ErrorAction SilentlyContinue }; ",
+        "if ((Test-Path -LiteralPath $env:LAJU_DIR) -and @(Get-ChildItem -LiteralPath $env:LAJU_DIR -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $env:LAJU_DIR -ErrorAction SilentlyContinue }"
+    );
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("LAJU_UNINST", &uninst)
+        .env("LAJU_DIR", install_dir)
+        .creation_flags(0x0800_0000);
+    cmd
+}
+
+#[cfg(windows)]
+fn schedule_self_cleanup(install_dir: &Path) {
     let uninst = install_dir.join(UNINSTALL_BIN);
     let _ = fs::remove_file(&uninst);
     if fs::remove_dir(install_dir).is_ok() {
         return;
     }
-    // Never pass /S to rmdir: preserve unrelated user files if install_dir is shared.
-    let _ = std::process::Command::new("cmd.exe")
-        .args([
-            "/C",
-            "ping",
-            "127.0.0.1",
-            "-n",
-            "2",
-            ">nul",
-            "&",
-            "del",
-            "/F",
-            "/Q",
-        ])
-        .arg(&uninst)
-        .args([">nul", "2>&1", "&", "rmdir"])
-        .arg(install_dir)
-        .args([">nul", "2>&1"])
-        .creation_flags(0x0800_0000)
-        .spawn();
+    let _ = build_self_cleanup_command(install_dir).spawn();
 }
 
 #[cfg(not(windows))]
@@ -1125,5 +1124,31 @@ mod tests {
         assert!(!install_dir.join(APP_BIN).exists());
         assert!(!install_dir.join("extension").exists());
         assert!(user_file.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn self_cleanup_passes_special_paths_only_via_env_vars() {
+        let dir = Path::new(r"C:\Tools\R&D\LajuFile");
+        let cmd = build_self_cleanup_command(dir);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a.contains("R&D")));
+        let envs: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert!(envs.contains(&("LAJU_DIR".to_string(), r"C:\Tools\R&D\LajuFile".to_string())));
+        assert!(envs.contains(&(
+            "LAJU_UNINST".to_string(),
+            format!(r"C:\Tools\R&D\LajuFile\{UNINSTALL_BIN}")
+        )));
     }
 }

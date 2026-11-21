@@ -82,7 +82,15 @@ jobs:
           if-no-files-found: error
 
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Linux dependencies
@@ -98,12 +106,20 @@ jobs:
           ./installer/build-unix-installer.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-installer
+          name: linux-installer-${{ matrix.arch }}
           path: dist/LajuFile-${{ github.ref_name }}-linux-*-setup.run
           if-no-files-found: error
 
   macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -115,7 +131,7 @@ jobs:
           ./installer/build-unix-installer.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-installer
+          name: macos-installer-${{ matrix.arch }}
           path: dist/LajuFile-${{ github.ref_name }}-macos-*-setup.dmg
           if-no-files-found: error
 
