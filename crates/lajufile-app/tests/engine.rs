@@ -2036,3 +2036,79 @@ fn queue_complete_action_waits_for_checksum_post_task_and_resets_one_shot() {
     assert!(!canceled.exit_requested);
     handle.shutdown();
 }
+
+#[test]
+fn queue_complete_action_waits_for_in_flight_probes() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(dir.path());
+    settings.on_queue_complete = lajufile_core::settings::QueueCompleteAction::ExitApp;
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    for (path, name) in [
+        ("/file.bin", "fast.bin"),
+        ("/slow-probe.bin", "delayed.bin"),
+    ] {
+        handle
+            .send(Command::Add(AddRequest {
+                url: format!("{}{path}", server.base),
+                file_name: Some(name.to_string()),
+                save_dir: None,
+                start_now: true,
+                connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
+                video_format: None,
+                video_size: None,
+                expected_sha256: None,
+            }))
+            .unwrap();
+    }
+
+    let first_done = wait_for(
+        &handle,
+        |s| {
+            s.downloads.len() == 1
+                && s.downloads
+                    .iter()
+                    .any(|d| d.file_name == "fast.bin" && d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(10),
+    );
+    assert!(
+        first_done.pending_queue_action.is_none(),
+        "queue completion action must not arm while another URL is still probing"
+    );
+
+    let armed = wait_for(
+        &handle,
+        |s| {
+            matches!(
+                s.pending_queue_action,
+                Some((lajufile_core::settings::QueueCompleteAction::ExitApp, _))
+            )
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(armed.downloads.len(), 2);
+    assert!(
+        armed
+            .downloads
+            .iter()
+            .all(|d| d.status == DownloadStatus::Done)
+    );
+
+    handle.send(Command::CancelQueueComplete).unwrap();
+    let _ = wait_for(
+        &handle,
+        |s| s.pending_queue_action.is_none(),
+        Duration::from_secs(5),
+    );
+    handle.shutdown();
+}

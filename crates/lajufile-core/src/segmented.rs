@@ -245,6 +245,15 @@ pub async fn prefix_matches(
     body == prefix
 }
 
+fn additional_disk_space_needed(target_size: u64, initial_done: u64, temp_path: &Path) -> u64 {
+    let existing = if temp_path.is_file() {
+        crate::download::allocated_file_bytes(temp_path).max(initial_done)
+    } else {
+        0
+    };
+    target_size.saturating_sub(existing)
+}
+
 pub async fn download_segmented<F>(
     client: &reqwest::Client,
     spec: &SegmentedSpec,
@@ -279,7 +288,6 @@ where
 
     validate_segments(spec.size, &spec.segments)?;
     let initial_done: u64 = spec.segments.iter().map(|segment| segment.done).sum();
-    crate::download::ensure_disk_space(&spec.temp_path, spec.size.saturating_sub(initial_done))?;
 
     if initial_done > 0 {
         let min_existing_len = spec
@@ -297,11 +305,16 @@ where
         if !temp_ok {
             return Err(SegmentedError::RestartRequired);
         }
-        if spec.if_range.is_none()
-            && !prefix_matches(client, &spec.url, &spec.temp_path, spec.size, &spec.options).await
-        {
-            return Err(SegmentedError::RestartRequired);
-        }
+    }
+
+    let needed = additional_disk_space_needed(spec.size, initial_done, &spec.temp_path);
+    crate::download::ensure_disk_space(&spec.temp_path, needed)?;
+
+    if initial_done > 0
+        && spec.if_range.is_none()
+        && !prefix_matches(client, &spec.url, &spec.temp_path, spec.size, &spec.options).await
+    {
+        return Err(SegmentedError::RestartRequired);
     }
 
     if let Some(parent) = spec.temp_path.parent() {
@@ -744,4 +757,32 @@ where
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::additional_disk_space_needed;
+
+    #[test]
+    fn preallocated_temp_reduces_additional_disk_space_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("big.bin.lajufile");
+
+        assert_eq!(additional_disk_space_needed(64 * 1024, 0, &temp), 64 * 1024);
+
+        let file = std::fs::File::create(&temp).unwrap();
+        file.set_len(64 * 1024).unwrap();
+        drop(file);
+
+        let needed_same = additional_disk_space_needed(64 * 1024, 4 * 1024, &temp);
+        assert!(needed_same <= 60 * 1024);
+        #[cfg(windows)]
+        {
+            assert_eq!(needed_same, 0);
+            assert_eq!(
+                additional_disk_space_needed(128 * 1024, 4 * 1024, &temp),
+                64 * 1024
+            );
+        }
+    }
 }

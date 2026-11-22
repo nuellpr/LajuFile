@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.0.1
+
+### Integrasi Microsoft Edge Add-ons
+- **Tautan Resmi Microsoft Edge Add-ons:** Wizard Ekstensi Browser, Settings, dan README kini mengarah langsung ke halaman resmi **LajuFile Capture** di Microsoft Edge Add-ons sehingga pengguna Microsoft Edge bisa memasang ekstensi 1 klik tanpa Developer Mode (termasuk meluncurkan Edge langsung ke halaman toko).
+
+### Perbaikan Stabilitas, Keamanan & Ekstensi
+- **Resume File Besar di Windows & Unix Non-Sparse:** `ensure_disk_space()` pada unduhan multi-segmen kini menghitung ruang yang sudah dialokasikan oleh file `.lajufile` yang ada (`allocated_file_bytes`), serta memeriksa keutuhan file sementara sebelum pengecekan ruang disk.
+- **Pembatasan Ketat Token HuggingFace:** `is_huggingface_host()` kini mewajibkan skema `https://` sebelum melampirkan header `Authorization: Bearer`.
+- **Retry Video `yt-dlp` yang Dapat Dilanjutkan:** Berhenti menghapus berkas `.part`/`.ytdl` saat `yt-dlp` gagal agar retry melanjutkan unduhan yang ada, serta otomatis me-reset progres ke `0` jika berkas `.part` tidak ditemukan (`video::has_parts`).
+- **Hardening Auto-Extract Bebas Locale:** Pemindaian `tar -tvf` kini mengenali tanggal lokal Windows non-Inggris (`Agt`, `Okt`, `Dez`, `févr.`, format CJK, dsb.) dan gagal tertutup (*fail-closed*) bila ada ukuran file reguler yang gagal dibaca.
+- **Aksi Selesai Antrean Lebih Aman:** `check_queue_complete()` menunda hitung mundur *Exit / Sleep / Shutdown* hingga seluruh URL probe (`in_flight_probes`) dan dialog simpan browser (`pending_captures`) selesai.
+- **Web Page Grabber & Ekstensi:** `extract_links_from_html()` men-decode entitas `&amp;`/`&#38;`/`&#x26;` pada atribut `href` tautan bertanda tangan, dan `interceptor.js` berhenti mengirim nama `%20` mentah agar desktop menghormati `Content-Disposition` maupun dekode URL yang bersih.
+
 ## v2.0.0
 
 ### Stabilitas Mesin Unduhan & Concurrency

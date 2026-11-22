@@ -530,6 +530,43 @@ fn is_ytdlp_format_suffix(rest: &str) -> bool {
     digits > 0 && after_dot.as_bytes().get(digits) == Some(&b'.')
 }
 
+fn is_video_part_file(save_name: &str, stem: &str, file_name: &str) -> bool {
+    if file_name == save_name {
+        return false;
+    }
+    let matches_name = file_name
+        .strip_prefix(save_name)
+        .is_some_and(|rest| rest.starts_with('.'));
+    let matches_stem_ytdlp = file_name
+        .strip_prefix(stem)
+        .is_some_and(|rest| rest.starts_with(".temp.") || is_ytdlp_format_suffix(rest));
+    let temp = file_name.ends_with(".part")
+        || file_name.contains(".part-Frag")
+        || file_name.ends_with(".ytdl")
+        || file_name.ends_with(".temp.mp4");
+    (matches_name || matches_stem_ytdlp) && temp
+}
+
+pub(super) fn has_parts(save_path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (
+        save_path.parent(),
+        save_path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return false;
+    };
+    let stem = save_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .any(|file_name| is_video_part_file(name, &stem, &file_name))
+}
+
 /// Drops the temp files yt-dlp leaves behind: `name.part`, `name.part-Frag<N>`,
 /// `name.ytdl`, `name.f137.mp4.part-Frag<N>` and `name.temp.mp4`.
 pub(super) fn remove_parts(save_path: &Path) {
@@ -549,24 +586,7 @@ pub(super) fn remove_parts(save_path: &Path) {
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if file_name == name {
-            continue;
-        }
-        if file_name == sentinel {
-            let _ = std::fs::remove_file(entry.path());
-            continue;
-        }
-        let matches_name = file_name
-            .strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with('.'));
-        let matches_stem_ytdlp = file_name
-            .strip_prefix(&stem)
-            .is_some_and(|rest| rest.starts_with(".temp.") || is_ytdlp_format_suffix(rest));
-        let temp = file_name.ends_with(".part")
-            || file_name.contains(".part-Frag")
-            || file_name.ends_with(".ytdl")
-            || file_name.ends_with(".temp.mp4");
-        if (matches_name || matches_stem_ytdlp) && temp {
+        if file_name == sentinel || is_video_part_file(name, &stem, &file_name) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -903,5 +923,25 @@ mod tests {
             std::env::temp_dir()
         );
         assert_eq!(ytdlp_work_dir(None), std::env::temp_dir());
+    }
+
+    #[test]
+    fn has_parts_detects_ytdlp_partial_files_until_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("clip.mp4");
+        std::fs::write(dir.path().join("clip.mp4.lajufile"), b"").unwrap();
+        assert!(!has_parts(&save));
+
+        std::fs::write(dir.path().join("clip.mp4.part"), b"partial").unwrap();
+        assert!(has_parts(&save));
+
+        remove_parts(&save);
+        assert!(!has_parts(&save));
+
+        std::fs::write(dir.path().join("clip.f137.mp4.part"), b"partial").unwrap();
+        assert!(has_parts(&save));
+
+        remove_parts(&save);
+        assert!(!has_parts(&save));
     }
 }

@@ -549,6 +549,7 @@ fn engine_loop(
             .retain(|_, pending| !pending.reply.is_closed());
         if state.pending_captures.len() != captures_before {
             state.dirty = true;
+            state.check_queue_complete();
         }
 
         if !state.speeds.is_empty() && state.decay_stalled_speeds() {
@@ -723,6 +724,7 @@ impl EngineState {
             } => {
                 self.in_flight_probes = self.in_flight_probes.saturating_sub(1);
                 self.message = Some(self.handle_probe(request, check_duplicate, *result));
+                self.check_queue_complete();
             }
             Event::BridgeProbe {
                 request,
@@ -748,6 +750,7 @@ impl EngineState {
                     }
                 };
                 let _ = reply.send(outcome);
+                self.check_queue_complete();
             }
             Event::CaptureProbe { key, result } => {
                 self.in_flight_probes = self.in_flight_probes.saturating_sub(1);
@@ -763,6 +766,7 @@ impl EngineState {
                     pending.probe = Some(probed.result);
                     pending.probe_response = probed.response;
                 }
+                self.check_queue_complete();
             }
             Event::Progress {
                 id,
@@ -1061,7 +1065,9 @@ impl EngineState {
         if action == QueueCompleteAction::None
             || !self.had_completed_in_batch
             || !self.active.is_empty()
+            || self.in_flight_probes > 0
             || self.in_flight_post_tasks > 0
+            || !self.pending_captures.is_empty()
             || self.pending_queue_action.is_some()
         {
             return;

@@ -164,6 +164,8 @@ pub fn extension_dir() -> Option<PathBuf> {
         .find(|dir| dir.join("manifest.json").is_file())
 }
 
+pub const EDGE_ADDONS_STORE_URL: &str = "https://microsoftedge.microsoft.com/addons/detail/lajufile-capture/ohmgghfohddiikbgiaocmpckjggccime";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedBrowser {
     pub id: &'static str,
@@ -200,7 +202,7 @@ pub fn detect_installed_browsers() -> Vec<DetectedBrowser> {
         Spec {
             id: "edge",
             name: "Microsoft Edge",
-            extensions_url: "edge://extensions",
+            extensions_url: EDGE_ADDONS_STORE_URL,
             is_firefox: false,
             #[cfg(windows)]
             rel_paths: &[r"Microsoft\Edge\Application\msedge.exe"],
@@ -860,6 +862,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *deno-x86_64-pc
         assert!(validate_tool_https_url(FFMPEG_SHA256_URL).is_ok());
         assert!(validate_tool_https_url(DENO_ZIP_URL).is_ok());
         assert!(validate_tool_https_url(DENO_SHA256_URL).is_ok());
+        assert!(validate_tool_https_url(EDGE_ADDONS_STORE_URL).is_ok());
         assert!(validate_tool_https_url("http://example.com/ffmpeg.zip").is_err());
         assert!(validate_tool_https_url("file:///tmp/ffmpeg.zip").is_err());
         assert!(validate_tool_https_url("https://").is_err());

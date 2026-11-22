@@ -256,9 +256,18 @@ impl EngineState {
             }
         };
         let id = download.id;
+        let resume_done = if download.downloaded > 0 && video::has_parts(&download.save_path) {
+            download.downloaded
+        } else {
+            if download.downloaded > 0 {
+                let _ = self.store.update_progress_batch(id, &[(0, 0)]);
+                self.cache_dirty = true;
+            }
+            0
+        };
         self.video_streams.insert(
             id,
-            video::VideoStreamTracker::from_seeded(download.size, download.downloaded),
+            video::VideoStreamTracker::from_seeded(download.size, resume_done),
         );
         let stdout_join = child.stdout.take().map(|stdout| {
             let events = self.events.clone();
@@ -368,6 +377,7 @@ impl EngineState {
                         Some("yt-dlp exited without producing an output file"),
                     );
                     video::remove_parts(&run.save_path);
+                    let _ = self.store.update_progress_batch(id, &[(0, 0)]);
                 }
             } else {
                 let raw = run
@@ -379,8 +389,8 @@ impl EngineState {
                 let _ = self
                     .store
                     .update_status(id, DownloadStatus::Error, Some(&message));
+                // Keep .part/.ytdl files so retrying resumes instead of discarding downloaded bytes.
                 let _ = std::fs::remove_file(&run.save_path);
-                video::remove_parts(&run.save_path);
             }
             self.cache_dirty = true;
             self.video_streams.remove(&id);

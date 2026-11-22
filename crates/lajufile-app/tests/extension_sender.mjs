@@ -466,6 +466,16 @@ test("interceptor ignores synthetic untrusted clicks and intercepts trusted PDF 
   assert.equal(sentMessages.length, 1);
   assert.equal(sentMessages[0].type, "intercept-link");
   assert.equal(sentMessages[0].url, "https://private.example.org/report.pdf");
+  assert.equal(sentMessages[0].filename, undefined);
+
+  anchor.href = "https://private.example.org/Annual%20Report.pdf";
+  const encodedClick = makeEvent(true);
+  onClick(encodedClick);
+  assert.equal(encodedClick.prevented, true);
+  assert.equal(sentMessages.length, 2);
+  assert.equal(sentMessages[1].type, "intercept-link");
+  assert.equal(sentMessages[1].url, "https://private.example.org/Annual%20Report.pdf");
+  assert.equal(sentMessages[1].filename, undefined);
 });
 
 test("sniff-page-media survives malformed percent encoding and skips empty subframes", async () => {

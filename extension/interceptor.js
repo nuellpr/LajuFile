@@ -130,13 +130,11 @@ document.addEventListener(
 
     event.preventDefault();
     event.stopPropagation();
-    const fileBase = parsed.pathname.split("/").pop() || undefined;
     chrome.runtime
       .sendMessage({
         type: "intercept-link",
         url: parsed.href,
         referrer: location.href,
-        filename: fileBase,
       })
       .then((res) => {
         if (res && res.fallback) {

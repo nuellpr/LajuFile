@@ -289,8 +289,8 @@ fn draw_settings_tab(
                 }
                 ui.add_space(10.0);
                 for step in [
-                    "1. Open chrome://extensions or edge://extensions and enable Developer mode.",
-                    "2. Click Load unpacked and pick LajuFile's extension folder.",
+                    "1. Microsoft Edge: install LajuFile Capture directly from Microsoft Edge Add-ons (no Developer Mode).",
+                    "2. Chrome / Brave / Opera / Vivaldi: open chrome://extensions, enable Developer mode, and Load unpacked.",
                     "3. Hold Alt while clicking any link to keep that download inside the browser.",
                     "4. Right-click any link -> Download with LajuFile to capture any file type.",
                 ] {

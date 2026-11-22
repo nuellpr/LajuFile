@@ -43,6 +43,7 @@ fn base_client_builder(
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .tcp_nodelay(true)
+        // shortcut: cap idle pool at 4 per host to keep idle RAM low (v1.0.8); raise if segment reuse stalls.
         .pool_max_idle_per_host(4)
         .pool_idle_timeout(Duration::from_secs(30))
         .connect_timeout(connect_timeout)

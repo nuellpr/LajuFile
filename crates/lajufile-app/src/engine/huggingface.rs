@@ -23,6 +23,9 @@ pub struct HfModelFile {
 }
 
 pub fn is_huggingface_host(url: &Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
     url.host_str().is_some_and(|host| {
         let h = host.to_ascii_lowercase();
         h == "huggingface.co" || h.ends_with(".huggingface.co")
@@ -239,6 +242,12 @@ mod tests {
         ));
         assert!(is_huggingface_host(
             &Url::parse("https://cdn-lfs.huggingface.co/blob").unwrap()
+        ));
+        assert!(!is_huggingface_host(
+            &Url::parse("http://huggingface.co/a/b").unwrap()
+        ));
+        assert!(!is_huggingface_host(
+            &Url::parse("http://cdn-lfs.huggingface.co/blob").unwrap()
         ));
         assert!(!is_huggingface_host(
             &Url::parse("https://evil-huggingface.co/a").unwrap()

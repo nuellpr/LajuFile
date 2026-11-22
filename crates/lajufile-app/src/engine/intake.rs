@@ -271,6 +271,7 @@ impl EngineState {
             None => {
                 if let Some(pending) = self.pending_captures.remove(&key) {
                     let _ = pending.reply.send(BridgeAddOutcome::Canceled);
+                    self.check_queue_complete();
                 }
             }
         }
@@ -290,6 +291,7 @@ impl EngineState {
             let _ = pending
                 .reply
                 .send(BridgeAddOutcome::Invalid("invalid URL".to_string()));
+            self.check_queue_complete();
             return;
         };
         let chosen_name = file_name
@@ -311,6 +313,7 @@ impl EngineState {
         };
         if add.video_format.is_some() {
             self.finish_video_add(add, pending.reply);
+            self.check_queue_complete();
             return;
         }
         if let Some(probe_result) = pending.probe {
@@ -327,6 +330,7 @@ impl EngineState {
                     Err(InsertError::Failed(error)) => BridgeAddOutcome::Internal(error),
                 };
             let _ = pending.reply.send(outcome);
+            self.check_queue_complete();
             return;
         }
         self.spawn_bridge_probe(url, add, pending.reply);

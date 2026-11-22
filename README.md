@@ -7,7 +7,8 @@
 **Manajer unduhan multi-koneksi berkecepatan tinggi, ringan, aman, dan modern untuk Windows, macOS & Linux.**  
 *Fast, lightweight, secure, multi-connection download manager built with Rust.*
 
-[![Version](https://img.shields.io/badge/version-v2.0.0-3B82F6?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v2.0.1-3B82F6?style=flat-square)](#)
+[![Edge Add-ons](https://img.shields.io/badge/Microsoft%20Edge-Add--ons%20v2.0.1-0078D7?style=flat-square)](https://microsoftedge.microsoft.com/addons/detail/lajufile-capture/ohmgghfohddiikbgiaocmpckjggccime)
 [![Rust](https://img.shields.io/badge/Rust-2024%20%2F%20MSRV%201.85-orange?style=flat-square)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6366F1?style=flat-square)](#instalasi--pembaruan-windows-macos--linux)
@@ -29,7 +30,7 @@
 | **Mesin Unduhan Cepat** | Hingga **32 koneksi paralel** per berkas (`Range` probing + prefix sanity check 64 KiB + resume otomatis), kontrol antrean serentak (`1–10`), pembatas kecepatan global cepat dari status bar, routing folder otomatis per kategori (**Category Folders**), serta verifikasi **SHA-256** di Properties. |
 | **Visual Progres Real-Time** | Peta Segmen (**Segment Map**) + grafik kecepatan **Sparkline**, jendela progres mengambang yang bisa dipindahkan serta disembunyikan ke background, estimasi ETA akurat, tema **Dark & Light**, dan skala antarmuka `80%–150%`. |
 | **Batch Smart Grabber (`Ctrl+B`)** | Antrekan banyak URL sekaligus, impor berkas daftar URL `.txt`, ekspansi pola angka wildcard (`file_*.zip`), dan **Fetch Links from Web Page** yang aman terhadap SSRF dan DNS rebinding. |
-| **Integrasi Browser Lengkap** | Wizard Setup Ekstensi di menu `Browser` untuk **Chrome, Edge, Brave, Opera, Vivaldi, dan Firefox** (Windows, macOS, Linux) dengan kode **Quick-Pair**, penangkapan instan Firefox, filter domain/ekstensi tersinkron, tombol `Alt+Click` bypass ke browser, dan panel kualitas video mengambang di YouTube. |
+| **Integrasi Browser Lengkap** | Instalasi 1 klik untuk Microsoft Edge lewat [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/lajufile-capture/ohmgghfohddiikbgiaocmpckjggccime), serta Wizard Setup Ekstensi di menu **Bantuan -> Wizard ekstensi browser...** (`Help -> Browser extension wizard...`) untuk **Chrome, Edge, Brave, Opera, Vivaldi, dan Firefox** (Windows, macOS, Linux) dengan kode **Quick-Pair**, penangkapan instan Firefox, filter domain/ekstensi tersinkron, tombol `Alt+Click` bypass ke browser, dan panel kualitas video mengambang di YouTube. |
 | **Video & Audio (`yt-dlp` + `ffmpeg`)** | Unduh MP4 H.264 / Audio M4A otomatis lintas OS (termasuk dukungan proxy, batas kecepatan global, **Subtitles**, dan **Chapters**) dengan verifikasi **SHA-256** wajib pada instalasi tool pertama kali. |
 | **Multi-Bahasa & RTL (`View -> Language...`)** | Katalog **86 bahasa** dengan deteksi bahasa OS otomatis, penanda akurat bahasa *Built-in* vs *TSV / EN*, dukungan terjemahan kustom `.tsv`, tata letak **RTL**, dan format angka lokal. |
 | **Stabilitas & Platform Native** | Pembaruan in-app sadar arsitektur (`x64`/`arm64`) dari menu **Bantuan -> Periksa pembaruan...**, single-instance lock (`CreateMutexW` / `flock`), anti-sleep saat mengunduh (Windows, macOS `caffeinate`, Linux `systemd-inhibit`), drag-and-drop `.url` / `.txt` / `.ef2`, serta **System Tray**. |
@@ -38,15 +39,15 @@
 
 Unduh installer sesuai sistem operasi & arsitektur dari halaman [Releases](../../releases):
 
-- **Windows:** Jalankan **`LajuFile-v2.0.0-windows-x64-setup.exe`**, setujui lisensi, lalu klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
-- **macOS:** Buka **`LajuFile-v2.0.0-macos-arm64-setup.dmg`** (atau build `x64` sesuai Mac Anda) dan jalankan **`LajuFile Setup.app`**, yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
-- **Linux:** Jalankan **`chmod +x LajuFile-v2.0.0-linux-x64-setup.run && ./LajuFile-v2.0.0-linux-x64-setup.run`** (tersedia pula varian `arm64` di rilis ARM), memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop`, dan symlink `~/.local/bin/lajufile`.
+- **Windows:** Jalankan **`LajuFile-v2.0.1-windows-x64-setup.exe`**, setujui lisensi, lalu klik **Install** (memasang ke `%LOCALAPPDATA%\Programs\LajuFile`, membuat pintasan Desktop/Start Menu, dan mendaftarkan **Add/Remove Programs** + `uninstall.exe`).
+- **macOS:** Buka **`LajuFile-v2.0.1-macos-arm64-setup.dmg`** (atau build `x64` sesuai Mac Anda) dan jalankan **`LajuFile Setup.app`**, yang memasang bundle **`LajuFile.app`** ke `~/Applications/LajuFile.app` lengkap dengan `extension/` dan `uninstall`.
+- **Linux:** Jalankan **`chmod +x LajuFile-v2.0.1-linux-x64-setup.run && ./LajuFile-v2.0.1-linux-x64-setup.run`** (tersedia pula varian `arm64` di rilis ARM), memasang ke `~/.local/share/lajufile`, membuat launcher `.desktop`, dan symlink `~/.local/bin/lajufile`.
 
 **Memperbarui versi terpasang:**
 - **Langsung dari aplikasi (`v1.0.1+`):** Buka **Bantuan -> Periksa pembaruan...** (`Help -> Check for updates...`), lalu klik **Update now** — LajuFile mengunduh installer resmi sesuai arsitektur CPU dari GitHub Releases, memverifikasi `SHA256SUMS.txt`, memasangnya otomatis, dan memulai ulang aplikasi tanpa menghapus daftar unduhan atau pengaturan.
 - **Secara manual:** Unduh installer terbaru di halaman [Releases](../../releases) lalu jalankan langsung.
 
-> Catatan ekstensi browser: Folder `extension/` (Chromium MV3) ikut terpasang otomatis bersama installer di setiap platform; untuk **Firefox**, unduh paket `lajufile-extension-firefox.zip` dari halaman [Releases](../../releases). Buka LajuFile -> **Browser -> Browser Extension Setup...** lalu salin kode **Quick-Pair**.
+> Catatan ekstensi browser: Pengguna **Microsoft Edge** dapat memasang langsung tanpa Developer Mode melalui [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/lajufile-capture/ohmgghfohddiikbgiaocmpckjggccime). Folder `extension/` (Chromium MV3) juga ikut terpasang otomatis bersama installer untuk browser Chromium lain, sedangkan untuk **Firefox** tersedia paket `lajufile-extension-firefox.zip` di halaman [Releases](../../releases). Buka LajuFile -> **Bantuan -> Wizard ekstensi browser...** (`Help -> Browser extension wizard...`) lalu salin kode **Quick-Pair**.
 
 ### 🛠️ Membangun dari Source & Membuat Installer
 
@@ -66,7 +67,7 @@ node --test crates/lajufile-app/tests/extension_sender.mjs
 # Jalankan aplikasi desktop langsung
 cargo run -p lajufile-app --bin lajufile
 
-# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v2.0.0-Windows-x64-Setup.exe
+# Bangun Windows Setup Installer (.exe) -> dist/LajuFile-v2.0.1-Windows-x64-Setup.exe
 powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 

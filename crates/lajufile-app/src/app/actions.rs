@@ -247,17 +247,26 @@ impl LajuFileApp {
                     browser_name,
                     extensions_url,
                 } => {
+                    let is_store_url = extensions_url.starts_with("https://");
                     if let Some(browser) = crate::tools::detect_installed_browsers()
                         .into_iter()
                         .find(|b| b.name == browser_name)
                         && let Some(exe) = browser.executable
                     {
-                        let _ = std::process::Command::new(exe).spawn();
+                        let mut cmd = std::process::Command::new(exe);
+                        if is_store_url {
+                            cmd.arg(&extensions_url);
+                        }
+                        let _ = cmd.spawn();
+                    } else if is_store_url {
+                        ctx.open_url(egui::OpenUrl::new_tab(&extensions_url));
                     }
-                    self.toast = Some((
-                        format!("Quick-Pair JSON copied — open {extensions_url} in {browser_name}"),
-                        Instant::now(),
-                    ));
+                    let notice = if is_store_url {
+                        format!("Quick-Pair JSON copied — opened {browser_name} Add-ons store")
+                    } else {
+                        format!("Quick-Pair JSON copied — open {extensions_url} in {browser_name}")
+                    };
+                    self.toast = Some((notice, Instant::now()));
                 }
                 Action::OpenLanguagePicker => {
                     self.show_language_picker = true;

@@ -81,35 +81,77 @@ fn is_iso_date(token: &str) -> bool {
         && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
-fn is_c_month(token: &str) -> bool {
-    matches!(
-        token,
-        "Jan"
-            | "Feb"
-            | "Mar"
-            | "Apr"
-            | "May"
-            | "Jun"
-            | "Jul"
-            | "Aug"
-            | "Sep"
-            | "Oct"
-            | "Nov"
-            | "Dec"
-    )
+fn is_day_of_month(token: &str) -> bool {
+    let trimmed = token.trim_end_matches(['.', '日']);
+    (1..=2).contains(&trimmed.len())
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+        && trimmed.parse::<u8>().is_ok_and(|d| (1..=31).contains(&d))
 }
 
-/// Parses uncompressed byte size from a `tar -tvf` line (both GNU tar and BSD tar formats).
+fn is_month_token(token: &str) -> bool {
+    !token.is_empty() && token.chars().any(char::is_alphabetic)
+}
+
+fn is_tar_time_or_year(token: &str) -> bool {
+    let year = token.trim_end_matches('年');
+    if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let Some((hour, min)) = token.split_once(':') else {
+        return false;
+    };
+    (1..=2).contains(&hour.len())
+        && min.len() == 2
+        && hour.bytes().all(|b| b.is_ascii_digit())
+        && min.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Parses uncompressed byte size from a `tar -tvf` line (both GNU tar and localized BSD tar).
 fn parse_tar_verbose_entry_size(line: &str) -> Option<u64> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     for i in 3..parts.len() {
-        if (is_iso_date(parts[i]) || is_c_month(parts[i]))
-            && let Ok(size) = parts[i - 1].parse::<u64>()
+        let Ok(size) = parts[i - 1].parse::<u64>() else {
+            continue;
+        };
+        if is_iso_date(parts[i]) {
+            return Some(size);
+        }
+        if i + 2 < parts.len()
+            && is_tar_time_or_year(parts[i + 2])
+            && ((is_month_token(parts[i]) && is_day_of_month(parts[i + 1]))
+                || (is_day_of_month(parts[i]) && is_month_token(parts[i + 1])))
         {
             return Some(size);
         }
     }
     None
+}
+
+fn inspect_tar_verbose_listing(stdout: &str) -> Result<u64, String> {
+    let mut total_uncompressed = 0u64;
+    for line in stdout.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(kind_char) = trimmed.chars().next() else {
+            continue;
+        };
+        if matches!(kind_char, 'l' | 'h') {
+            return Err("Blocked archive containing symlink/hardlink entries".to_string());
+        }
+        if !matches!(kind_char, '-' | 'd') {
+            return Err(format!(
+                "Blocked archive containing unsupported entry type '{kind_char}'"
+            ));
+        }
+        if let Some(sz) = parse_tar_verbose_entry_size(trimmed) {
+            total_uncompressed = total_uncompressed.saturating_add(sz);
+        } else if kind_char == '-' {
+            return Err("Archive inspection failed (could not verify entry size)".to_string());
+        }
+    }
+    Ok(total_uncompressed)
 }
 
 /// Parses a `unzip -Z` (zipinfo) listing line, returning `Ok(Some(uncompressed_bytes))` for
@@ -209,27 +251,8 @@ fn validate_tar_listing(archive: &Path) -> Result<(), String> {
     if !verbose_out.status.success() {
         return Err("Archive inspection failed (could not verify links or sizes)".to_string());
     }
-    let mut total_uncompressed = 0u64;
-    for line in String::from_utf8_lossy(&verbose_out.stdout).lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Some(kind_char) = trimmed.chars().next() else {
-            continue;
-        };
-        if matches!(kind_char, 'l' | 'h') {
-            return Err("Blocked archive containing symlink/hardlink entries".to_string());
-        }
-        if !matches!(kind_char, '-' | 'd') {
-            return Err(format!(
-                "Blocked archive containing unsupported entry type '{kind_char}'"
-            ));
-        }
-        if let Some(sz) = parse_tar_verbose_entry_size(trimmed) {
-            total_uncompressed = total_uncompressed.saturating_add(sz);
-        }
-    }
+    let total_uncompressed =
+        inspect_tar_verbose_listing(&String::from_utf8_lossy(&verbose_out.stdout))?;
     check_extract_budget(archive_bytes, entry_count, total_uncompressed, archive)
 }
 
@@ -470,6 +493,43 @@ mod tests {
         assert_eq!(
             parse_tar_verbose_entry_size("-rw-r--r--  1 John Doe staff 999 Jan 01 1970 spaced.bin"),
             Some(999)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size("-rw-r--r--  0 0      0       8192 Agt 22 10:27 id.bin"),
+            Some(8192)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size(
+                "-rw-r--r--  0 0      0       4096 22 Okt 2026 dayfirst.bin"
+            ),
+            Some(4096)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size(
+                "-rw-r--r--  0 0      0       2048 22. Dez 10:27 german.bin"
+            ),
+            Some(2048)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size(
+                "-rw-r--r--  0 0      0       1024 févr. 05 2025 french.bin"
+            ),
+            Some(1024)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size("-rw-r--r--  0 0      0        512 11月 22 10:27 cjk.bin"),
+            Some(512)
+        );
+        assert_eq!(
+            inspect_tar_verbose_listing(
+                "drwxr-xr-x  0 0      0          0 Agt 22 10:27 folder/\n-rw-r--r--  0 0      0       8192 Agt 22 10:27 folder/id.bin\n"
+            )
+            .unwrap(),
+            8192
+        );
+        assert!(
+            inspect_tar_verbose_listing("-rw-r--r--  0 0      0        ??? bad/date unknown\n")
+                .is_err()
         );
 
         assert_eq!(inspect_zipinfo_line("Archive:  test.zip").unwrap(), None);

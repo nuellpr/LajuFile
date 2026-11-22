@@ -175,6 +175,19 @@ pub fn extract_urls_from_text(text: &str) -> Vec<String> {
     urls
 }
 
+fn decode_html_href(raw: &str) -> std::borrow::Cow<'_, str> {
+    if !raw.contains('&') {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    std::borrow::Cow::Owned(
+        raw.replace("&amp;", "&")
+            .replace("&AMP;", "&")
+            .replace("&#38;", "&")
+            .replace("&#x26;", "&")
+            .replace("&#X26;", "&"),
+    )
+}
+
 /// Extracts unique downloadable `http`/`https` links from HTML `href` attributes resolved against `base_url`.
 pub fn extract_links_from_html(base_url: &str, html: &str) -> Vec<String> {
     const IGNORED_EXTS: &[&str] = &[
@@ -229,7 +242,8 @@ pub fn extract_links_from_html(base_url: &str, html: &str) -> Vec<String> {
         {
             continue;
         }
-        let Ok(mut resolved) = base.join(trimmed) else {
+        let decoded = decode_html_href(trimmed);
+        let Ok(mut resolved) = base.join(&decoded) else {
             continue;
         };
         if !matches!(resolved.scheme(), "http" | "https") || resolved.host_str().is_none() {
@@ -479,6 +493,17 @@ Download <https://cdn.example.org/video.mp4> and https://example.com/archive.zip
                 "https://dl.example.org/release.exe".to_string(),
                 "https://example.com/download?id=42".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn extract_links_from_html_decodes_html_entities_in_href() {
+        let html = r#"
+            <a href="https://example.com/download?id=42&amp;token=xyz&#38;sig=1&#x26;ref=a">Signed</a>
+        "#;
+        assert_eq!(
+            extract_links_from_html("https://example.com/releases/index.html", html),
+            vec!["https://example.com/download?id=42&token=xyz&sig=1&ref=a".to_string()]
         );
     }
 }

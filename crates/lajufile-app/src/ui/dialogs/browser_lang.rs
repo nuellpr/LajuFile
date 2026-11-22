@@ -218,7 +218,9 @@ pub fn browser_setup_dialog(
                                                         .strong()
                                                         .color(sp.text),
                                                 );
-                                                let subtitle = if browser.is_firefox {
+                                                let subtitle = if browser.id == "edge" {
+                                                    "Microsoft Edge Add-ons · Official 1-click install"
+                                                } else if browser.is_firefox {
                                                     "Requires signed AMO add-on (Firefox Release)"
                                                 } else if browser.executable.is_some() {
                                                     "Chromium MV3 · Ready for Quick-Pair"
@@ -276,7 +278,7 @@ pub fn browser_setup_dialog(
                             let note = if settings.browser_paired {
                                 "Once added and paired, downloads flow straight to LajuFile automatically."
                             } else {
-                                "Once it is added, this window updates automatically. Note: installing without Developer Mode requires Store publication (Chrome Web Store / Edge Add-ons / AMO); until then, Add extension copies Quick-Pair and opens install steps."
+                                "Microsoft Edge installs directly from Microsoft Edge Add-ons (no Developer Mode). Other browsers copy Quick-Pair and open manual setup steps."
                             };
                             ui.label(RichText::new(note).size(10.5).color(sp.faint));
                         });
@@ -310,18 +312,90 @@ pub fn browser_setup_dialog(
                                 ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
-                                        "Release Firefox requires add-ons to be signed via Mozilla Add-ons (AMO) for permanent installation. Download lajufile-extension-firefox.zip from LajuFile GitHub Releases (load temporarily in about:debugging or install once published on AMO), or use Chrome/Edge/Brave/Opera/Vivaldi locally right now.",
+                                        "Release Firefox requires add-ons to be signed via Mozilla Add-ons (AMO) for permanent installation. Download lajufile-extension-firefox.zip from LajuFile GitHub Releases (load temporarily in about:debugging or install once published on AMO), or install LajuFile Capture directly from Microsoft Edge Add-ons.",
                                     )
                                     .size(11.0)
                                     .color(sp.muted),
                                 );
                             });
+                        } else if selected_browser == BrowserKind::Edge {
+                            let store_url = crate::tools::EDGE_ADDONS_STORE_URL;
+                            settings_card(ui, &sp, |ui| {
+                                card_kicker(
+                                    ui,
+                                    "1. INSTALL FROM MICROSOFT EDGE ADD-ONS (NO DEVELOPER MODE)",
+                                    &sp,
+                                );
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    egui::Frame::new()
+                                        .fill(sp.field_bg)
+                                        .stroke(Stroke::new(1.0, sp.border))
+                                        .corner_radius(8)
+                                        .inner_margin(Margin::symmetric(10, 6))
+                                        .show(ui, |ui| {
+                                            ui.set_width(
+                                                (ui.available_width() - 202.0).max(110.0),
+                                            );
+                                            ui.label(
+                                                RichText::new(store_url)
+                                                    .monospace()
+                                                    .size(10.0)
+                                                    .color(sp.text),
+                                            );
+                                        });
+                                    ui.add_space(8.0);
+                                    if figma_button(ui, "Copy URL", 80.0, 30.0, false, &sp) {
+                                        ui.ctx().copy_text(store_url.to_string());
+                                    }
+                                    ui.add_space(8.0);
+                                    if figma_button(ui, "Open Store", 98.0, 30.0, true, &sp) {
+                                        ui.ctx().copy_text(quick_pair_payload(settings));
+                                        action = Some(Action::LaunchBrowser {
+                                            browser_name: "Microsoft Edge".to_string(),
+                                            extensions_url: store_url.to_string(),
+                                        });
+                                    }
+                                });
+
+                                ui.add_space(10.0);
+                                card_kicker(ui, "2. PASTE QUICK-PAIR IN POPUP OR OPTIONS", &sp);
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Port {} · Token {}",
+                                            settings.bridge_port,
+                                            mask_token(&settings.bridge_token)
+                                        ))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(sp.muted),
+                                    );
+                                    ui.with_layout(
+                                        Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            if figma_button(
+                                                ui,
+                                                "Copy Quick-Pair",
+                                                122.0,
+                                                30.0,
+                                                false,
+                                                &sp,
+                                            ) {
+                                                ui.ctx().copy_text(quick_pair_payload(settings));
+                                            }
+                                        },
+                                    );
+                                });
+                            });
                         } else {
                             let ext_page_url = match selected_browser {
-                                BrowserKind::Edge => "edge://extensions",
                                 BrowserKind::Brave => "brave://extensions",
                                 BrowserKind::OperaVivaldi => "opera://extensions",
-                                BrowserKind::Chrome | BrowserKind::Firefox => "chrome://extensions",
+                                BrowserKind::Chrome | BrowserKind::Edge | BrowserKind::Firefox => {
+                                    "chrome://extensions"
+                                }
                             };
                             let ext_folder = crate::tools::extension_dir()
                                 .map(|p| p.display().to_string())

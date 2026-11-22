@@ -46,6 +46,29 @@ pub enum DownloadError {
     InsufficientDiskSpace { required: u64, available: u64 },
 }
 
+pub(crate) fn allocated_file_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if !meta.is_file() {
+        return 0;
+    }
+    #[cfg(windows)]
+    {
+        // Non-sparse NTFS set_len reserves full logical length in GetDiskFreeSpaceExW.
+        meta.len()
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks().saturating_mul(512).min(meta.len())
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        0
+    }
+}
+
 pub fn ensure_disk_space(target: &Path, required: u64) -> Result<(), DownloadError> {
     if required == 0 {
         return Ok(());
