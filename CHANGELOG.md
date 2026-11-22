@@ -10,6 +10,7 @@
 ### Keamanan & Proteksi Sistem
 - **Enkripsi Kredensial `settings.json` at Rest:** `hf_token` dan `proxy_url` berkredensial kini dienkripsi otomatis pada disk dengan prefix `enc:v1:` (Windows DPAPI / `HMAC-SHA256` + `CTR` di Unix) lengkap dengan migrasi transparan dari konfigurasi lama.
 - **Hardening Auto-Extract (*Fail-Closed* & Anti-Zip-Bomb):** Inspeksi `tar -tvf` dan `unzip -Z` kini *fail-closed*, memblokir seluruh mode entri selain file reguler/direktori (`-`/`d`), menambahkan batas jumlah entri (`50.000`), batas rasio dekompresi (`>100x` di atas `128 MiB`), pengecekan ruang disk sebelum ekstraksi, `LC_ALL=C`, serta menyembunyikan jendela konsol `tar` di Windows.
+- **Dependensi Linux Tanpa GTK3 (`glib 0.18`):** Mengalihkan backend Linux `tray-icon` ke `ksni` (pure-Rust D-Bus *StatusNotifierItem*), menghapus 40 crate GTK3 lama termasuk `glib 0.18.5` (`GHSA-wrw7-89jp-8q8g` / `RUSTSEC-2024-0429`).
 
 ### Scheduler, Video, Platform & Ekstensi
 - **Penegakan Scheduler & Aksi Selesai Antrean:** `pump_queue()` kini menghormati jendela jadwal aktif (`is_schedule_blocking()`), mengevaluasi jadwal langsung saat startup maupun perubahan pengaturan, dan menunda aksi **On Queue Complete** (*Exit/Sleep/Shutdown*) hingga seluruh verifikasi **SHA-256** dan **Auto-Extract** di latar belakang selesai (`in_flight_post_tasks`).
