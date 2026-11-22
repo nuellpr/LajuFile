@@ -13,7 +13,7 @@ Yang paling kritis dari sisi keamanan di LajuFile:
 - **Auto-updater dan installer native.** Installer pembaruan diverifikasi terhadap manifes `SHA256SUMS.txt` dari GitHub Releases, memvalidasi payload PE/Authenticode, diunduh ke direktori privat `data_dir/updates`, serta menggunakan uninstaller non-rekursif agar tidak menyentuh berkas lain (`crates/lajufile-app/src/updater.rs`, `crates/lajufile-app/src/installer.rs`).
 - **Berkas ke disk, proteksi SSRF, dan cookie terenkripsi.** Nama berkas yang diunduh disanitasi terhadap *path traversal* dan nama perangkat terlarang Windows sebelum menjadi jalur disk (`crates/lajufile-core/src/naming.rs`); Web Page Grabber memvalidasi DNS publik di setiap redirect dengan *IP pinning* (`crates/lajufile-app/src/engine/ssrf.rs`); dan cookie sesi disimpan terenkripsi dengan Windows DPAPI atau `HMAC-SHA256` + `CTR` berizin `0o600` di Unix (`crates/lajufile-core/src/cookie.rs`).
 
-Hanya rilis terbaru (`v1.0.9+`) yang mendapatkan perbaikan keamanan.
+Hanya rilis terbaru (`v2.0.0+`) yang mendapatkan perbaikan keamanan.
 
 ---
 
@@ -30,4 +30,4 @@ Key security-critical surfaces in LajuFile:
 - **Self-updater and native installers.** Release installers are verified fail-closed against `SHA256SUMS.txt` from GitHub Releases, validated for PE/Authenticode payload integrity, staged in private `data_dir/updates`, and paired with a non-recursive uninstaller (`crates/lajufile-app/src/updater.rs`, `crates/lajufile-app/src/installer.rs`).
 - **Disk writes, SSRF protection, and encrypted cookies.** Downloaded filenames are sanitized against path traversal and reserved Windows device names before becoming paths (`crates/lajufile-core/src/naming.rs`); Web Page Grabber enforces per-hop public DNS validation with IP pinning (`crates/lajufile-app/src/engine/ssrf.rs`); session cookies are encrypted at rest via Windows DPAPI or Unix `HMAC-SHA256` + `CTR` with `0o600` key files (`crates/lajufile-core/src/cookie.rs`).
 
-Only the latest release (`v1.0.9+`) receives security fixes.
+Only the latest release (`v2.0.0+`) receives security fixes.

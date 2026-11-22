@@ -444,3 +444,71 @@ async fn dynamic_segment_splitting_steals_slow_segment_and_assembles_exact_file(
     );
     assert!(recorded.last().unwrap().len() >= 3);
 }
+
+#[tokio::test]
+async fn resume_succeeds_after_dynamic_split_produces_non_sequential_indices() {
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join("resumed-split.bin.lajufile");
+    let final_path = dir.path().join("resumed-split.bin");
+    let payload = seg_payload();
+    let size = SEG_SIZE as u64;
+    let q = size / 4;
+
+    // Simulate SQLite `ORDER BY idx` after segment 0 finished and split segment 1 into idx=1 and idx=4.
+    let mut partial = vec![0_u8; SEG_SIZE];
+    partial[..q as usize].copy_from_slice(&payload[..q as usize]);
+    partial[q as usize..(q + 256 * 1024) as usize]
+        .copy_from_slice(&payload[q as usize..(q + 256 * 1024) as usize]);
+    std::fs::write(&temp, &partial).unwrap();
+
+    let split_segments = vec![
+        Segment {
+            idx: 0,
+            start: 0,
+            end: q - 1,
+            done: q,
+        },
+        Segment {
+            idx: 1,
+            start: q,
+            end: q + q / 2 - 1,
+            done: 256 * 1024,
+        },
+        Segment {
+            idx: 2,
+            start: 2 * q,
+            end: 3 * q - 1,
+            done: 0,
+        },
+        Segment {
+            idx: 3,
+            start: 3 * q,
+            end: size - 1,
+            done: 0,
+        },
+        Segment {
+            idx: 4,
+            start: q + q / 2,
+            end: 2 * q - 1,
+            done: 0,
+        },
+    ];
+
+    let resume_spec = spec(
+        &base,
+        "/seg",
+        temp.clone(),
+        final_path.clone(),
+        split_segments,
+        Vec::new(),
+        None,
+    );
+    let outcome = download_segmented_with_splits(&client(), &resume_spec, |_, _, _| {}, |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.bytes, size);
+    assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+    assert!(!temp.exists());
+}

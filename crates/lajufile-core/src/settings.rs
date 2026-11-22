@@ -237,6 +237,36 @@ pub fn is_valid_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+const SEALED_SECRET_PREFIX: &str = "enc:v1:";
+
+fn proxy_has_credentials(raw: &str) -> bool {
+    url::Url::parse(raw.trim())
+        .is_ok_and(|parsed| !parsed.username().is_empty() || parsed.password().is_some())
+}
+
+fn seal_secret(plain: &str, path: &Path) -> Result<String, SettingsError> {
+    let trimmed = plain.trim();
+    if trimmed.is_empty() || trimmed.starts_with(SEALED_SECRET_PREFIX) {
+        return Ok(trimmed.to_string());
+    }
+    let encrypted = crate::cookie::protect_cookie(trimmed).map_err(|err| SettingsError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!("protect secret: {err}")),
+    })?;
+    Ok(format!("{SEALED_SECRET_PREFIX}{}", hex::encode(encrypted)))
+}
+
+fn unseal_secret(stored: &str) -> String {
+    let trimmed = stored.trim();
+    let Some(hex_body) = trimmed.strip_prefix(SEALED_SECRET_PREFIX) else {
+        return trimmed.to_string();
+    };
+    let Ok(bytes) = hex::decode(hex_body) else {
+        return String::new();
+    };
+    crate::cookie::unprotect_cookie(&bytes).unwrap_or_default()
+}
+
 impl Settings {
     pub fn load_or_create(dir: &Path) -> Result<Self, SettingsError> {
         paths::ensure_private_dir(dir).map_err(|source| SettingsError::Io {
@@ -264,8 +294,27 @@ impl Settings {
                 source,
             })?;
 
+        let mut needs_resave = false;
         if !is_valid_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();
+            needs_resave = true;
+        }
+        let raw_hf = settings.hf_token.trim().to_string();
+        if !raw_hf.is_empty() && !raw_hf.starts_with(SEALED_SECRET_PREFIX) {
+            needs_resave = true;
+        }
+        settings.hf_token = unseal_secret(&raw_hf);
+
+        let raw_proxy = settings.proxy_url.trim().to_string();
+        if !raw_proxy.is_empty()
+            && !raw_proxy.starts_with(SEALED_SECRET_PREFIX)
+            && proxy_has_credentials(&raw_proxy)
+        {
+            needs_resave = true;
+        }
+        settings.proxy_url = unseal_secret(&raw_proxy);
+
+        if needs_resave {
             settings.save(dir)?;
         }
 
@@ -281,10 +330,16 @@ impl Settings {
         let path = paths::settings_path(dir);
         let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = dir.join(format!("settings.json.tmp.{}.{seq}", std::process::id()));
-        let json = serde_json::to_string_pretty(self).map_err(|source| SettingsError::Json {
-            path: path.clone(),
-            source,
-        })?;
+        let mut persisted = self.clone();
+        persisted.hf_token = seal_secret(&persisted.hf_token, &path)?;
+        if proxy_has_credentials(&persisted.proxy_url) {
+            persisted.proxy_url = seal_secret(&persisted.proxy_url, &path)?;
+        }
+        let json =
+            serde_json::to_string_pretty(&persisted).map_err(|source| SettingsError::Json {
+                path: path.clone(),
+                source,
+            })?;
 
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
@@ -399,5 +454,42 @@ mod tests {
         assert!(is_within_schedule(23 * 60, 23 * 60, 6 * 60));
         assert!(is_within_schedule(2 * 60, 23 * 60, 6 * 60));
         assert!(!is_within_schedule(6 * 60, 23 * 60, 6 * 60));
+    }
+
+    #[test]
+    fn hf_token_and_proxy_credentials_are_sealed_on_disk_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            bridge_token: generate_token(),
+            hf_token: "hf_secret_token_12345".to_string(),
+            proxy_url: "http://alice:s3cr3t@127.0.0.1:8080".to_string(),
+            ..Settings::default()
+        };
+        settings.save(dir.path()).unwrap();
+
+        let raw = std::fs::read_to_string(paths::settings_path(dir.path())).unwrap();
+        assert!(!raw.contains("hf_secret_token_12345"));
+        assert!(!raw.contains("s3cr3t"));
+        assert!(raw.contains(SEALED_SECRET_PREFIX));
+
+        let loaded = Settings::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.hf_token, "hf_secret_token_12345");
+        assert_eq!(loaded.proxy_url, "http://alice:s3cr3t@127.0.0.1:8080");
+
+        // Legacy plaintext settings migrate seamlessly and get sealed on load.
+        let mut legacy: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        legacy["hf_token"] = serde_json::Value::String("hf_legacy_plain".to_string());
+        legacy["proxy_url"] = serde_json::Value::String("http://127.0.0.1:7890".to_string());
+        std::fs::write(
+            paths::settings_path(dir.path()),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let migrated = Settings::load_or_create(dir.path()).unwrap();
+        assert_eq!(migrated.hf_token, "hf_legacy_plain");
+        assert_eq!(migrated.proxy_url, "http://127.0.0.1:7890");
+        let after = std::fs::read_to_string(paths::settings_path(dir.path())).unwrap();
+        assert!(!after.contains("hf_legacy_plain"));
+        assert!(after.contains("http://127.0.0.1:7890"));
     }
 }

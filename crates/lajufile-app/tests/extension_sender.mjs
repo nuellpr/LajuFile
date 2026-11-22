@@ -10,6 +10,7 @@ const EXT_ORIGIN = `chrome-extension://${EXT_ID}/`;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMMON_PATH = path.resolve(__dirname, "../../../extension/common.js");
 const BG_PATH = path.resolve(__dirname, "../../../extension/background.js");
+const INTERCEPTOR_PATH = path.resolve(__dirname, "../../../extension/interceptor.js");
 
 function loadBackgroundHarness({
   rules = { excluded_domains: "", captured_extensions: "" },
@@ -363,4 +364,138 @@ test("video-formats supports multi-site platforms like Vimeo and capture-media r
   );
   assert.equal(fromPopup.ret, true);
   assert.ok(fetchCalls.some((c) => c.url.endsWith("/video")));
+});
+
+function loadInterceptorHarness({ isTopFrame = true, mediaElements = [] } = {}) {
+  const clickListeners = [];
+  const messageListeners = [];
+  const sentMessages = [];
+  const winObj = {
+    location: { assign: () => {} },
+    open: () => ({}),
+  };
+  winObj.top = isTopFrame ? winObj : {};
+
+  const sandbox = {
+    URL,
+    String,
+    Number,
+    Boolean,
+    Array,
+    Set,
+    Object,
+    JSON,
+    decodeURIComponent,
+    setTimeout: (...args) => {
+      const handle = setTimeout(...args);
+      handle.unref?.();
+      return handle;
+    },
+    window: winObj,
+    location: { href: "https://example.org/page", hostname: "example.org" },
+    document: {
+      addEventListener: (event, fn) => {
+        if (event === "click") clickListeners.push(fn);
+      },
+      querySelectorAll: () => mediaElements,
+    },
+    chrome: {
+      storage: {
+        local: {
+          get: async (defaults) => ({ ...defaults, autoCapture: true }),
+        },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        id: EXT_ID,
+        sendMessage: async (msg) => {
+          sentMessages.push(msg);
+          return { captured: true, status: 201 };
+        },
+        onMessage: { addListener: (fn) => messageListeners.push(fn) },
+      },
+    },
+  };
+
+  const context = vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(COMMON_PATH, "utf8"), context, { filename: COMMON_PATH });
+  vm.runInContext(fs.readFileSync(INTERCEPTOR_PATH, "utf8"), context, {
+    filename: INTERCEPTOR_PATH,
+  });
+  return {
+    onClick: clickListeners[0],
+    onMessage: messageListeners[0],
+    sentMessages,
+  };
+}
+
+test("interceptor ignores synthetic untrusted clicks and intercepts trusted PDF clicks", async () => {
+  const { onClick, sentMessages } = loadInterceptorHarness();
+  const anchor = {
+    href: "https://private.example.org/report.pdf",
+    hasAttribute: () => false,
+  };
+  const makeEvent = (isTrusted) => {
+    let prevented = false;
+    return {
+      isTrusted,
+      button: 0,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      target: { closest: () => anchor },
+      preventDefault: () => {
+        prevented = true;
+      },
+      stopPropagation: () => {},
+      get prevented() {
+        return prevented;
+      },
+    };
+  };
+
+  const synthetic = makeEvent(false);
+  onClick(synthetic);
+  assert.equal(synthetic.prevented, false);
+  assert.equal(sentMessages.length, 0);
+
+  const trusted = makeEvent(true);
+  onClick(trusted);
+  assert.equal(trusted.prevented, true);
+  assert.equal(sentMessages.length, 1);
+  assert.equal(sentMessages[0].type, "intercept-link");
+  assert.equal(sentMessages[0].url, "https://private.example.org/report.pdf");
+});
+
+test("sniff-page-media survives malformed percent encoding and skips empty subframes", async () => {
+  const emptySubframe = loadInterceptorHarness({ isTopFrame: false, mediaElements: [] });
+  let subframeReplied = false;
+  const subRet = emptySubframe.onMessage(
+    { type: "sniff-page-media" },
+    { id: EXT_ID },
+    () => {
+      subframeReplied = true;
+    },
+  );
+  assert.equal(subRet, false);
+  assert.equal(subframeReplied, false);
+
+  const mediaFrame = loadInterceptorHarness({
+    isTopFrame: false,
+    mediaElements: [
+      {
+        tagName: "VIDEO",
+        currentSrc: "https://cdn.example.org/media/clip%ZZname.mp4",
+        querySelectorAll: () => [],
+      },
+    ],
+  });
+  let foundReply = null;
+  mediaFrame.onMessage({ type: "sniff-page-media" }, { id: EXT_ID }, (reply) => {
+    foundReply = reply;
+  });
+  assert.equal(foundReply?.items?.length, 1);
+  assert.equal(foundReply.items[0].url, "https://cdn.example.org/media/clip%ZZname.mp4");
+  assert.equal(foundReply.items[0].label, "clip%ZZname.mp4");
 });

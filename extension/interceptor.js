@@ -50,21 +50,11 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-function parseTokens(raw) {
-  return String(raw || "")
-    .split(/[\s,;]+/)
-    .map((t) => t.trim().toLowerCase())
-    .filter(Boolean);
-}
+const { parseTokens, isHostExcluded } = globalThis.LajuFileCommon;
 
 function domainExcluded(host) {
-  if (!host) return false;
-  const h = host.toLowerCase();
   const merged = `${rulesState.excludedDomains || ""}\n${rulesState.remoteExcludedDomains || ""}`;
-  return parseTokens(merged).some((token) => {
-    const clean = token.replace(/^\*\.|^\./, "");
-    return clean && (h === clean || h.endsWith(`.${clean}`));
-  });
+  return isHostExcluded(host, merged);
 }
 
 function isInlineCatchAllowed(urlObj) {
@@ -107,7 +97,7 @@ function openBypassed(anchor, url) {
 document.addEventListener(
   "click",
   (event) => {
-    if (event.button !== 0) return;
+    if (!event.isTrusted || event.button !== 0) return;
     const target = event.target;
     if (!target || typeof target.closest !== "function") return;
     const anchor = target.closest("a[href]");
@@ -160,6 +150,14 @@ document.addEventListener(
   true,
 );
 
+function safeDecodeSegment(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 // On-demand media sniffer queried by the extension popup for <video>/<audio> sources.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "sniff-page-media" || !sender || sender.id !== chrome.runtime.id) {
@@ -178,7 +176,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
     if (seen.has(parsed.href)) return;
     seen.add(parsed.href);
-    const name = decodeURIComponent(parsed.pathname.split("/").pop() || "") || kind;
+    const name = safeDecodeSegment(parsed.pathname.split("/").pop() || "") || kind;
     items.push({ url: parsed.href, kind, label: name.slice(0, 42) });
   };
   document.querySelectorAll("video, audio").forEach((el) => {
@@ -186,6 +184,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     pushUrl(el.currentSrc || el.src, kind);
     el.querySelectorAll("source[src]").forEach((src) => pushUrl(src.src, kind));
   });
-  sendResponse({ items: items.slice(0, 6) });
-  return false;
+  if (items.length > 0) {
+    sendResponse({ items: items.slice(0, 6) });
+    return false;
+  }
+  let isTopFrame = true;
+  try {
+    isTopFrame = window === window.top;
+  } catch {
+    isTopFrame = false;
+  }
+  if (!isTopFrame) {
+    return false;
+  }
+  setTimeout(() => sendResponse({ items: [] }), 40);
+  return true;
 });

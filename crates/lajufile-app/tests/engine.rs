@@ -1914,3 +1914,125 @@ fn per_item_speed_limit_persists_and_applies_live() {
     assert_eq!(updated.downloads[0].speed_limit_kbps, 256);
     handle.shutdown();
 }
+
+#[test]
+fn scheduler_holds_new_downloads_outside_window_until_schedule_opens() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let now_mins = lajufile_app::platform::local_minutes_since_midnight().unwrap();
+    let start_mins = (now_mins + 120) % 1440;
+    let stop_mins = (now_mins + 180) % 1440;
+    let fmt_hhmm = |m: u16| format!("{:02}:{:02}", m / 60, m % 60);
+
+    let mut settings = test_settings(dir.path());
+    settings.schedule_enabled = true;
+    settings.schedule_start = fmt_hhmm(start_mins);
+    settings.schedule_stop = fmt_hhmm(stop_mins);
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: settings.clone(),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("scheduled.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    // Must remain queued while outside the scheduled window.
+    let queued = wait_for(
+        &handle,
+        |s| s.downloads.len() == 1 && s.downloads[0].status == DownloadStatus::Queued,
+        Duration::from_secs(15),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let still_queued = handle.latest_snapshot().unwrap();
+    assert_eq!(still_queued.downloads[0].id, queued.downloads[0].id);
+    assert_eq!(still_queued.downloads[0].status, DownloadStatus::Queued);
+
+    // Updating the schedule window to include now starts the queued download immediately.
+    let mut open_settings = settings;
+    open_settings.schedule_start = fmt_hhmm((now_mins + 1440 - 30) % 1440);
+    open_settings.schedule_stop = fmt_hhmm((now_mins + 60) % 1440);
+    handle.send(Command::UpdateSettings(open_settings)).unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| s.downloads.len() == 1 && s.downloads[0].status == DownloadStatus::Done,
+        Duration::from_secs(15),
+    );
+    assert!(done.downloads[0].save_path.exists());
+    handle.shutdown();
+}
+
+#[test]
+fn queue_complete_action_waits_for_checksum_post_task_and_resets_one_shot() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(dir.path());
+    settings.on_queue_complete = lajufile_core::settings::QueueCompleteAction::ExitApp;
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+
+    let expected = lajufile_core::checksum::sha256_bytes(&b"LajuFile".repeat(1024 * 128));
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("{}/file.bin", server.base),
+            file_name: Some("post-task.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: None,
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: Some(expected),
+        }))
+        .unwrap();
+
+    let armed = wait_for(
+        &handle,
+        |s| {
+            matches!(
+                s.pending_queue_action,
+                Some((lajufile_core::settings::QueueCompleteAction::ExitApp, _))
+            )
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(
+        armed.downloads[0].checksum_status.as_deref(),
+        Some("verified"),
+        "queue completion action must not arm before post-download checksum completes"
+    );
+    assert_eq!(
+        armed.settings.on_queue_complete,
+        lajufile_core::settings::QueueCompleteAction::None
+    );
+
+    handle.send(Command::CancelQueueComplete).unwrap();
+    let canceled = wait_for(
+        &handle,
+        |s| s.pending_queue_action.is_none(),
+        Duration::from_secs(5),
+    );
+    assert!(!canceled.exit_requested);
+    handle.shutdown();
+}

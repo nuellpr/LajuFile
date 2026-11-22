@@ -233,7 +233,10 @@ impl EngineState {
                 js_runtime.as_deref(),
                 cookie_file.as_ref().map(video::TempCookieFile::path),
                 proxy.as_deref(),
-                self.settings.global_speed_limit_kbps,
+                effective_video_speed_limit_kbps(
+                    self.settings.global_speed_limit_kbps,
+                    download.speed_limit_kbps,
+                ),
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -404,6 +407,9 @@ impl EngineState {
     }
 
     pub(super) fn pump_queue(&mut self) {
+        if self.is_schedule_blocking() {
+            return;
+        }
         let limit = self.settings.max_concurrent.max(1) as usize;
         let mut queued: Vec<Download> = match self.store.list_downloads() {
             Ok(downloads) => downloads
@@ -597,7 +603,9 @@ impl EngineState {
             self.message = Some("Destination file already exists".to_string());
             return;
         }
-        if let Err(error) = move_file_safe(&download.save_path, &dest) {
+        if let Err(error) =
+            lajufile_core::download::move_file_no_overwrite(&download.save_path, &dest)
+        {
             self.message = Some(format!("Move failed: {error}"));
             return;
         }
@@ -727,6 +735,9 @@ impl EngineState {
                 }
             }
         }
+        let schedule_changed = settings.schedule_enabled != self.settings.schedule_enabled
+            || settings.schedule_start != self.settings.schedule_start
+            || settings.schedule_stop != self.settings.schedule_stop;
         match settings.save(&self.data_dir) {
             Ok(()) => {
                 self.limiter.set_kbps(settings.global_speed_limit_kbps);
@@ -734,6 +745,11 @@ impl EngineState {
                     *token = settings.bridge_token.clone();
                 }
                 self.settings = settings;
+                if schedule_changed {
+                    self.schedule_was_active = None;
+                    self.last_schedule_check = Instant::now() - Duration::from_secs(10);
+                    self.tick_scheduler();
+                }
                 self.pump_queue();
             }
             Err(error) => {
@@ -765,20 +781,11 @@ impl EngineState {
     }
 }
 
-fn move_file_safe(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            if std::fs::copy(from, to).is_ok() {
-                if let Err(rm_err) = std::fs::remove_file(from) {
-                    let _ = std::fs::remove_file(to);
-                    return Err(rm_err);
-                }
-                Ok(())
-            } else {
-                Err(rename_err)
-            }
-        }
+fn effective_video_speed_limit_kbps(global_kbps: u64, item_kbps: u64) -> u64 {
+    match (global_kbps, item_kbps) {
+        (0, item) => item,
+        (global, 0) => global,
+        (global, item) => global.min(item),
     }
 }
 
@@ -791,5 +798,19 @@ fn segmented_error(error: SegmentedError) -> DownloadError {
         SegmentedError::RangeIgnored | SegmentedError::RestartRequired => {
             DownloadError::Io(std::io::Error::other("segmented fallback was not handled"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_video_speed_limit_kbps;
+
+    #[test]
+    fn video_speed_limit_uses_lowest_nonzero_cap() {
+        assert_eq!(effective_video_speed_limit_kbps(0, 0), 0);
+        assert_eq!(effective_video_speed_limit_kbps(0, 512), 512);
+        assert_eq!(effective_video_speed_limit_kbps(1024, 0), 1024);
+        assert_eq!(effective_video_speed_limit_kbps(1024, 256), 256);
+        assert_eq!(effective_video_speed_limit_kbps(256, 1024), 256);
     }
 }

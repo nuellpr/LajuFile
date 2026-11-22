@@ -385,6 +385,7 @@ struct EngineState {
     schedule_was_active: Option<bool>,
     last_schedule_check: Instant,
     had_completed_in_batch: bool,
+    in_flight_post_tasks: usize,
     pending_queue_action: Option<(QueueCompleteAction, i64)>,
 }
 
@@ -508,10 +509,12 @@ fn engine_loop(
         schedule_was_active: None,
         last_schedule_check: Instant::now() - Duration::from_secs(10),
         had_completed_in_batch: false,
+        in_flight_post_tasks: 0,
         pending_queue_action: None,
     };
 
     state.normalize_startup();
+    state.tick_scheduler();
     state.pump_queue();
     state.publish();
     state.dirty = false;
@@ -563,6 +566,7 @@ fn engine_loop(
 
         let wait_timeout = if !state.active.is_empty()
             || state.in_flight_probes > 0
+            || state.in_flight_post_tasks > 0
             || !state.pending_captures.is_empty()
             || state.dirty
         {
@@ -863,6 +867,7 @@ impl EngineState {
                 }
             }
             Event::ChecksumVerified { id, status, error } => {
+                self.in_flight_post_tasks = self.in_flight_post_tasks.saturating_sub(1);
                 let _ = self
                     .store
                     .update_checksum_result(id, &status, error.as_deref());
@@ -875,10 +880,13 @@ impl EngineState {
                 }
                 self.cache_dirty = true;
                 self.immediate_publish = true;
+                self.check_queue_complete();
             }
             Event::Extracted { message } => {
+                self.in_flight_post_tasks = self.in_flight_post_tasks.saturating_sub(1);
                 self.message = Some(message);
                 self.immediate_publish = true;
+                self.check_queue_complete();
             }
             Event::Fallback {
                 id,
@@ -918,6 +926,7 @@ impl EngineState {
                         if let Ok(row) = self.store.get_download(id)
                             && let Some(expected) = row.expected_sha256
                         {
+                            self.in_flight_post_tasks += 1;
                             let path = outcome.final_path;
                             let events = self.events.clone();
                             thread::spawn(move || {
@@ -962,10 +971,11 @@ impl EngineState {
         }
     }
 
-    fn maybe_spawn_auto_extract(&self, path: &Path) {
+    fn maybe_spawn_auto_extract(&mut self, path: &Path) {
         if !self.settings.auto_extract_archives || !extract::is_supported_archive(path) {
             return;
         }
+        self.in_flight_post_tasks += 1;
         let archive = path.to_path_buf();
         let events = self.events.clone();
         thread::spawn(move || {
@@ -986,7 +996,23 @@ impl EngineState {
         });
     }
 
-    fn tick_scheduler(&mut self) {
+    pub(super) fn is_schedule_blocking(&self) -> bool {
+        if !self.settings.schedule_enabled {
+            return false;
+        }
+        let (Some(start), Some(stop)) = (
+            parse_hhmm(&self.settings.schedule_start),
+            parse_hhmm(&self.settings.schedule_stop),
+        ) else {
+            return false;
+        };
+        let Some(now_mins) = crate::platform::local_minutes_since_midnight() else {
+            return false;
+        };
+        !is_within_schedule(now_mins, start, stop)
+    }
+
+    pub(super) fn tick_scheduler(&mut self) {
         if !self.settings.schedule_enabled {
             self.schedule_was_active = None;
             return;
@@ -1035,6 +1061,7 @@ impl EngineState {
         if action == QueueCompleteAction::None
             || !self.had_completed_in_batch
             || !self.active.is_empty()
+            || self.in_flight_post_tasks > 0
             || self.pending_queue_action.is_some()
         {
             return;

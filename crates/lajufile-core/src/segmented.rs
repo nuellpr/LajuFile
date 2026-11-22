@@ -1,5 +1,6 @@
 //! Concurrent ranged downloads over a preallocated temporary file.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,15 +31,22 @@ pub struct SegmentedSpec {
     pub retry_delays: Vec<Duration>,
 }
 
+struct SegmentBounds {
+    end: u64,
+    /// Bytes flushed to disk and reported via `on_progress`.
+    done: u64,
+    /// Upper bound of any in-flight `write_all` (`>= done`); thieves never steal below this.
+    reserved: u64,
+}
+
 struct LiveSegment {
     idx: u32,
     start: u64,
-    end: Arc<AtomicU64>,
-    done: Arc<AtomicU64>,
+    bounds: Arc<Mutex<SegmentBounds>>,
     finished: bool,
 }
 
-type SegmentWork = (Segment, Arc<AtomicU64>, Arc<AtomicU64>);
+type SegmentWork = (Segment, Arc<Mutex<SegmentBounds>>);
 
 struct SplitCoordinator {
     segments: Vec<LiveSegment>,
@@ -54,17 +62,19 @@ impl SplitCoordinator {
             next_idx = next_idx.max(seg.idx.saturating_add(1));
             let length = seg.end - seg.start + 1;
             let finished = seg.done == length;
-            let end_atomic = Arc::new(AtomicU64::new(seg.end));
-            let done_atomic = Arc::new(AtomicU64::new(seg.done));
+            let bounds = Arc::new(Mutex::new(SegmentBounds {
+                end: seg.end,
+                done: seg.done,
+                reserved: seg.done,
+            }));
             live.push(LiveSegment {
                 idx: seg.idx,
                 start: seg.start,
-                end: Arc::clone(&end_atomic),
-                done: Arc::clone(&done_atomic),
+                bounds: Arc::clone(&bounds),
                 finished,
             });
             if !finished {
-                initial_work.push((seg.clone(), end_atomic, done_atomic));
+                initial_work.push((seg.clone(), bounds));
             }
         }
         (
@@ -77,33 +87,49 @@ impl SplitCoordinator {
     }
 
     /// Marks `finished_idx` complete and, if another active segment still has at
-    /// least `2 * MIN_SPLIT_BYTES` remaining, splits its trailing half for the idle worker.
+    /// least `2 * MIN_SPLIT_BYTES` unreserved bytes remaining, atomically splits
+    /// its trailing half for the idle worker.
     fn finish_and_steal(&mut self, finished_idx: u32) -> Option<(SegmentWork, Vec<Segment>)> {
         if let Some(entry) = self.segments.iter_mut().find(|s| s.idx == finished_idx) {
             entry.finished = true;
         }
-        let mut best: Option<(usize, u64, u64, u64)> = None;
-        for (pos, seg) in self.segments.iter().enumerate() {
-            if seg.finished {
+        let mut candidates: Vec<(usize, u64)> = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, seg)| !seg.finished)
+            .filter_map(|(pos, seg)| {
+                let b = seg.bounds.lock().expect("segment bounds mutex poisoned");
+                let cur_pos = seg.start.saturating_add(b.done.max(b.reserved));
+                let remaining = b.end.saturating_add(1).saturating_sub(cur_pos);
+                (remaining >= MIN_SPLIT_BYTES * 2).then_some((pos, remaining))
+            })
+            .collect();
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.1));
+
+        let mut stolen_range = None;
+        for (donor_pos, _) in candidates {
+            let donor_start = self.segments[donor_pos].start;
+            let mut b = self.segments[donor_pos]
+                .bounds
+                .lock()
+                .expect("segment bounds mutex poisoned");
+            let cur_pos = donor_start.saturating_add(b.done.max(b.reserved));
+            let old_end = b.end;
+            let remaining = old_end.saturating_add(1).saturating_sub(cur_pos);
+            if remaining < MIN_SPLIT_BYTES * 2 {
                 continue;
             }
-            let done = seg.done.load(Ordering::Acquire);
-            let end = seg.end.load(Ordering::Acquire);
-            let cur_pos = seg.start.saturating_add(done);
-            let remaining = end.saturating_add(1).saturating_sub(cur_pos);
-            if remaining >= MIN_SPLIT_BYTES * 2 && best.is_none_or(|(_, rem, _, _)| remaining > rem)
-            {
-                best = Some((pos, remaining, cur_pos, end));
+            let mid = cur_pos + remaining / 2;
+            if mid <= cur_pos || mid > old_end {
+                continue;
             }
+            b.end = mid - 1;
+            stolen_range = Some((mid, old_end));
+            break;
         }
-        let (donor_pos, remaining, cur_pos, old_end) = best?;
-        let mid = cur_pos + remaining / 2;
-        if mid <= cur_pos || mid > old_end {
-            return None;
-        }
-        self.segments[donor_pos]
-            .end
-            .store(mid - 1, Ordering::Release);
+        let (mid, old_end) = stolen_range?;
+
         let idx = self.next_idx;
         self.next_idx = self.next_idx.saturating_add(1);
         let new_seg = Segment {
@@ -112,26 +138,31 @@ impl SplitCoordinator {
             end: old_end,
             done: 0,
         };
-        let end_atomic = Arc::new(AtomicU64::new(old_end));
-        let done_atomic = Arc::new(AtomicU64::new(0));
+        let bounds = Arc::new(Mutex::new(SegmentBounds {
+            end: old_end,
+            done: 0,
+            reserved: 0,
+        }));
         self.segments.push(LiveSegment {
             idx,
             start: mid,
-            end: Arc::clone(&end_atomic),
-            done: Arc::clone(&done_atomic),
+            bounds: Arc::clone(&bounds),
             finished: false,
         });
         let snapshot = self
             .segments
             .iter()
-            .map(|s| Segment {
-                idx: s.idx,
-                start: s.start,
-                end: s.end.load(Ordering::Acquire),
-                done: s.done.load(Ordering::Acquire),
+            .map(|s| {
+                let b = s.bounds.lock().expect("segment bounds mutex poisoned");
+                Segment {
+                    idx: s.idx,
+                    start: s.start,
+                    end: b.end,
+                    done: b.done,
+                }
             })
             .collect();
-        Some(((new_seg, end_atomic, done_atomic), snapshot))
+        Some(((new_seg, bounds), snapshot))
     }
 }
 
@@ -295,7 +326,7 @@ where
     let coordinator = Arc::new(Mutex::new(coordinator));
     let mut tasks = JoinSet::new();
 
-    for (segment, seg_end, seg_done) in initial_work {
+    for (segment, seg_bounds) in initial_work {
         let client = client.clone();
         let url = spec.url.clone();
         let temp_path = spec.temp_path.clone();
@@ -311,7 +342,7 @@ where
         let size = spec.size;
 
         tasks.spawn(async move {
-            let mut current = (segment, seg_end, seg_done);
+            let mut current = (segment, seg_bounds);
             loop {
                 let finished_idx = current.0.idx;
                 download_segment(
@@ -324,7 +355,6 @@ where
                     item_limiter.as_deref(),
                     current.0,
                     current.1,
-                    current.2,
                     size,
                     &retry_delays,
                     &total_done,
@@ -397,25 +427,34 @@ fn validate_segments(size: u64, segments: &[Segment]) -> Result<(), SegmentedErr
         ));
     }
 
-    let mut expected_start = 0_u64;
-    for (position, segment) in segments.iter().enumerate() {
-        if segment.idx != position as u32 {
+    let mut seen_idx = HashSet::with_capacity(segments.len());
+    for segment in segments {
+        if !seen_idx.insert(segment.idx) {
             return Err(SegmentedError::InvalidSegments(format!(
-                "segment index {} at position {position}",
+                "duplicate segment index {}",
                 segment.idx
             )));
         }
+    }
+
+    // Dynamic splits append new `idx` entries for mid-file byte ranges, so verify
+    // contiguous coverage sorted by `start` rather than requiring `idx == position`.
+    let mut ordered: Vec<&Segment> = segments.iter().collect();
+    ordered.sort_by_key(|segment| segment.start);
+
+    let mut expected_start = 0_u64;
+    for segment in ordered {
         if segment.start != expected_start || segment.end < segment.start {
             return Err(SegmentedError::InvalidSegments(format!(
-                "segment {position} has range {}-{}",
-                segment.start, segment.end
+                "segment {} has range {}-{}",
+                segment.idx, segment.start, segment.end
             )));
         }
         let length = segment.end - segment.start + 1;
         if segment.done > length {
             return Err(SegmentedError::InvalidSegments(format!(
-                "segment {position} has {} done of {length}",
-                segment.done
+                "segment {} has {} done of {length}",
+                segment.idx, segment.done
             )));
         }
         expected_start = segment
@@ -442,8 +481,7 @@ async fn download_segment<F>(
     limiter: &RateLimiter,
     item_limiter: Option<&RateLimiter>,
     segment: Segment,
-    seg_end: Arc<AtomicU64>,
-    seg_done: Arc<AtomicU64>,
+    seg_bounds: Arc<Mutex<SegmentBounds>>,
     size: u64,
     retry_delays: &[Duration],
     total_done: &AtomicU64,
@@ -468,8 +506,7 @@ where
             limiter,
             item_limiter,
             &segment,
-            &seg_end,
-            &seg_done,
+            &seg_bounds,
             size,
             &mut file,
             &mut done,
@@ -482,8 +519,10 @@ where
             Ok(()) => {
                 file.flush().await.map_err(DownloadError::Io)?;
                 file.sync_all().await.map_err(DownloadError::Io)?;
-                let target_len = seg_end
-                    .load(Ordering::Acquire)
+                let target_len = seg_bounds
+                    .lock()
+                    .expect("segment bounds mutex poisoned")
+                    .end
                     .saturating_sub(segment.start)
                     .saturating_add(1);
                 debug_assert_eq!(done, target_len);
@@ -504,6 +543,51 @@ where
     Err(SegmentedError::Download(DownloadError::Status(0)))
 }
 
+async fn flush_segment_buf<F>(
+    segment: &Segment,
+    seg_bounds: &Mutex<SegmentBounds>,
+    file: &mut tokio::fs::File,
+    write_buf: &mut Vec<u8>,
+    done: &mut u64,
+    total_done: &AtomicU64,
+    on_progress: &Mutex<F>,
+) -> Result<bool, SegmentedError>
+where
+    F: FnMut(u32, u64, u64),
+{
+    let (take, reached_end) = {
+        let mut b = seg_bounds.lock().expect("segment bounds mutex poisoned");
+        let target_len = b.end.saturating_sub(segment.start).saturating_add(1);
+        let allowed = target_len.saturating_sub(b.done) as usize;
+        let take = write_buf.len().min(allowed);
+        b.reserved = b.done.saturating_add(take as u64);
+        (take, b.reserved >= target_len)
+    };
+    if take == 0 {
+        write_buf.clear();
+        return Ok(reached_end);
+    }
+    if let Err(err) = file.write_all(&write_buf[..take]).await {
+        let mut b = seg_bounds.lock().expect("segment bounds mutex poisoned");
+        b.reserved = b.done;
+        return Err(DownloadError::Io(err).into());
+    }
+    write_buf.clear();
+    let flushed = take as u64;
+    {
+        let mut b = seg_bounds.lock().expect("segment bounds mutex poisoned");
+        b.done = b.done.saturating_add(flushed);
+        b.reserved = b.done;
+        *done = b.done;
+    }
+    let total = total_done.fetch_add(flushed, Ordering::Relaxed) + flushed;
+    let mut callback = on_progress
+        .lock()
+        .expect("progress callback mutex poisoned");
+    callback(segment.idx, *done, total);
+    Ok(reached_end)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_segment_attempt<F>(
     client: &reqwest::Client,
@@ -513,8 +597,7 @@ async fn download_segment_attempt<F>(
     limiter: &RateLimiter,
     item_limiter: Option<&RateLimiter>,
     segment: &Segment,
-    seg_end: &AtomicU64,
-    seg_done: &AtomicU64,
+    seg_bounds: &Mutex<SegmentBounds>,
     size: u64,
     file: &mut tokio::fs::File,
     done: &mut u64,
@@ -524,10 +607,13 @@ async fn download_segment_attempt<F>(
 where
     F: FnMut(u32, u64, u64),
 {
-    let requested_end = seg_end.load(Ordering::Acquire);
-    let requested_len = requested_end
-        .saturating_sub(segment.start)
-        .saturating_add(1);
+    let (requested_end, requested_len, start_done) = {
+        let mut b = seg_bounds.lock().expect("segment bounds mutex poisoned");
+        b.reserved = b.done;
+        let len = b.end.saturating_sub(segment.start).saturating_add(1);
+        (b.end, len, b.done)
+    };
+    *done = start_done;
     if *done >= requested_len {
         return Ok(());
     }
@@ -575,10 +661,13 @@ where
     let mut last_notify = std::time::Instant::now();
     let mut response = response;
     while let Some(chunk) = response.chunk().await.map_err(DownloadError::Request)? {
-        let current_end = seg_end.load(Ordering::Acquire);
+        let (current_end, committed_done) = {
+            let b = seg_bounds.lock().expect("segment bounds mutex poisoned");
+            (b.end, b.done)
+        };
         let target_len = current_end.saturating_sub(segment.start).saturating_add(1);
         let chunk_len = chunk.len() as u64;
-        let next_done = done
+        let next_done = committed_done
             .saturating_add(write_buf.len() as u64)
             .saturating_add(chunk_len);
         if next_done > requested_len {
@@ -588,77 +677,65 @@ where
             }
             .into());
         }
-        let already = done.saturating_add(write_buf.len() as u64);
+        let already = committed_done.saturating_add(write_buf.len() as u64);
         let remaining_target = target_len.saturating_sub(already);
         if remaining_target == 0 {
             break;
         }
-        let take = (chunk.len() as u64).min(remaining_target) as usize;
+        let take = chunk_len.min(remaining_target) as usize;
         limiter.throttle(take as u64).await;
         if let Some(item_lim) = item_limiter {
             item_lim.throttle(take as u64).await;
         }
         write_buf.extend_from_slice(&chunk[..take]);
-        let current_target = seg_end
-            .load(Ordering::Acquire)
+        let current_target = seg_bounds
+            .lock()
+            .expect("segment bounds mutex poisoned")
+            .end
             .saturating_sub(segment.start)
             .saturating_add(1);
-        let reached_end = done.saturating_add(write_buf.len() as u64) >= current_target;
+        let reached_end = committed_done.saturating_add(write_buf.len() as u64) >= current_target;
         if !write_buf.is_empty()
             && (*done == 0
                 || write_buf.len() >= WRITE_BUF_CAP
                 || last_notify.elapsed() >= std::time::Duration::from_millis(50)
                 || reached_end)
         {
-            let allowed = current_target.saturating_sub(*done) as usize;
-            if write_buf.len() > allowed {
-                write_buf.truncate(allowed);
+            let finished = flush_segment_buf(
+                segment,
+                seg_bounds,
+                file,
+                &mut write_buf,
+                done,
+                total_done,
+                on_progress,
+            )
+            .await?;
+            last_notify = std::time::Instant::now();
+            if finished {
+                break;
             }
-            if !write_buf.is_empty() {
-                let flushed = write_buf.len() as u64;
-                file.write_all(&write_buf)
-                    .await
-                    .map_err(DownloadError::Io)?;
-                write_buf.clear();
-                *done += flushed;
-                seg_done.store(*done, Ordering::Release);
-                let total = total_done.fetch_add(flushed, Ordering::Relaxed) + flushed;
-                let mut callback = on_progress
-                    .lock()
-                    .expect("progress callback mutex poisoned");
-                callback(segment.idx, *done, total);
-                last_notify = std::time::Instant::now();
-            }
-        }
-        if reached_end {
-            break;
         }
     }
-    let final_target = seg_end
-        .load(Ordering::Acquire)
-        .saturating_sub(segment.start)
-        .saturating_add(1);
     if !write_buf.is_empty() {
-        let allowed = final_target.saturating_sub(*done) as usize;
-        if write_buf.len() > allowed {
-            write_buf.truncate(allowed);
-        }
-        if !write_buf.is_empty() {
-            let flushed = write_buf.len() as u64;
-            file.write_all(&write_buf)
-                .await
-                .map_err(DownloadError::Io)?;
-            write_buf.clear();
-            *done += flushed;
-            seg_done.store(*done, Ordering::Release);
-            let total = total_done.fetch_add(flushed, Ordering::Relaxed) + flushed;
-            let mut callback = on_progress
-                .lock()
-                .expect("progress callback mutex poisoned");
-            callback(segment.idx, *done, total);
-        }
+        let _ = flush_segment_buf(
+            segment,
+            seg_bounds,
+            file,
+            &mut write_buf,
+            done,
+            total_done,
+            on_progress,
+        )
+        .await?;
     }
 
+    let final_target = seg_bounds
+        .lock()
+        .expect("segment bounds mutex poisoned")
+        .end
+        .saturating_sub(segment.start)
+        .saturating_add(1);
     if *done != final_target {
         return Err(DownloadError::SizeMismatch {
             expected: final_target,

@@ -310,7 +310,7 @@ pub fn browser_setup_dialog(
                                 ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
-                                        "Release Firefox refuses permanent unsigned local add-ons unless signed via Mozilla Add-ons (AMO). Run extension/package.ps1 to generate lajufile-extension-firefox.zip for AMO upload, or use Chrome/Edge/Brave/Opera/Vivaldi locally right now.",
+                                        "Release Firefox requires add-ons to be signed via Mozilla Add-ons (AMO) for permanent installation. Download lajufile-extension-firefox.zip from LajuFile GitHub Releases (load temporarily in about:debugging or install once published on AMO), or use Chrome/Edge/Brave/Opera/Vivaldi locally right now.",
                                     )
                                     .size(11.0)
                                     .color(sp.muted),

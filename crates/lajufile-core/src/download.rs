@@ -46,7 +46,7 @@ pub enum DownloadError {
     InsufficientDiskSpace { required: u64, available: u64 },
 }
 
-pub(crate) fn ensure_disk_space(target: &Path, required: u64) -> Result<(), DownloadError> {
+pub fn ensure_disk_space(target: &Path, required: u64) -> Result<(), DownloadError> {
     if required == 0 {
         return Ok(());
     }
@@ -471,6 +471,12 @@ pub(crate) fn finalize_copy_new(temp: &Path, final_path: &Path) -> Result<(), Do
     }
     let _ = std::fs::remove_file(temp);
     Ok(())
+}
+
+/// Atomically moves `src` to `dst` without overwriting an existing destination,
+/// falling back to a `create_new` copy + sync + cleanup across filesystems.
+pub fn move_file_no_overwrite(src: &Path, dst: &Path) -> Result<(), DownloadError> {
+    finalize_temp(src, dst)
 }
 
 pub(crate) fn finalize_temp(temp: &Path, final_path: &Path) -> Result<(), DownloadError> {

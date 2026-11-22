@@ -67,42 +67,178 @@ pub fn is_safe_archive_entry(raw: &str) -> bool {
     true
 }
 
+const MAX_ARCHIVE_ENTRIES: usize = 50_000;
+const BOMB_CHECK_MIN_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_EXPANSION_RATIO: u64 = 100;
+
+fn is_iso_date(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+fn is_c_month(token: &str) -> bool {
+    matches!(
+        token,
+        "Jan"
+            | "Feb"
+            | "Mar"
+            | "Apr"
+            | "May"
+            | "Jun"
+            | "Jul"
+            | "Aug"
+            | "Sep"
+            | "Oct"
+            | "Nov"
+            | "Dec"
+    )
+}
+
+/// Parses uncompressed byte size from a `tar -tvf` line (both GNU tar and BSD tar formats).
+fn parse_tar_verbose_entry_size(line: &str) -> Option<u64> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    for i in 3..parts.len() {
+        if (is_iso_date(parts[i]) || is_c_month(parts[i]))
+            && let Ok(size) = parts[i - 1].parse::<u64>()
+        {
+            return Some(size);
+        }
+    }
+    None
+}
+
+/// Parses a `unzip -Z` (zipinfo) listing line, returning `Ok(Some(uncompressed_bytes))` for
+/// allowed regular/directory entries, `Ok(None)` for header/summary lines, and `Err` for links/devices.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn inspect_zipinfo_line(line: &str) -> Result<Option<u64>, String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty()
+        || trimmed.starts_with("Archive:")
+        || trimmed.starts_with("Zip file size:")
+    {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    let Some(mode) = parts.first().copied() else {
+        return Ok(None);
+    };
+    let mode_bytes = mode.as_bytes();
+    if mode_bytes.len() < 7 || !matches!(mode_bytes[1], b'r' | b'-' | b'w' | b'x') {
+        return Ok(None);
+    }
+    match mode_bytes[0] {
+        b'-' | b'd' => {
+            let size = parts
+                .get(3)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            Ok(Some(size))
+        }
+        b'l' | b'h' => Err("Blocked ZIP containing symlink/hardlink entries".to_string()),
+        _ => Err(format!("Blocked ZIP containing special entry mode: {mode}")),
+    }
+}
+
+fn check_extract_budget(
+    archive_bytes: u64,
+    entry_count: usize,
+    total_uncompressed: u64,
+    space_probe: &Path,
+) -> Result<(), String> {
+    if entry_count > MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "Blocked archive with too many entries ({entry_count} > {MAX_ARCHIVE_ENTRIES})"
+        ));
+    }
+    if total_uncompressed > BOMB_CHECK_MIN_BYTES
+        && total_uncompressed > archive_bytes.max(1).saturating_mul(MAX_EXPANSION_RATIO)
+    {
+        return Err(format!(
+            "Blocked archive with suspicious decompression ratio ({total_uncompressed} bytes from {archive_bytes} bytes)"
+        ));
+    }
+    if total_uncompressed > 0 {
+        lajufile_core::download::ensure_disk_space(space_probe, total_uncompressed)
+            .map_err(|e| format!("Archive extraction blocked: {e}"))?;
+    }
+    Ok(())
+}
+
 fn validate_tar_listing(archive: &Path) -> Result<(), String> {
-    let names_out = Command::new("tar")
-        .arg("-tf")
-        .arg(archive)
+    let archive_bytes = std::fs::metadata(archive)
+        .map_err(|e| format!("Archive metadata failed: {e}"))?
+        .len();
+
+    let mut names_cmd = Command::new("tar");
+    names_cmd.arg("-tf").arg(archive);
+    crate::tools::no_window(&mut names_cmd);
+    let names_out = names_cmd
         .output()
         .map_err(|e| format!("tar list failed: {e}"))?;
     if !names_out.status.success() {
         return Err("Archive listing failed (corrupt or unsupported archive)".to_string());
     }
+    let mut entry_count = 0usize;
     for line in String::from_utf8_lossy(&names_out.stdout).lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "Blocked archive with too many entries (>{MAX_ARCHIVE_ENTRIES})"
+            ));
+        }
         if !is_safe_archive_entry(trimmed) {
             return Err(format!("Blocked unsafe archive entry: {trimmed}"));
         }
     }
-    let verbose_out = Command::new("tar")
-        .arg("-tvf")
-        .arg(archive)
+
+    let mut verbose_cmd = Command::new("tar");
+    verbose_cmd.arg("-tvf").arg(archive).env("LC_ALL", "C");
+    crate::tools::no_window(&mut verbose_cmd);
+    let verbose_out = verbose_cmd
         .output()
         .map_err(|e| format!("tar inspect failed: {e}"))?;
-    if verbose_out.status.success() {
-        for line in String::from_utf8_lossy(&verbose_out.stdout).lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('l') || trimmed.starts_with('h') {
-                return Err("Blocked archive containing symlink/hardlink entries".to_string());
-            }
+    if !verbose_out.status.success() {
+        return Err("Archive inspection failed (could not verify links or sizes)".to_string());
+    }
+    let mut total_uncompressed = 0u64;
+    for line in String::from_utf8_lossy(&verbose_out.stdout).lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(kind_char) = trimmed.chars().next() else {
+            continue;
+        };
+        if matches!(kind_char, 'l' | 'h') {
+            return Err("Blocked archive containing symlink/hardlink entries".to_string());
+        }
+        if !matches!(kind_char, '-' | 'd') {
+            return Err(format!(
+                "Blocked archive containing unsupported entry type '{kind_char}'"
+            ));
+        }
+        if let Some(sz) = parse_tar_verbose_entry_size(trimmed) {
+            total_uncompressed = total_uncompressed.saturating_add(sz);
         }
     }
-    Ok(())
+    check_extract_budget(archive_bytes, entry_count, total_uncompressed, archive)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn validate_zip_listing_unix(archive: &Path) -> Result<(), String> {
+    let archive_bytes = std::fs::metadata(archive)
+        .map_err(|e| format!("Archive metadata failed: {e}"))?
+        .len();
+
     let out = Command::new("unzip")
         .arg("-Z1")
         .arg(archive)
@@ -111,25 +247,38 @@ fn validate_zip_listing_unix(archive: &Path) -> Result<(), String> {
     if !out.status.success() {
         return Err("ZIP listing failed".to_string());
     }
+    let mut entry_count = 0usize;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let trimmed = line.trim();
-        if !trimmed.is_empty() && !is_safe_archive_entry(trimmed) {
+        if trimmed.is_empty() {
+            continue;
+        }
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "Blocked ZIP with too many entries (>{MAX_ARCHIVE_ENTRIES})"
+            ));
+        }
+        if !is_safe_archive_entry(trimmed) {
             return Err(format!("Blocked unsafe ZIP entry: {trimmed}"));
         }
     }
     let verbose = Command::new("unzip")
         .arg("-Z")
         .arg(archive)
+        .env("LC_ALL", "C")
         .output()
         .map_err(|e| format!("unzip inspect failed: {e}"))?;
-    if verbose.status.success() {
-        for line in String::from_utf8_lossy(&verbose.stdout).lines() {
-            if line.trim_start().starts_with('l') {
-                return Err("Blocked ZIP containing symlink entries".to_string());
-            }
+    if !verbose.status.success() {
+        return Err("ZIP inspection failed (could not verify links or sizes)".to_string());
+    }
+    let mut total_uncompressed = 0u64;
+    for line in String::from_utf8_lossy(&verbose.stdout).lines() {
+        if let Some(sz) = inspect_zipinfo_line(line)? {
+            total_uncompressed = total_uncompressed.saturating_add(sz);
         }
     }
-    Ok(())
+    check_extract_budget(archive_bytes, entry_count, total_uncompressed, archive)
 }
 
 /// Validates and extracts a supported archive into a fresh sibling subfolder.
@@ -160,13 +309,13 @@ pub fn extract_archive_safely(archive: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dest).map_err(|e| format!("Create extract folder failed: {e}"))?;
 
     let status = match kind {
-        ArchiveKind::Tar => Command::new("tar")
-            .arg("-xf")
-            .arg(archive)
-            .arg("-C")
-            .arg(&dest)
-            .status()
-            .map_err(|e| format!("tar extract failed: {e}"))?,
+        ArchiveKind::Tar => {
+            let mut cmd = Command::new("tar");
+            cmd.arg("-xf").arg(archive).arg("-C").arg(&dest);
+            crate::tools::no_window(&mut cmd);
+            cmd.status()
+                .map_err(|e| format!("tar extract failed: {e}"))?
+        }
         ArchiveKind::Zip => {
             #[cfg(all(unix, not(target_os = "macos")))]
             {
@@ -180,12 +329,10 @@ pub fn extract_archive_safely(archive: &Path) -> Result<PathBuf, String> {
             }
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             {
-                Command::new("tar")
-                    .arg("-xf")
-                    .arg(archive)
-                    .arg("-C")
-                    .arg(&dest)
-                    .status()
+                let mut cmd = Command::new("tar");
+                cmd.arg("-xf").arg(archive).arg("-C").arg(&dest);
+                crate::tools::no_window(&mut cmd);
+                cmd.status()
                     .map_err(|e| format!("tar zip extract failed: {e}"))?
             }
         }
@@ -306,5 +453,72 @@ mod tests {
         let err = extract_archive_safely(&evil_zip).unwrap_err();
         assert!(err.contains("unsafe"));
         assert!(!dir.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn parses_tar_and_zipinfo_sizes_and_blocks_symlinks() {
+        assert_eq!(
+            parse_tar_verbose_entry_size(
+                "-rw-r--r--  0 0      0       12345 Nov 22 10:27 dir/hello.txt"
+            ),
+            Some(12345)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size("-rw-r--r-- root/root 54321 2026-01-01 00:00 sub/a.bin"),
+            Some(54321)
+        );
+        assert_eq!(
+            parse_tar_verbose_entry_size("-rw-r--r--  1 John Doe staff 999 Jan 01 1970 spaced.bin"),
+            Some(999)
+        );
+
+        assert_eq!(inspect_zipinfo_line("Archive:  test.zip").unwrap(), None);
+        assert_eq!(
+            inspect_zipinfo_line(
+                "-rw-r--r--  3.0 unx    12345 tx defN 26-Nov-22 10:27 dir/hello.txt"
+            )
+            .unwrap(),
+            Some(12345)
+        );
+        assert_eq!(
+            inspect_zipinfo_line("drwxr-xr-x  3.0 unx        0 bx stor 26-Nov-22 10:27 dir/")
+                .unwrap(),
+            Some(0)
+        );
+        assert!(
+            inspect_zipinfo_line(
+                "lrwxrwxrwx  3.0 unx       12 tx stor 26-Nov-22 10:27 link -> /etc/passwd"
+            )
+            .is_err()
+        );
+        assert!(
+            inspect_zipinfo_line("crw-r--r--  3.0 unx        0 bx stor 26-Nov-22 10:27 devnull")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn extract_budget_blocks_bombs_and_excessive_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("archive.zip");
+        std::fs::write(&probe, b"zip").unwrap();
+
+        // 1 MiB archive expanding to 500 MiB (500x > 100x and > 128 MiB) must be blocked.
+        let bomb_err = check_extract_budget(1024 * 1024, 1, 500 * 1024 * 1024, &probe).unwrap_err();
+        assert!(bomb_err.contains("ratio"), "unexpected err: {bomb_err}");
+
+        // Too many entries must be blocked.
+        let entries_err =
+            check_extract_budget(1024, MAX_ARCHIVE_ENTRIES + 1, 1024, &probe).unwrap_err();
+        assert!(
+            entries_err.contains("entries"),
+            "unexpected err: {entries_err}"
+        );
+
+        // Normal 10 MiB archive expanding to 20 MiB passes cleanly.
+        assert!(check_extract_budget(10 * 1024 * 1024, 25, 20 * 1024 * 1024, &probe).is_ok());
+
+        // Exceeding available disk space must be blocked.
+        assert!(check_extract_budget(u64::MAX / 2, 1, u64::MAX, &probe).is_err());
     }
 }

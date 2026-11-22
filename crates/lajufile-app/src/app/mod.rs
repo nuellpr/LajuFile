@@ -466,9 +466,7 @@ impl LajuFileApp {
                 self.hf_files = None;
                 if let Some(first) = files.first() {
                     self.add_draft.file_name = first.file_name.clone();
-                    if let Some(sha) = &first.sha256 {
-                        self.add_draft.expected_sha256 = sha.clone();
-                    }
+                    self.add_draft.expected_sha256 = first.sha256.clone().unwrap_or_default();
                     self.add_draft.hf_selected = Some(0);
                 }
                 let count = files.len();

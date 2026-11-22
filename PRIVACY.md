@@ -1,6 +1,6 @@
 # Privacy Policy — LajuFile & LajuFile Capture
 
-**Last updated:** November 17, 2026  
+**Last updated:** November 22, 2026  
 **Repository:** https://github.com/nuellpr/LajuFile
 
 ---
@@ -26,11 +26,11 @@ To hand off downloads from your browser to LajuFile Desktop running on your own 
    - **YouTube player integration (`content.js`):** Runs on YouTube pages solely to display the optional **"Download with LajuFile"** floating quality picker on `/watch` pages and forward your explicit quality choice to your local LajuFile Desktop bridge.
    - **Local loopback (`http://127.0.0.1/*`):** Used exclusively to communicate with your own LajuFile Desktop bridge protected by a 64-character hexadecimal access token (`x-lajufile-token`).
 
-4. **Active Tab Hostname (`activeTab` permission)**  
-   Accessed only when you open the extension popup, solely to read the current site's hostname so you can toggle **"Pause on site"**.
+4. **Active Tab Hostname & On-Demand Media Sniffing (`activeTab` permission)**  
+   Accessed only when you open the extension popup, solely to read the current site's hostname so you can toggle **"Pause on site"** and inspect direct media links on the active tab on demand.
 
 5. **Local Extension Preferences (`storage` permission)**  
-   Stores only your local configuration (`port`, `token`, `autoCapture`, `excludedDomains`, `fileTypes`) locally inside browser storage (`chrome.storage.local` / `browser.storage.local`).
+   Stores only your local configuration (`port`, `token`, `autoCapture`, `excludedDomains`, `fileTypes`) locally inside browser storage (`chrome.storage.local` / `browser.storage.local`). Inside LajuFile Desktop, sensitive settings (`hf_token` and credentialed `proxy_url`) are encrypted at rest alongside stored cookies.
 
 6. **Notifications & Context Menu (`notifications`, `contextMenus`)**  
    Used purely for local pairing/queue status notifications and adding **"Download with LajuFile"** to link context menus.
@@ -64,7 +64,7 @@ https://github.com/nuellpr/LajuFile/issues
 Seluruh komunikasi antara ekstensi browser dan aplikasi **LajuFile Desktop** berjalan **secara lokal saja** melalui loopback `http://127.0.0.1:<port>` yang dilindungi token akses heksadesimal 64 karakter:
 - **URL unduhan, referrer, nama file, & cookie sesi URL tersebut** hanya dikirim lokal ke aplikasi LajuFile Desktop di komputer Anda sendiri agar unduhan terautentikasi berhasil.
 - **Data pengaturan ekstensi** (port, token, daftar domain dikecualikan, filter ekstensi file) disimpan lokal di penyimpanan browser.
-- **`activeTab`** hanya dibaca saat Anda membuka popup ekstensi untuk menampilkan tombol **Pause on site** pada situs aktif.
+- **`activeTab`** hanya dibaca saat Anda membuka popup ekstensi untuk menampilkan tombol **Pause on site** dan deteksi media on-demand pada tab aktif.
 
 Pertanyaan atau laporan terkait privasi dapat dikirim melalui:  
 https://github.com/nuellpr/LajuFile/issues

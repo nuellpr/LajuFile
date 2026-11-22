@@ -424,16 +424,47 @@ pub fn local_minutes_since_midnight() -> Option<u16> {
         unsafe { GetLocalTime(&mut st) };
         Some(st.hour * 60 + st.minute)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let out = std::process::Command::new("date")
-            .arg("+%H:%M")
-            .output()
-            .ok()?;
-        if !out.status.success() {
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Tm {
+            tm_sec: std::ffi::c_int,
+            tm_min: std::ffi::c_int,
+            tm_hour: std::ffi::c_int,
+            tm_mday: std::ffi::c_int,
+            tm_mon: std::ffi::c_int,
+            tm_year: std::ffi::c_int,
+            tm_wday: std::ffi::c_int,
+            tm_yday: std::ffi::c_int,
+            tm_isdst: std::ffi::c_int,
+            tm_gmtoff: std::ffi::c_long,
+            tm_zone: *const std::ffi::c_char,
+            _pad: [u64; 4],
+        }
+        unsafe extern "C" {
+            fn time(tloc: *mut std::ffi::c_long) -> std::ffi::c_long;
+            fn localtime_r(timep: *const std::ffi::c_long, result: *mut Tm) -> *mut Tm;
+        }
+        let now = unsafe { time(std::ptr::null_mut()) };
+        if now < 0 {
             return None;
         }
-        lajufile_core::settings::parse_hhmm(&String::from_utf8_lossy(&out.stdout))
+        let mut tm = std::mem::MaybeUninit::<Tm>::zeroed();
+        let ptr = unsafe { localtime_r(&now, tm.as_mut_ptr()) };
+        if ptr.is_null() {
+            return None;
+        }
+        let tm = unsafe { tm.assume_init() };
+        if (0..24).contains(&tm.tm_hour) && (0..60).contains(&tm.tm_min) {
+            Some((tm.tm_hour as u16) * 60 + (tm.tm_min as u16))
+        } else {
+            None
+        }
+    }
+    #[cfg(all(not(windows), not(unix)))]
+    {
+        None
     }
 }
 
@@ -444,10 +475,9 @@ pub fn trigger_power_action(action: QueueCompleteAction) {
         QueueCompleteAction::None | QueueCompleteAction::ExitApp => {}
         QueueCompleteAction::Sleep => {
             #[cfg(windows)]
-            {
-                let _ = Command::new("rundll32.exe")
-                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
-                    .spawn();
+            unsafe {
+                // Direct Win32 call avoids rundll32 passing HWND as bHibernate (which hibernates).
+                let _ = windows_sys::Win32::System::Power::SetSuspendState(false, false, false);
             }
             #[cfg(target_os = "macos")]
             {
@@ -461,9 +491,10 @@ pub fn trigger_power_action(action: QueueCompleteAction) {
         QueueCompleteAction::Shutdown => {
             #[cfg(windows)]
             {
-                let _ = Command::new("shutdown")
-                    .args(["/s", "/t", "5", "/c", "LajuFile downloads completed"])
-                    .spawn();
+                let mut cmd = Command::new("shutdown");
+                cmd.args(["/s", "/t", "5", "/c", "LajuFile downloads completed"]);
+                crate::tools::no_window(&mut cmd);
+                let _ = cmd.spawn();
             }
             #[cfg(target_os = "macos")]
             {
@@ -533,5 +564,11 @@ mod tests {
         assert!(acquire_unix_lock(&lock_path).unwrap_err());
         drop(first);
         assert!(acquire_unix_lock(&lock_path).is_ok());
+    }
+
+    #[test]
+    fn local_minutes_since_midnight_is_within_day_bounds() {
+        let mins = local_minutes_since_midnight().expect("local clock available");
+        assert!(mins < 24 * 60);
     }
 }

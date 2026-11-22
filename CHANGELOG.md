@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.0
+
+### Stabilitas Mesin Unduhan & Concurrency
+- **Perbaikan Resume Pasca Dynamic Splitting:** `validate_segments()` kini memvalidasi keunikan `idx` dan kesinambungan rentang `0..size` yang diurutkan berdasarkan `start`, sehingga resume setelah *work stealing* tidak lagi mengulang unduhan dari awal.
+- **Sinkronisasi Work Stealing Tanpa Race Condition:** Mengganti pasangan atomik terpisah donor/thief dengan `Mutex<SegmentBounds { end, done, reserved }>` per segmen dan penyatuan jalur `flush_segment_buf`, menghilangkan risiko pemotongan *buffer* atau korupsi byte saat segmen dibelah di tengah pengunduhan.
+- **Move File Aman Lintas Filesystem:** Menyatukan `Command::MoveFile` ke `move_file_no_overwrite` agar pemindahan berkas tidak pernah menimpa file tujuan secara diam-diam (termasuk lintas partisi).
+
+### Keamanan & Proteksi Sistem
+- **Enkripsi Kredensial `settings.json` at Rest:** `hf_token` dan `proxy_url` berkredensial kini dienkripsi otomatis pada disk dengan prefix `enc:v1:` (Windows DPAPI / `HMAC-SHA256` + `CTR` di Unix) lengkap dengan migrasi transparan dari konfigurasi lama.
+- **Hardening Auto-Extract (*Fail-Closed* & Anti-Zip-Bomb):** Inspeksi `tar -tvf` dan `unzip -Z` kini *fail-closed*, memblokir seluruh mode entri selain file reguler/direktori (`-`/`d`), menambahkan batas jumlah entri (`50.000`), batas rasio dekompresi (`>100x` di atas `128 MiB`), pengecekan ruang disk sebelum ekstraksi, `LC_ALL=C`, serta menyembunyikan jendela konsol `tar` di Windows.
+
+### Scheduler, Video, Platform & Ekstensi
+- **Penegakan Scheduler & Aksi Selesai Antrean:** `pump_queue()` kini menghormati jendela jadwal aktif (`is_schedule_blocking()`), mengevaluasi jadwal langsung saat startup maupun perubahan pengaturan, dan menunda aksi **On Queue Complete** (*Exit/Sleep/Shutdown*) hingga seluruh verifikasi **SHA-256** dan **Auto-Extract** di latar belakang selesai (`in_flight_post_tasks`).
+- **Batas Kecepatan Per-Item untuk Video:** `yt-dlp` kini menerapkan batas terketat antara batas global dan `speed_limit_kbps` per unduhan.
+- **Platform Native Windows & Unix:** Mengganti `rundll32 powrprof.dll,SetSuspendState` dengan pemanggilan Win32 langsung `SetSuspendState(false, false, false)` (mencegah mode *hibernate* tak disengaja), menyembunyikan jendela konsol `shutdown`, dan mengganti subproses `date +%H:%M` di Unix dengan FFI libc `time` + `localtime_r`.
+- **UI HuggingFace & Ekstensi Browser:** Otomatis mereset/memperbarui kolom `expected_sha256` saat mengganti file atau URL HuggingFace; memuat `common.js` sebelum `interceptor.js` (menghapus duplikasi helper), memfilter hanya klik primer tepercaya (`event.isTrusted && event.button === 0`), menangani `decodeURIComponent` secara aman serta balasan `sniff-page-media` pada iframe; menambahkan logo toko Edge `300×300` (`assets/icons/icon-300.png`) dan menyelaraskan panduan instalasi Firefox ke paket rilis `lajufile-extension-firefox.zip`.
+
 ## v1.0.9
 
 ### Fitur Baru

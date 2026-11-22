@@ -190,11 +190,15 @@ pub fn add_dialog(
                 egui::TextEdit::singleline(&mut draft.url).hint_text("https://..."),
             );
             if url.changed() {
+                let had_hf = !draft.hf_files.is_empty();
                 draft.formats.clear();
                 draft.quality = None;
                 draft.quality_size = None;
                 draft.hf_files.clear();
                 draft.hf_selected = None;
+                if had_hf {
+                    draft.expected_sha256.clear();
+                }
             }
             if *focus {
                 url.request_focus();
@@ -284,9 +288,7 @@ pub fn add_dialog(
                         draft.hf_selected = Some(selected);
                         let chosen = &draft.hf_files[selected];
                         draft.file_name = chosen.file_name.clone();
-                        if let Some(sha) = &chosen.sha256 {
-                            draft.expected_sha256 = sha.clone();
-                        }
+                        draft.expected_sha256 = chosen.sha256.clone().unwrap_or_default();
                     }
                 }
             }
