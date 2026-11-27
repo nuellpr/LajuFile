@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use lajufile_core::naming::sanitize_file_name;
 use lajufile_core::paths::ensure_dir;
-use lajufile_core::video::{self, VideoListing, is_audio_only_selector};
+use lajufile_core::video::{self, VideoListing, VideoMode, parse_video_spec};
 use url::Url;
 
 use crate::tools;
@@ -18,7 +18,7 @@ use crate::tools;
 pub(super) struct VideoRun {
     pub(super) child: std::process::Child,
     pub(super) save_path: PathBuf,
-    pub(super) audio_only: bool,
+    pub(super) mode: VideoMode,
     pub(super) started_at: std::time::SystemTime,
     pub(super) last_error: Arc<Mutex<String>>,
     pub(super) stdout_join: Option<JoinHandle<()>>,
@@ -123,12 +123,25 @@ pub(super) fn video_file_name(url: &str) -> String {
     }
 }
 
+fn strip_media_ext(clean: &str) -> &str {
+    let lower = clean.to_ascii_lowercase();
+    for ext in [
+        ".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".opus", ".aac", ".flac", ".ogg", ".wav", ".srt",
+        ".vtt",
+    ] {
+        if lower.ends_with(ext) {
+            return &clean[..clean.len() - ext.len()];
+        }
+    }
+    clean
+}
+
 pub(super) fn resolve_video_file_name(
     requested: Option<&str>,
     url: &str,
     selector: Option<&str>,
 ) -> String {
-    let audio_only = selector.is_some_and(is_audio_only_selector);
+    let mode = parse_video_spec(selector.unwrap_or(video::DEFAULT_SELECTOR)).mode;
     let raw = requested
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -136,23 +149,35 @@ pub(super) fn resolve_video_file_name(
         .unwrap_or_else(|| video_file_name(url));
     let clean = sanitize_file_name(&raw);
     let lower = clean.to_ascii_lowercase();
-    if audio_only {
-        if [".m4a", ".mp3", ".opus", ".aac", ".flac", ".ogg", ".wav"]
-            .iter()
-            .any(|ext| lower.ends_with(ext))
-        {
-            return clean;
+    match mode {
+        VideoMode::AudioMp3 => {
+            if lower.ends_with(".mp3") {
+                return clean;
+            }
+            format!("{}.mp3", strip_media_ext(&clean))
         }
-        let stem = if lower.ends_with(".mp4") {
-            &clean[..clean.len() - 4]
-        } else {
-            clean.as_str()
-        };
-        format!("{stem}.m4a")
-    } else if lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".webm") {
-        clean
-    } else {
-        format!("{clean}.mp4")
+        VideoMode::AudioM4a => {
+            if [".m4a", ".mp3", ".opus", ".aac", ".flac", ".ogg", ".wav"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
+            {
+                return clean;
+            }
+            format!("{}.m4a", strip_media_ext(&clean))
+        }
+        VideoMode::SubtitlesOnly => {
+            if lower.ends_with(".srt") || lower.ends_with(".vtt") {
+                return clean;
+            }
+            format!("{}.srt", strip_media_ext(&clean))
+        }
+        VideoMode::Video => {
+            if lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".webm") {
+                clean
+            } else {
+                format!("{clean}.mp4")
+            }
+        }
     }
 }
 
@@ -267,12 +292,24 @@ pub(super) fn ytdlp_work_dir(preferred: Option<&Path>) -> PathBuf {
     tmp
 }
 
+/// Validates an HTTP(S) referrer URL before forwarding it to `yt-dlp --referer`.
+pub(super) fn valid_http_referrer(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return None;
+    }
+    let parsed = Url::parse(trimmed).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        .then(|| parsed.to_string())
+}
+
 /// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
 pub(super) fn ytdlp_listing(
     dir: &Path,
     data_dir: &Path,
     url: &str,
     cookie: Option<&str>,
+    referrer: Option<&str>,
     proxy: Option<&str>,
 ) -> Result<VideoListing, String> {
     let cookie_file = cookie.and_then(|c| TempCookieFile::from_netscape_in(c, data_dir));
@@ -289,6 +326,9 @@ pub(super) fn ytdlp_listing(
     }
     if let Some(cookies) = cookie_file.as_ref() {
         command.arg("--cookies").arg(cookies.path());
+    }
+    if let Some(ref_url) = valid_http_referrer(referrer) {
+        command.args(["--referer", &ref_url]);
     }
     command
         .args(["--", url])
@@ -403,7 +443,7 @@ fn ytdlp_output_template(path: &Path) -> OsString {
     }
 }
 
-/// yt-dlp arguments for one video job: merge to mp4 next to the target path.
+/// yt-dlp arguments for one video job: merge to mp4, extract audio, or download subtitles.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn video_args(
     selector: &str,
@@ -414,21 +454,39 @@ pub(super) fn video_args(
     embed_chapters: bool,
     js_runtime: Option<&str>,
     cookie_file: Option<&Path>,
+    referrer: Option<&str>,
     proxy: Option<&str>,
     limit_kbps: u64,
 ) -> Vec<OsString> {
-    let audio_only = is_audio_only_selector(selector);
+    let spec = parse_video_spec(selector);
     let mut args: Vec<OsString> = vec!["--no-playlist".into(), "--newline".into()];
-    if audio_only {
-        args.extend(["-x".into(), "--audio-format".into(), "m4a".into()]);
-    } else {
-        args.extend([
-            "--merge-output-format".into(),
-            "mp4".into(),
-            // Prefer native H.264 MP4 + AAC M4A so ffmpeg stream-copies losslessly without re-encoding.
-            "-S".into(),
-            "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
-        ]);
+    match spec.mode {
+        VideoMode::AudioMp3 => {
+            args.extend(["-x".into(), "--audio-format".into(), "mp3".into()]);
+        }
+        VideoMode::AudioM4a => {
+            args.extend(["-x".into(), "--audio-format".into(), "m4a".into()]);
+        }
+        VideoMode::SubtitlesOnly => {
+            args.extend([
+                "--skip-download".into(),
+                "--write-subs".into(),
+                "--write-auto-subs".into(),
+                "--sub-format".into(),
+                "srt/best".into(),
+                "--convert-subs".into(),
+                "srt".into(),
+            ]);
+        }
+        VideoMode::Video => {
+            args.extend([
+                "--merge-output-format".into(),
+                "mp4".into(),
+                // Prefer native H.264 MP4 + AAC M4A so ffmpeg stream-copies losslessly without re-encoding.
+                "-S".into(),
+                "ext:mp4:m4a,vcodec:h264,acodec:aac".into(),
+            ]);
+        }
     }
     args.extend(["--ffmpeg-location".into(), tools_dir.as_os_str().to_owned()]);
     if let Ok(Some(proxy_url)) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or("")) {
@@ -445,7 +503,11 @@ pub(super) fn video_args(
         args.push("--cookies".into());
         args.push(cookies.as_os_str().to_owned());
     }
-    if subtitles && !audio_only {
+    if let Some(ref_url) = valid_http_referrer(referrer) {
+        args.push("--referer".into());
+        args.push(ref_url.into());
+    }
+    if subtitles && spec.mode == VideoMode::Video {
         args.extend([
             "--write-subs".into(),
             "--write-auto-subs".into(),
@@ -454,8 +516,17 @@ pub(super) fn video_args(
             "--embed-subs".into(),
         ]);
     }
-    if embed_chapters {
+    if embed_chapters && spec.mode != VideoMode::SubtitlesOnly {
         args.push("--embed-chapters".into());
+    }
+    if let Some(range) = spec.clip.as_deref()
+        && spec.mode != VideoMode::SubtitlesOnly
+    {
+        args.extend([
+            "--download-sections".into(),
+            format!("*{range}").into(),
+            "--force-keyframes-at-cuts".into(),
+        ]);
     }
     args.extend([
         // Balance DASH/HLS fragment concurrency against YouTube throttling, keep
@@ -472,10 +543,18 @@ pub(super) fn video_args(
         // "LF <downloaded> <total> <estimate> <filename>", either total may be NA.
         "--progress-template".into(),
         "download:LF %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s %(progress.filename)s".into(),
-        "-f".into(),
-        selector.into(),
+    ]);
+    if spec.mode != VideoMode::SubtitlesOnly {
+        args.extend(["-f".into(), spec.selector.into()]);
+    }
+    let output_path = if spec.mode == VideoMode::SubtitlesOnly {
+        save_path.with_extension("")
+    } else {
+        save_path.to_path_buf()
+    };
+    args.extend([
         "-o".into(),
-        ytdlp_output_template(save_path),
+        ytdlp_output_template(&output_path),
         "--".into(),
         url.into(),
     ]);
@@ -552,7 +631,7 @@ pub(super) fn stop_video(video: &mut Option<VideoRun>) {
 
 pub(super) fn resolve_video_output(
     expected: &Path,
-    audio_only: bool,
+    mode: VideoMode,
     started_at: std::time::SystemTime,
 ) -> Option<PathBuf> {
     if expected.is_file() {
@@ -560,23 +639,51 @@ pub(super) fn resolve_video_output(
     }
     let dir = expected.parent()?;
     let stem = expected.file_stem()?.to_str()?;
-    let exts: &[&str] = if audio_only {
-        &["m4a", "mp3", "opus", "aac", "flac", "ogg", "wav"]
-    } else {
-        &["mp4", "mkv", "webm"]
-    };
     let cutoff = started_at.checked_sub(Duration::from_secs(2));
+    let is_fresh = |path: &Path| {
+        cutoff.is_none_or(|min_time| {
+            std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|mtime| mtime >= min_time)
+        })
+    };
+
+    if mode == VideoMode::SubtitlesOnly {
+        let prefix = format!("{stem}.");
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut fallback_vtt = None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&prefix) || !is_fresh(&path) {
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".srt") {
+                return Some(path);
+            }
+            if lower.ends_with(".vtt") && fallback_vtt.is_none() {
+                fallback_vtt = Some(path);
+            }
+        }
+        return fallback_vtt;
+    }
+
+    let exts: &[&str] = match mode {
+        VideoMode::AudioMp3 => &["mp3", "m4a", "opus"],
+        VideoMode::AudioM4a => &["m4a", "mp3", "opus", "aac", "flac", "ogg", "wav"],
+        VideoMode::Video => &["mp4", "mkv", "webm"],
+        VideoMode::SubtitlesOnly => unreachable!(),
+    };
     for ext in exts {
         let candidate = dir.join(format!("{stem}.{ext}"));
-        if candidate.is_file() {
-            let fresh = cutoff.is_none_or(|min_time| {
-                std::fs::metadata(&candidate)
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|mtime| mtime >= min_time)
-            });
-            if fresh {
-                return Some(candidate);
-            }
+        if candidate.is_file() && is_fresh(&candidate) {
+            return Some(candidate);
         }
     }
     None
@@ -723,6 +830,7 @@ mod tests {
             false,
             Some("node:/usr/bin/node"),
             Some(Path::new("C:/tmp/cookies.txt")),
+            Some("https://www.tiktok.com/@creator/video/123"),
             Some("http://127.0.0.1:8080"),
             512,
         );
@@ -768,6 +876,10 @@ mod tests {
             args[args.iter().position(|a| a == "--cookies").unwrap() + 1],
             "C:/tmp/cookies.txt"
         );
+        assert_eq!(
+            args[args.iter().position(|a| a == "--referer").unwrap() + 1],
+            "https://www.tiktok.com/@creator/video/123"
+        );
         assert!(!args.iter().any(|arg| arg == "--embed-subs"));
         assert!(!args.iter().any(|arg| arg == "--embed-chapters"));
         assert_eq!(args[args.iter().position(|a| a == "-N").unwrap() + 1], "4");
@@ -796,6 +908,7 @@ mod tests {
             true,
             None,
             None,
+            Some("--exec calc"),
             None,
             0,
         )
@@ -810,6 +923,9 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
         }
+        assert!(!args.iter().any(|arg| arg == "--referer"));
+        assert_eq!(valid_http_referrer(Some("file:///etc/passwd")), None);
+        assert_eq!(valid_http_referrer(Some("--exec calc")), None);
         assert!(!args.iter().any(|arg| arg == "--proxy"));
         assert!(!args.iter().any(|arg| arg == "--limit-rate"));
     }
@@ -846,8 +962,12 @@ mod tests {
 
     #[test]
     fn video_args_audio_only_extracts_m4a_without_mp4_merge() {
-        assert!(is_audio_only_selector("ba[ext=m4a]/ba"));
-        assert!(!is_audio_only_selector("bv*[height<=1080]+ba/b"));
+        assert!(lajufile_core::video::is_audio_only_selector(
+            "ba[ext=m4a]/ba"
+        ));
+        assert!(!lajufile_core::video::is_audio_only_selector(
+            "bv*[height<=1080]+ba/b"
+        ));
 
         let args: Vec<String> = video_args(
             "ba[ext=m4a]/ba",
@@ -856,6 +976,7 @@ mod tests {
             Path::new("C:/tools"),
             true,
             true,
+            None,
             None,
             None,
             None,
@@ -870,6 +991,64 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-x", "--audio-format"]));
         assert!(args.windows(2).any(|w| w == ["--audio-format", "m4a"]));
         assert!(args.windows(2).any(|w| w == ["-o", "C:/dl/song.m4a"]));
+    }
+
+    #[test]
+    fn video_args_support_mp3_clip_sections_and_subtitles_only() {
+        let mp3_args: Vec<String> = video_args(
+            "audio:mp3|clip=00:30-01:45",
+            Path::new("C:/dl/track.mp3"),
+            "https://youtu.be/x",
+            Path::new("C:/tools"),
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        assert!(mp3_args.windows(2).any(|w| w == ["--audio-format", "mp3"]));
+        assert!(mp3_args.windows(2).any(|w| w == ["-f", "ba/b"]));
+        assert!(
+            mp3_args
+                .windows(2)
+                .any(|w| w == ["--download-sections", "*00:30-01:45"])
+        );
+        assert!(mp3_args.iter().any(|a| a == "--force-keyframes-at-cuts"));
+
+        let sub_args: Vec<String> = video_args(
+            lajufile_core::video::SUBTITLES_ONLY_SELECTOR,
+            Path::new("C:/dl/talk.srt"),
+            "https://youtu.be/x",
+            Path::new("C:/tools"),
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        assert!(sub_args.iter().any(|a| a == "--skip-download"));
+        assert!(sub_args.windows(2).any(|w| w == ["--convert-subs", "srt"]));
+        assert!(!sub_args.iter().any(|a| a == "-f"));
+        assert!(sub_args.windows(2).any(|w| w == ["-o", "C:/dl/talk"]));
+
+        assert_eq!(
+            resolve_video_file_name(Some("Clip.mp4"), "https://youtu.be/x", Some("audio:mp3")),
+            "Clip.mp3"
+        );
+        assert_eq!(
+            resolve_video_file_name(Some("Clip.mp4"), "https://youtu.be/x", Some("subs:srt")),
+            "Clip.srt"
+        );
     }
 
     #[test]
@@ -909,20 +1088,34 @@ mod tests {
         let expected = dir.path().join("movie.mp4");
         let mkv = dir.path().join("movie.mkv");
         std::fs::write(&mkv, b"mkv-bytes").unwrap();
-        assert_eq!(resolve_video_output(&expected, false, started), Some(mkv));
         assert_eq!(
-            resolve_video_output(&dir.path().join("movie.m4a"), true, started),
+            resolve_video_output(&expected, VideoMode::Video, started),
+            Some(mkv)
+        );
+        assert_eq!(
+            resolve_video_output(&dir.path().join("movie.m4a"), VideoMode::AudioM4a, started),
             None,
             "audio-only job must not hijack an existing video file with the same stem"
         );
         assert_eq!(
-            resolve_video_output(&dir.path().join("absent.mp4"), false, started),
+            resolve_video_output(&dir.path().join("absent.mp4"), VideoMode::Video, started),
             None
+        );
+
+        let sub_path = dir.path().join("talk.en.srt");
+        std::fs::write(&sub_path, b"1\n00:00:00,000 --> 00:00:01,000\nhi\n").unwrap();
+        assert_eq!(
+            resolve_video_output(
+                &dir.path().join("talk.srt"),
+                VideoMode::SubtitlesOnly,
+                started
+            ),
+            Some(sub_path)
         );
 
         let stale_check = started + Duration::from_secs(60);
         assert_eq!(
-            resolve_video_output(&expected, false, stale_check),
+            resolve_video_output(&expected, VideoMode::Video, stale_check),
             None,
             "older unrelated file must not be picked as a fresh output"
         );

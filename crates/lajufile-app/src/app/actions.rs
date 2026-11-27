@@ -71,6 +71,25 @@ impl LajuFileApp {
                     self.send(Command::SetItemSpeedLimit { id, kbps });
                 }
                 Action::CancelQueueComplete => self.send(Command::CancelQueueComplete),
+                Action::RefreshLink(id) => {
+                    let target_url = self.snapshot.as_ref().and_then(|s| {
+                        s.downloads.iter().find(|d| d.id == id).map(|d| {
+                            d.referrer
+                                .as_deref()
+                                .filter(|r| r.starts_with("http://") || r.starts_with("https://"))
+                                .unwrap_or(&d.url)
+                                .to_string()
+                        })
+                    });
+                    self.send(Command::ArmLinkRefresh(id));
+                    if let Some(url) = target_url {
+                        ctx.open_url(egui::OpenUrl::new_tab(&url));
+                        self.toast = Some((
+                            "Browser opened — click download again to refresh link".to_string(),
+                            Instant::now(),
+                        ));
+                    }
+                }
                 Action::UpdateUrlAndResume { id, url } => {
                     self.send(Command::UpdateUrlAndResume { id, url });
                 }
@@ -94,6 +113,16 @@ impl LajuFileApp {
                         .cloned()
                         .unwrap_or_else(|| self.settings_draft.download_dir.clone());
                     self.folder_picker_target = Some(FolderTarget::Category(cat));
+                    self.folder_picker = Some(FolderPicker::new(start));
+                }
+                Action::BrowseDomainDir(domain) => {
+                    let start = self
+                        .settings_draft
+                        .domain_dirs
+                        .get(&domain)
+                        .cloned()
+                        .unwrap_or_else(|| self.settings_draft.download_dir.clone());
+                    self.folder_picker_target = Some(FolderTarget::Domain(domain));
                     self.folder_picker = Some(FolderPicker::new(start));
                 }
                 Action::VerifyChecksum(id) => {
@@ -271,6 +300,72 @@ impl LajuFileApp {
                 Action::OpenLanguagePicker => {
                     self.show_language_picker = true;
                 }
+                Action::OpenStatsBackup => {
+                    self.backup_feedback = None;
+                    self.show_stats_backup = true;
+                }
+                Action::ExportSettingsBackup => {
+                    let current = self
+                        .snapshot
+                        .as_ref()
+                        .map(|s| &s.settings)
+                        .unwrap_or(&self.settings_draft);
+                    match current.to_safe_backup_json() {
+                        Ok(json) => {
+                            self.last_clipboard = Some(json.clone());
+                            ctx.copy_text(json.clone());
+                            let dir = self.default_save_dir();
+                            let _ = paths::ensure_dir(&dir);
+                            let out = lajufile_core::naming::dedupe_path(
+                                &dir,
+                                "lajufile-settings-backup.json",
+                            );
+                            match std::fs::write(&out, json) {
+                                Ok(()) => {
+                                    self.backup_feedback =
+                                        Some((format!("Saved & copied: {}", out.display()), true));
+                                }
+                                Err(err) => {
+                                    self.backup_feedback = Some((
+                                        format!("Copied to clipboard (file write failed: {err})"),
+                                        true,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            self.backup_feedback = Some((format!("Export failed: {err}"), false));
+                        }
+                    }
+                }
+                Action::ImportSettingsBackup(raw) => {
+                    let base = self
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.settings.clone())
+                        .unwrap_or_else(|| self.settings_draft.clone());
+                    match base.merge_from_backup_json(&raw) {
+                        Ok(mut merged) => {
+                            normalize_settings(&mut merged);
+                            sync_autostart(merged.autostart);
+                            self.settings_draft = merged.clone();
+                            self.theme = merged.theme.clone();
+                            self.ui_scale_pct = merged.ui_scale_pct;
+                            apply_theme(ctx, &self.theme);
+                            apply_scale(ctx, self.ui_scale_pct);
+                            self.send(Command::UpdateSettings(merged));
+                            self.backup_feedback =
+                                Some(("Backup imported and applied.".to_string(), true));
+                        }
+                        Err(err) => {
+                            self.backup_feedback =
+                                Some((format!("Invalid backup JSON: {err}"), false));
+                        }
+                    }
+                }
+                Action::ToggleMiniWidget => {
+                    self.show_mini_widget = !self.show_mini_widget;
+                }
                 Action::SetLanguage(code) => {
                     self.language = code.clone();
                     self.settings_draft.language = code.clone();
@@ -303,6 +398,7 @@ impl LajuFileApp {
                     self.send(Command::VideoFormats {
                         url,
                         cookie: None,
+                        referrer: None,
                         reply,
                     });
                     self.formats = Some(rx);
@@ -447,43 +543,12 @@ impl LajuFileApp {
     }
 
     pub(super) fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
-        if dropped.is_empty() {
-            return;
+        if let Some(urls) = collect_dropped_urls(ctx) {
+            self.open_dropped_urls(urls);
         }
-        const MAX_DROP_BYTES: u64 = 512 * 1024;
-        let mut collected = Vec::new();
-        for file in dropped {
-            let path = file.path();
-            if !path.as_os_str().is_empty() {
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_ascii_lowercase());
-                let allowed_ext = matches!(ext.as_deref(), Some("url" | "txt" | "ef2" | "md"));
-                let size_ok = std::fs::metadata(path)
-                    .map(|m| m.len() <= MAX_DROP_BYTES)
-                    .unwrap_or(false);
-                if allowed_ext
-                    && size_ok
-                    && let Ok(text) = std::fs::read_to_string(path)
-                {
-                    collected.extend(extract_urls_from_text(&text));
-                }
-            } else if let Ok(bytes) = file.bytes()
-                && bytes.len() <= MAX_DROP_BYTES as usize
-                && let Ok(text) = std::str::from_utf8(&bytes)
-            {
-                collected.extend(extract_urls_from_text(text));
-            }
-        }
-        let mut unique = Vec::new();
-        let mut seen = HashSet::new();
-        for url in collected {
-            if seen.insert(url.clone()) {
-                unique.push(url);
-            }
-        }
+    }
+
+    pub(super) fn open_dropped_urls(&mut self, unique: Vec<String>) {
         match unique.len() {
             0 => {
                 self.toast = Some((
@@ -524,6 +589,10 @@ impl LajuFileApp {
                 self.show_language_picker = false;
                 return;
             }
+            if self.show_stats_backup {
+                self.show_stats_backup = false;
+                return;
+            }
             if self.show_update_dialog {
                 self.show_update_dialog = false;
                 return;
@@ -551,6 +620,7 @@ impl LajuFileApp {
             || self.show_settings
             || self.show_browser_wizard
             || self.show_language_picker
+            || self.show_stats_backup
             || self.show_update_dialog
             || self.delete_confirm.is_some()
             || self.properties_id.is_some()
@@ -674,4 +744,46 @@ impl LajuFileApp {
             self.handle_actions(ctx, actions);
         }
     }
+}
+
+pub(super) fn collect_dropped_urls(ctx: &egui::Context) -> Option<Vec<String>> {
+    ctx.input(|input| {
+        if input.raw.dropped_files.is_empty() {
+            return None;
+        }
+        const MAX_DROP_BYTES: u64 = 512 * 1024;
+        let mut collected = Vec::new();
+        for file in &input.raw.dropped_files {
+            let path = file.path();
+            if !path.as_os_str().is_empty() {
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase());
+                let allowed_ext = matches!(ext.as_deref(), Some("url" | "txt" | "ef2" | "md"));
+                let size_ok = std::fs::metadata(path)
+                    .map(|m| m.len() <= MAX_DROP_BYTES)
+                    .unwrap_or(false);
+                if allowed_ext
+                    && size_ok
+                    && let Ok(text) = std::fs::read_to_string(path)
+                {
+                    collected.extend(extract_urls_from_text(&text));
+                }
+            } else if let Ok(bytes) = file.bytes()
+                && bytes.len() <= MAX_DROP_BYTES as usize
+                && let Ok(text) = std::str::from_utf8(&bytes)
+            {
+                collected.extend(extract_urls_from_text(text));
+            }
+        }
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for url in collected {
+            if seen.insert(url.clone()) {
+                unique.push(url);
+            }
+        }
+        Some(unique)
+    })
 }

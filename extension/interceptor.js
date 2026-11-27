@@ -198,3 +198,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   setTimeout(() => sendResponse({ items: [] }), 40);
   return true;
 });
+
+function classifyAssetExtension(urlObj) {
+  const seg = urlObj.pathname.split("/").pop() || "";
+  const dot = seg.lastIndexOf(".");
+  if (dot <= 0 || dot >= seg.length - 1) return "";
+  const ext = seg.slice(dot + 1).toLowerCase();
+  if (/^(png|jpe?g|webp|gif|svg|avif|bmp|ico)$/.test(ext)) return "image";
+  if (/^(pdf|docx?|xlsx?|pptx?|epub|csv|md|txt)$/.test(ext)) return "doc";
+  if (/^(zip|rar|7z|tar|gz|tgz|bz2|xz|iso|dmg|exe|msi)$/.test(ext)) return "archive";
+  if (/^(mp4|mkv|webm|mov|m4v|mp3|m4a|flac|wav|ogg|aac)$/.test(ext)) return "media";
+  return "";
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.type !== "sniff-page-assets" || !sender || sender.id !== chrome.runtime.id) {
+    return false;
+  }
+  let isTopFrame = true;
+  try {
+    isTopFrame = window === window.top;
+  } catch {
+    isTopFrame = false;
+  }
+  if (!isTopFrame) {
+    return false;
+  }
+  const seen = new Set();
+  const items = [];
+  const pushAsset = (raw, kind, width = 0, height = 0) => {
+    if (!raw || typeof raw !== "string" || items.length >= 120) return;
+    let parsed;
+    try {
+      parsed = new URL(raw, location.href);
+    } catch {
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+    if (seen.has(parsed.href)) return;
+    seen.add(parsed.href);
+    const name = safeDecodeSegment(parsed.pathname.split("/").pop() || "") || kind;
+    items.push({
+      url: parsed.href,
+      kind,
+      label: name.slice(0, 44),
+      width: Number(width) || 0,
+      height: Number(height) || 0,
+    });
+  };
+
+  document.querySelectorAll("img").forEach((img) => {
+    pushAsset(img.currentSrc || img.src, "image", img.naturalWidth, img.naturalHeight);
+  });
+  document.querySelectorAll("a[href]").forEach((anchor) => {
+    try {
+      const parsed = new URL(anchor.href, location.href);
+      const kind = classifyAssetExtension(parsed);
+      if (kind) pushAsset(parsed.href, kind, 0, 0);
+    } catch {}
+  });
+  document.querySelectorAll("video, audio").forEach((el) => {
+    pushAsset(el.currentSrc || el.src, "media", 0, 0);
+    el.querySelectorAll("source[src]").forEach((src) => pushAsset(src.src, "media", 0, 0));
+  });
+
+  sendResponse({ items });
+  return false;
+});

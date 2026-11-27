@@ -56,6 +56,37 @@
       <div id="mediaList" class="media-list"></div>
     </section>
 
+    <section id="grabCard" class="card grab-card">
+      <div class="grab-head">
+        <span class="mini-kicker">PAGE ASSET GRABBER</span>
+        <button id="scanAssets" class="ghost-btn" type="button">Grab images &amp; files</button>
+      </div>
+      <div id="grabBody" class="hidden">
+        <div class="grab-controls">
+          <select id="grabKind" aria-label="Asset type filter">
+            <option value="all">All</option>
+            <option value="image">Images</option>
+            <option value="doc">Docs &amp; Archives</option>
+            <option value="media">Media</option>
+          </select>
+          <select id="grabMinWidth" aria-label="Minimum image width">
+            <option value="0">Any size</option>
+            <option value="200">&ge; 200px</option>
+            <option value="500">&ge; 500px</option>
+          </select>
+          <label class="grab-all">
+            <input id="grabSelectAll" type="checkbox" checked />
+            <span>All</span>
+          </label>
+        </div>
+        <div id="grabList" class="grab-list"></div>
+        <div class="grab-footer">
+          <span id="grabStatus" class="mini-hint"></span>
+          <button id="grabDownload" class="mini-primary" type="button">Download selected (0)</button>
+        </div>
+      </div>
+    </section>
+
     <section id="siteCard" class="card site-card hidden">
       <div class="site-row">
         <div>
@@ -84,7 +115,7 @@
     </div>
 
     <button id="options" class="primary" type="button">Extension Options &amp; Filters</button>
-    <footer>LajuFile Capture · v2.0.2</footer>
+    <footer>LajuFile Capture · v2.0.3</footer>
   </main>
   <script src="common.js"></script>
   <script src="popup.js"></script>

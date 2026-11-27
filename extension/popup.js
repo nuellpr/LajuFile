@@ -9,6 +9,8 @@ const {
 const $ = (id) => document.getElementById(id);
 let activeHost = "";
 let activeTab = null;
+let scannedAssets = [];
+const selectedAssetUrls = new Set();
 
 function setStatus(reachable, paired, port, hasToken) {
   $("dot").className = `dot ${reachable ? "ok" : "bad"}`;
@@ -193,4 +195,129 @@ document.addEventListener("DOMContentLoaded", () => {
     await chrome.storage.local.set({ autoCapture: event.target.checked });
     await chrome.runtime.sendMessage({ type: "config-updated" });
   });
+  $("scanAssets").addEventListener("click", () => {
+    scanPageAssets().catch(() => {});
+  });
+  $("grabKind").addEventListener("change", renderGrabList);
+  $("grabMinWidth").addEventListener("change", renderGrabList);
+  $("grabSelectAll").addEventListener("change", (event) => {
+    const checked = event.target.checked;
+    for (const item of filteredGrabAssets()) {
+      if (checked) selectedAssetUrls.add(item.url);
+      else selectedAssetUrls.delete(item.url);
+    }
+    renderGrabList();
+  });
+  $("grabDownload").addEventListener("click", () => {
+    downloadSelectedAssets().catch(() => {});
+  });
 });
+
+function filteredGrabAssets() {
+  const kindFilter = $("grabKind").value;
+  const minW = Number($("grabMinWidth").value) || 0;
+  return scannedAssets.filter((item) => {
+    if (kindFilter === "image" && item.kind !== "image") return false;
+    if (kindFilter === "doc" && item.kind !== "doc" && item.kind !== "archive") return false;
+    if (kindFilter === "media" && item.kind !== "media") return false;
+    if (minW > 0 && item.kind === "image" && item.width > 0 && item.width < minW) return false;
+    if (minW > 0 && item.kind === "image" && item.width === 0) return false;
+    return true;
+  });
+}
+
+function updateGrabDownloadButton(items) {
+  const count = items.filter((i) => selectedAssetUrls.has(i.url)).length;
+  $("grabDownload").textContent = `Download selected (${count})`;
+  $("grabDownload").disabled = count === 0;
+}
+
+function renderGrabList() {
+  const list = $("grabList");
+  list.textContent = "";
+  const items = filteredGrabAssets();
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "mini-hint";
+    empty.textContent = "No matching assets found.";
+    list.append(empty);
+  }
+  for (const item of items) {
+    const row = document.createElement("label");
+    row.className = "grab-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selectedAssetUrls.has(item.url);
+    cb.addEventListener("change", () => {
+      if (cb.checked) selectedAssetUrls.add(item.url);
+      else selectedAssetUrls.delete(item.url);
+      updateGrabDownloadButton(items);
+    });
+    const name = document.createElement("span");
+    name.textContent = item.label;
+    name.title = item.url;
+    const badge = document.createElement("span");
+    badge.className = "grab-badge";
+    badge.textContent =
+      item.kind === "image" && item.width > 0 ? `${item.width}x${item.height}` : item.kind;
+    row.append(cb, name, badge);
+    list.append(row);
+  }
+  $("grabSelectAll").checked = items.length > 0 && items.every((i) => selectedAssetUrls.has(i.url));
+  updateGrabDownloadButton(items);
+}
+
+async function scanPageAssets() {
+  const status = $("grabStatus");
+  $("grabBody").classList.remove("hidden");
+  status.textContent = "Scanning page…";
+  if (!activeTab || typeof activeTab.id !== "number" || !/^https?:/i.test(activeTab.url || "")) {
+    scannedAssets = [];
+    selectedAssetUrls.clear();
+    renderGrabList();
+    status.textContent = "Open an HTTP(S) page first.";
+    return;
+  }
+  try {
+    const res = await chrome.tabs.sendMessage(activeTab.id, { type: "sniff-page-assets" });
+    scannedAssets = res && Array.isArray(res.items) ? res.items : [];
+    selectedAssetUrls.clear();
+    for (const item of scannedAssets) selectedAssetUrls.add(item.url);
+    renderGrabList();
+    status.textContent = `${scannedAssets.length} item(s) found`;
+  } catch {
+    scannedAssets = [];
+    selectedAssetUrls.clear();
+    renderGrabList();
+    status.textContent = "Reload the tab to scan.";
+  }
+}
+
+async function downloadSelectedAssets() {
+  const targets = filteredGrabAssets().filter((i) => selectedAssetUrls.has(i.url));
+  if (targets.length === 0) return;
+  const status = $("grabStatus");
+  const btn = $("grabDownload");
+  btn.disabled = true;
+  let sent = 0;
+  let okCount = 0;
+  for (let i = 0; i < targets.length; i += 4) {
+    const batch = targets.slice(i, i + 4);
+    const replies = await Promise.all(
+      batch.map((item) =>
+        chrome.runtime
+          .sendMessage({
+            type: "capture-media",
+            url: item.url,
+            referrer: activeTab ? activeTab.url : undefined,
+          })
+          .catch(() => null),
+      ),
+    );
+    sent += batch.length;
+    okCount += replies.filter((r) => r && (r.status === 201 || r.status === 409)).length;
+    status.textContent = `Sent ${sent}/${targets.length}…`;
+  }
+  status.textContent = `Queued ${okCount}/${targets.length} in LajuFile.`;
+  btn.disabled = false;
+}

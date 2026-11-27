@@ -210,6 +210,7 @@ pub(super) fn normalize_settings(settings: &mut Settings) {
     settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
     settings.max_connections = settings.max_connections.clamp(1, 32);
     settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+    settings.auto_throttle_kbps = settings.auto_throttle_kbps.min(1_000_000);
     settings.ui_scale_pct = settings.ui_scale_pct.clamp(80, 150);
     settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
     settings.proxy_url = settings.proxy_url.trim().to_string();

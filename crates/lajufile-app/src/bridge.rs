@@ -46,6 +46,8 @@ struct FormatsRequest {
     url: String,
     #[serde(default)]
     cookie: Option<String>,
+    #[serde(default)]
+    referrer: Option<String>,
 }
 
 #[derive(Debug)]
@@ -373,6 +375,7 @@ async fn video_formats(
         .send(Command::VideoFormats {
             url: request.url,
             cookie: request.cookie,
+            referrer: request.referrer,
             reply,
         })
         .is_err()

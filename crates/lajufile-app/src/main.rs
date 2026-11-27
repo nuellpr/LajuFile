@@ -3,6 +3,25 @@
 use lajufile_app::app::LajuFileApp;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        let code = match lajufile_app::cli::parse_args(args) {
+            Ok(Some(cmd)) => lajufile_app::cli::run_cli(cmd),
+            Ok(None) => 0,
+            Err(err) => {
+                eprintln!("{err}");
+                2
+            }
+        };
+        std::process::exit(code);
+    }
+
     let Some(_instance_guard) = lajufile_app::platform::SingleInstanceGuard::acquire() else {
         return Ok(());
     };

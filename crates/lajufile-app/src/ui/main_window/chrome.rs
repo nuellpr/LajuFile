@@ -111,6 +111,15 @@ pub(super) fn draw_menu_bar(
                         actions.push(Action::OpenLanguagePicker);
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button(t("Floating mini widget")).clicked() {
+                        actions.push(Action::ToggleMiniWidget);
+                        ui.close();
+                    }
+                    if ui.button(t("Statistics & Backup...")).clicked() {
+                        actions.push(Action::OpenStatsBackup);
+                        ui.close();
+                    }
                 });
                 ui.menu_button(t("Help"), |ui| {
                     if ui.button(t("Check for updates...")).clicked() {
@@ -559,6 +568,7 @@ pub(super) fn draw_sidebar(
             for category in [
                 Category::Video,
                 Category::Music,
+                Category::Images,
                 Category::Documents,
                 Category::Programs,
                 Category::Compressed,

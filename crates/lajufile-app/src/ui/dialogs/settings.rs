@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use egui::{
     Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
-use lajufile_core::settings::{DEFAULT_CAPTURE_EXTENSIONS, DuplicatePolicy, Settings, Theme};
+use lajufile_core::settings::{DuplicatePolicy, Settings, Theme};
 
 use crate::bridge::{BridgeState, BridgeStatus};
 
@@ -244,6 +244,8 @@ fn draw_settings_tab(
             ui.add_space(12.0);
             draw_category_folders_card(ui, settings, sp, action);
             ui.add_space(12.0);
+            draw_domain_folders_card(ui, settings, sp, action);
+            ui.add_space(12.0);
             draw_performance_card(ui, settings, sp);
             ui.add_space(12.0);
             draw_browser_capture_card(ui, settings, bridge, sp, action);
@@ -260,6 +262,23 @@ fn draw_settings_tab(
             draw_save_location_card(ui, settings, sp, action);
             ui.add_space(12.0);
             draw_behavior_card(ui, settings, sp);
+            ui.add_space(12.0);
+            settings_card(ui, sp, |ui| {
+                card_kicker(ui, "STATISTICS & BACKUP", sp);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("View download stats or export/import a safe JSON backup.")
+                            .size(11.5)
+                            .color(sp.muted),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if figma_button(ui, "Statistics & Backup...", 164.0, 30.0, false, sp) {
+                            *action = Some(Action::OpenStatsBackup);
+                        }
+                    });
+                });
+            });
         }
         SettingsTab::BrowserCapture => {
             tab_header(
@@ -521,7 +540,14 @@ fn draw_category_folders_card(
     settings_card(ui, sp, |ui| {
         card_kicker(ui, "CATEGORY FOLDERS", sp);
         ui.add_space(8.0);
-        for cat in ["Video", "Music", "Documents", "Programs", "Compressed"] {
+        for cat in [
+            "Video",
+            "Music",
+            "Images",
+            "Documents",
+            "Programs",
+            "Compressed",
+        ] {
             let custom = settings.category_dirs.get(cat).cloned();
             ui.horizontal(|ui| {
                 ui.set_width(ui.available_width());
@@ -561,6 +587,115 @@ fn draw_category_folders_card(
             });
             ui.add_space(6.0);
         }
+    });
+}
+
+fn draw_domain_folders_card(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    sp: &SettingsPalette,
+    action: &mut Option<Action>,
+) {
+    settings_card(ui, sp, |ui| {
+        card_kicker(ui, "PER-SITE FOLDERS (DOMAIN ROUTING)", sp);
+        ui.add_space(6.0);
+        let mut to_remove: Option<String> = None;
+        let entries: Vec<(String, PathBuf)> = settings
+            .domain_dirs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (domain, path) in entries {
+            ui.horizontal(|ui| {
+                ui.set_width(ui.available_width());
+                ui.allocate_ui_with_layout(
+                    Vec2::new(124.0, 26.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&domain).size(11.5).strong().color(sp.text),
+                            )
+                            .truncate(),
+                        );
+                    },
+                );
+                let path_w = (ui.available_width() - 144.0).max(90.0);
+                egui::Frame::new()
+                    .fill(sp.field_bg)
+                    .stroke(Stroke::new(1.0, sp.border))
+                    .corner_radius(6)
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(path_w);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(path.display().to_string())
+                                    .size(11.0)
+                                    .color(sp.text),
+                            )
+                            .truncate(),
+                        );
+                    });
+                ui.add_space(6.0);
+                if figma_button(ui, "Pick", 54.0, 26.0, false, sp) {
+                    *action = Some(Action::BrowseDomainDir(domain.clone()));
+                }
+                ui.add_space(6.0);
+                if figma_button(ui, "Remove", 64.0, 26.0, false, sp) {
+                    to_remove = Some(domain);
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if let Some(domain) = to_remove {
+            settings.domain_dirs.remove(&domain);
+        }
+
+        let input_id = egui::Id::unique("lajufile_new_domain_dir");
+        let mut draft_domain = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<String>(input_id))
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            let field_w = (ui.available_width() - 78.0).max(150.0);
+            egui::Frame::new()
+                .fill(sp.field_bg)
+                .stroke(Stroke::new(1.0, sp.border))
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.set_width(field_w - 20.0);
+                    ui.add_sized(
+                        [ui.available_width(), 20.0],
+                        egui::TextEdit::singleline(&mut draft_domain)
+                            .frame(egui::Frame::NONE)
+                            .background_color(Color32::TRANSPARENT)
+                            .hint_text("github.com or tiktok.com"),
+                    );
+                });
+            ui.add_space(8.0);
+            if figma_button(ui, "Add", 64.0, 30.0, false, sp) {
+                let norm = lajufile_core::settings::normalize_domain_rule(&draft_domain);
+                if !norm.is_empty() {
+                    settings
+                        .domain_dirs
+                        .entry(norm.clone())
+                        .or_insert_with(|| settings.download_dir.clone());
+                    draft_domain.clear();
+                    *action = Some(Action::BrowseDomainDir(norm));
+                }
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(input_id, draft_domain));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Downloads from a matching domain (or page referrer) save into its dedicated folder.",
+            )
+            .size(10.0)
+            .color(sp.faint),
+        );
     });
 }
 
@@ -661,6 +796,63 @@ fn draw_performance_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPale
                         .hint_text("hf_... (sent only to huggingface.co)"),
                 );
             });
+        ui.add_space(10.0);
+        card_kicker(ui, "CIVITAI API TOKEN (OPTIONAL)", sp);
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(sp.field_bg)
+            .stroke(Stroke::new(1.0, sp.border))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width((ui.available_width() - 22.0).max(160.0));
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut settings.civitai_token)
+                        .password(true)
+                        .frame(egui::Frame::NONE)
+                        .background_color(Color32::TRANSPARENT)
+                        .hint_text("Civitai API key (sent only to civitai.com)"),
+                );
+            });
+        ui.add_space(12.0);
+        toggle_row(
+            ui,
+            "Auto-throttle during fullscreen games / meetings",
+            "settings_auto_throttle",
+            &mut settings.auto_throttle_fullscreen,
+            sp,
+        );
+        if settings.auto_throttle_fullscreen {
+            ui.add_space(6.0);
+            setting_row(
+                ui,
+                "Fullscreen throttle limit",
+                "Cap applied automatically while a fullscreen app is active.",
+                sp,
+                |ui| {
+                    egui::Frame::new()
+                        .fill(sp.field_bg)
+                        .stroke(Stroke::new(1.0, sp.border))
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(10, 5))
+                        .show(ui, |ui| {
+                            ui.set_width(130.0);
+                            ui.set_height(20.0);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut settings.auto_throttle_kbps)
+                                        .range(16..=1_000_000)
+                                        .speed(32),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(RichText::new("KB/s").size(9.5).color(sp.faint));
+                                });
+                            });
+                        });
+                },
+            );
+        }
     });
 }
 
@@ -807,12 +999,12 @@ fn draw_browser_capture_card(
                         egui::TextEdit::singleline(&mut settings.captured_extensions)
                             .frame(egui::Frame::NONE)
                             .background_color(Color32::TRANSPARENT)
-                            .hint_text(DEFAULT_CAPTURE_EXTENSIONS),
+                            .hint_text("Leave blank to catch all browser downloads (e.g. zip, exe, pdf, mp4)"),
                     );
                 });
             ui.add_space(8.0);
             if figma_button(ui, "Reset", 64.0, 32.0, false, sp) {
-                settings.captured_extensions = DEFAULT_CAPTURE_EXTENSIONS.to_string();
+                settings.captured_extensions.clear();
             }
         });
 
@@ -941,6 +1133,33 @@ fn draw_behavior_card(ui: &mut Ui, settings: &mut Settings, sp: &SettingsPalette
             &mut settings.auto_extract_archives,
             sp,
         );
+        ui.add_space(8.0);
+        toggle_row(
+            ui,
+            "Auto-scan executables after download (Defender / VirusTotal hash)",
+            "settings_auto_scan",
+            &mut settings.auto_scan_downloads,
+            sp,
+        );
+        ui.add_space(8.0);
+        card_kicker(ui, "VIRUSTOTAL API KEY (OPTIONAL — SHA-256 HASH ONLY)", sp);
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(sp.field_bg)
+            .stroke(Stroke::new(1.0, sp.border))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_width((ui.available_width() - 22.0).max(160.0));
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut settings.vt_api_key)
+                        .password(true)
+                        .frame(egui::Frame::NONE)
+                        .background_color(Color32::TRANSPARENT)
+                        .hint_text("Optional VirusTotal v3 API key (checks hash only)"),
+                );
+            });
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.set_width(ui.available_width());

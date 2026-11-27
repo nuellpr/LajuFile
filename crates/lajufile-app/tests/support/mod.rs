@@ -103,6 +103,7 @@ fn app(state: ServerState) -> Router {
         .route("/range0-only.bin", get(range0_only))
         .route("/slow-seg.bin", get(slow_seg))
         .route("/slow-probe.bin", get(slow_probe))
+        .route("/stalled-probe.bin", get(stalled_probe))
         .route("/auth.bin", get(auth_bin))
         .route("/chunked.bin", get(chunked_bin))
         .route("/once.bin", get(once_bin))
@@ -163,6 +164,11 @@ async fn slow_headers() -> impl axum::response::IntoResponse {
 
 async fn slow_probe() -> impl axum::response::IntoResponse {
     tokio::time::sleep(Duration::from_secs(4)).await;
+    file().await
+}
+
+async fn stalled_probe() -> impl axum::response::IntoResponse {
+    tokio::time::sleep(Duration::from_secs(11)).await;
     file().await
 }
 

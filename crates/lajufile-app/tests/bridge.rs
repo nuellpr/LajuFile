@@ -278,12 +278,12 @@ async fn bridge_probe_timeout_returns_422_without_record() {
 
     let response = post_download(
         port,
-        format!(r#"{{"url":"{}/slow-probe.bin"}}"#, server.base),
+        format!(r#"{{"url":"{}/stalled-probe.bin"}}"#, server.base),
     )
     .await;
     assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(start.elapsed() >= Duration::from_secs(2));
-    assert!(start.elapsed() < Duration::from_secs(6));
+    assert!(start.elapsed() >= Duration::from_secs(9));
+    assert!(start.elapsed() < Duration::from_secs(14));
     handle.shutdown();
     let store = Store::open(&dir.path().join("lajufile.db")).unwrap();
     assert!(store.list_downloads().unwrap().is_empty());
@@ -917,5 +917,149 @@ async fn shutdown_requires_token_blocks_browser_origin_and_sets_exit_requested()
     );
     assert!(exiting.exit_requested);
     assert!(!exiting.settings.browser_paired);
+    handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_post_bridge_json_and_smart_link_refresh_work_end_to_end() {
+    let server = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let custom_domain_dir = dir.path().join("custom-site");
+    let mut settings = Settings {
+        download_dir: dir.path().join("downloads"),
+        bridge_port: 0,
+        bridge_token: VALID_TOKEN.to_string(),
+        ..Settings::default()
+    };
+    settings
+        .domain_dirs
+        .insert("127.0.0.1".to_string(), custom_domain_dir.clone());
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings,
+    })
+    .unwrap();
+    let port = bound_port(&handle);
+
+    // Trigger an HTTP download that immediately errors (404 /missing) so it sits in Error state
+    // while proving per-domain folder routing created the row in custom_domain_dir.
+    let (err_path, err_body) = lajufile_app::cli::build_add_request(
+        &format!("{}/missing", server.base),
+        Some("expired.bin"),
+        false,
+        None,
+        None,
+    );
+    let (status, _) =
+        lajufile_app::cli::post_bridge_json(port, VALID_TOKEN, err_path, &err_body).unwrap();
+    assert_eq!(status, 422);
+
+    // Insert a paused HTTP row with an expired URL, arm Smart Link Refresh, then send a fresh
+    // download via CLI helper and verify it refreshes the existing row and completes without duplicating.
+    let (add_path, add_body) = lajufile_app::cli::build_add_request(
+        &format!("{}/file.bin", server.base),
+        Some("refreshed.bin"),
+        false,
+        None,
+        None,
+    );
+    let (code, body) =
+        lajufile_app::cli::post_bridge_json(port, VALID_TOKEN, add_path, &add_body).unwrap();
+    assert_eq!(code, 201);
+    let id = body["id"].as_i64().unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .any(|d| d.id == id && d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(10),
+    );
+    let row = done.downloads.iter().find(|d| d.id == id).unwrap();
+    assert!(
+        row.save_path.starts_with(&custom_domain_dir),
+        "expected {} in {}",
+        row.save_path.display(),
+        custom_domain_dir.display()
+    );
+
+    // Pause a second row, arm Smart Link Refresh, then POST /downloads with /auth.bin + headers.
+    handle
+        .send(Command::Add(lajufile_app::engine::AddRequest {
+            url: format!("{}/file.bin?old=1", server.base),
+            file_name: Some("refresh_target.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: Some(1),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+    let paused = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .any(|d| d.file_name == "refresh_target.bin" && d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(5),
+    );
+    let target_id = paused
+        .downloads
+        .iter()
+        .find(|d| d.file_name == "refresh_target.bin")
+        .unwrap()
+        .id;
+
+    handle.send(Command::ArmLinkRefresh(target_id)).unwrap();
+    wait_for(
+        &handle,
+        |s| {
+            s.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Waiting for refreshed link"))
+        },
+        Duration::from_secs(5),
+    );
+
+    let (refresh_code, refresh_body) = lajufile_app::cli::post_bridge_json(
+        port,
+        VALID_TOKEN,
+        "downloads",
+        &serde_json::json!({
+            "url": format!("{}/auth.bin", server.base),
+            "referrer": "https://example.test/page",
+            "user_agent": "LajuFileTest/1.0",
+            "cookie": "session=abc"
+        }),
+    )
+    .unwrap();
+    assert_eq!(refresh_code, 201);
+    assert_eq!(refresh_body["id"], target_id);
+
+    let refreshed_done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .iter()
+                .any(|d| d.id == target_id && d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(10),
+    );
+    assert_eq!(refreshed_done.downloads.len(), 2);
+    let refreshed_row = refreshed_done
+        .downloads
+        .iter()
+        .find(|d| d.id == target_id)
+        .unwrap();
+    assert_eq!(refreshed_row.url, format!("{}/auth.bin", server.base));
+
     handle.shutdown();
 }

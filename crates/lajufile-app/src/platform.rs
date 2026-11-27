@@ -566,6 +566,28 @@ pub fn local_minutes_since_midnight() -> Option<u16> {
     }
 }
 
+/// Returns true when the active foreground app is fullscreen or busy (e.g. game or presentation).
+pub fn is_fullscreen_or_busy() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::{
+            QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+            SHQueryUserNotificationState,
+        };
+        let mut state = 0i32;
+        let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+        hr == 0
+            && (state == QUNS_BUSY
+                || state == QUNS_RUNNING_D3D_FULL_SCREEN
+                || state == QUNS_PRESENTATION_MODE)
+    }
+    #[cfg(not(windows))]
+    {
+        // shortcut: fullscreen detection is Windows-only, add macOS/X11/Wayland check when needed
+        false
+    }
+}
+
 /// Triggers an OS power action after all queued downloads finish.
 pub fn trigger_power_action(action: QueueCompleteAction) {
     use std::process::Command;

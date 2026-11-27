@@ -25,6 +25,25 @@ pub struct QualityChoice {
 
 /// Selector used when no quality is picked: best video plus best audio.
 pub const DEFAULT_SELECTOR: &str = "bv*+ba/b";
+/// Special selector for MP3 audio extraction.
+pub const MP3_SELECTOR: &str = "audio:mp3";
+/// Special selector for downloading subtitles only (`.srt`).
+pub const SUBTITLES_ONLY_SELECTOR: &str = "subs:srt";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoMode {
+    Video,
+    AudioM4a,
+    AudioMp3,
+    SubtitlesOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoSpec {
+    pub mode: VideoMode,
+    pub selector: String,
+    pub clip: Option<String>,
+}
 
 /// What `yt-dlp -J` reports before a download: the title and the quality list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,9 +204,137 @@ pub fn selector_for_height(height: u32) -> String {
     format!("bv*[height<={height}]+ba/b[height<={height}]/bv*+ba")
 }
 
-/// Validates a yt-dlp `-f` format selector against a strict allowlist of expression characters.
-pub fn is_valid_video_selector(raw: &str) -> bool {
+fn parse_timestamp_secs(raw: &str) -> Option<f64> {
     let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (main, frac_secs) = match trimmed.split_once('.') {
+        Some((m, f)) => {
+            if f.is_empty() || f.len() > 3 || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let frac: f64 = format!("0.{f}").parse().ok()?;
+            (m, frac)
+        }
+        None => (trimmed, 0.0),
+    };
+    let parts: Vec<&str> = main.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    for (idx, part) in parts.iter().enumerate() {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if idx > 0 && part.len() > 2 {
+            return None;
+        }
+        if parts.len() == 1 && part.len() > 6 {
+            return None;
+        }
+        if parts.len() > 1 && idx == 0 && part.len() > 4 {
+            return None;
+        }
+    }
+    let whole: u64 = match parts.as_slice() {
+        [s] => s.parse().ok()?,
+        [m, s] => {
+            let mv: u64 = m.parse().ok()?;
+            let sv: u64 = s.parse().ok()?;
+            if sv >= 60 {
+                return None;
+            }
+            mv.checked_mul(60)?.checked_add(sv)?
+        }
+        [h, m, s] => {
+            let hv: u64 = h.parse().ok()?;
+            let mv: u64 = m.parse().ok()?;
+            let sv: u64 = s.parse().ok()?;
+            if mv >= 60 || sv >= 60 {
+                return None;
+            }
+            hv.checked_mul(3600)?
+                .checked_add(mv.checked_mul(60)?)?
+                .checked_add(sv)?
+        }
+        _ => return None,
+    };
+    let total = whole as f64 + frac_secs;
+    total.is_finite().then_some(total)
+}
+
+/// Returns true when `raw` is a valid `start-end` timestamp clip range (`end > start`).
+pub fn is_valid_clip_range(raw: &str) -> bool {
+    normalize_clip_range(raw).is_some()
+}
+
+/// Normalizes `"00:30 - 01:45"` to `"00:30-01:45"`, or `None` if invalid.
+pub fn normalize_clip_range(raw: &str) -> Option<String> {
+    let (start_raw, end_raw) = raw.trim().split_once('-')?;
+    let start_trim = start_raw.trim();
+    let end_trim = end_raw.trim();
+    let start = parse_timestamp_secs(start_trim)?;
+    let end = parse_timestamp_secs(end_trim)?;
+    (end > start).then(|| format!("{start_trim}-{end_trim}"))
+}
+
+/// Composes a `video_format` token from a base selector and an optional clip range.
+pub fn compose_video_spec(selector: &str, clip: Option<&str>) -> String {
+    let base = selector.trim();
+    let base = if base.is_empty() {
+        DEFAULT_SELECTOR
+    } else {
+        base
+    };
+    if base == SUBTITLES_ONLY_SELECTOR {
+        return base.to_string();
+    }
+    match clip.and_then(normalize_clip_range) {
+        Some(range) => format!("{base}|clip={range}"),
+        None => base.to_string(),
+    }
+}
+
+/// Parses a stored `video_format` token into mode, yt-dlp `-f` selector, and clip range.
+pub fn parse_video_spec(raw: &str) -> VideoSpec {
+    let trimmed = raw.trim();
+    let (base_raw, clip) = match trimmed.split_once("|clip=") {
+        Some((b, c)) => (b.trim(), normalize_clip_range(c)),
+        None => (trimmed, None),
+    };
+    if base_raw == SUBTITLES_ONLY_SELECTOR {
+        return VideoSpec {
+            mode: VideoMode::SubtitlesOnly,
+            selector: String::new(),
+            clip: None,
+        };
+    }
+    if base_raw == MP3_SELECTOR {
+        return VideoSpec {
+            mode: VideoMode::AudioMp3,
+            selector: "ba/b".to_string(),
+            clip,
+        };
+    }
+    let selector = if base_raw.is_empty() {
+        DEFAULT_SELECTOR.to_string()
+    } else {
+        base_raw.to_string()
+    };
+    let mode = if is_audio_only_base(&selector) {
+        VideoMode::AudioM4a
+    } else {
+        VideoMode::Video
+    };
+    VideoSpec {
+        mode,
+        selector,
+        clip,
+    }
+}
+
+fn is_valid_base_selector(trimmed: &str) -> bool {
     !trimmed.is_empty()
         && trimmed.len() <= 128
         && !trimmed.starts_with('-')
@@ -215,11 +362,36 @@ pub fn is_valid_video_selector(raw: &str) -> bool {
         })
 }
 
+/// Validates a yt-dlp `-f` format selector (with optional `|clip=start-end`) against an allowlist.
+pub fn is_valid_video_selector(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 160 {
+        return false;
+    }
+    let (base, clip_ok) = match trimmed.split_once("|clip=") {
+        Some((b, c)) => (b.trim(), is_valid_clip_range(c)),
+        None => (trimmed, true),
+    };
+    if !clip_ok {
+        return false;
+    }
+    base == MP3_SELECTOR || base == SUBTITLES_ONLY_SELECTOR || is_valid_base_selector(base)
+}
+
+fn is_audio_only_base(base: &str) -> bool {
+    let lower = base.to_ascii_lowercase();
+    lower == MP3_SELECTOR
+        || ((lower.contains("ba") || lower.contains("bestaudio"))
+            && !(lower.contains("bv") || lower.contains("bestvideo")))
+}
+
 /// Returns true when the yt-dlp format selector targets audio-only output.
 pub fn is_audio_only_selector(selector: &str) -> bool {
-    let lower = selector.to_ascii_lowercase();
-    (lower.contains("ba") || lower.contains("bestaudio"))
-        && !(lower.contains("bv") || lower.contains("bestvideo"))
+    let base = selector
+        .trim()
+        .split_once("|clip=")
+        .map_or(selector.trim(), |(b, _)| b.trim());
+    is_audio_only_base(base)
 }
 
 const PLAYLIST_HOSTS: &[&str] = &[
@@ -381,7 +553,42 @@ mod tests {
         assert!(!is_valid_video_selector("--exec calc"));
         assert!(!is_valid_video_selector("-o evil"));
         assert!(!is_valid_video_selector("best\n--exec calc"));
-        assert!(!is_valid_video_selector(&"a".repeat(129)));
+        assert!(!is_valid_video_selector(&"a".repeat(161)));
+        assert!(is_valid_video_selector(MP3_SELECTOR));
+        assert!(is_valid_video_selector(SUBTITLES_ONLY_SELECTOR));
+        assert!(is_valid_video_selector("bv*+ba/b|clip=00:10-01:30"));
+        assert!(!is_valid_video_selector("bv*+ba/b|clip=01:30-00:10"));
+        assert!(!is_valid_video_selector("bv*+ba/b|clip=0-10 --exec calc"));
+    }
+
+    #[test]
+    fn clip_ranges_and_extra_video_modes_parse_cleanly() {
+        assert!(is_valid_clip_range("00:10-00:45"));
+        assert!(is_valid_clip_range("1:02:03.5-1:05:00"));
+        assert!(!is_valid_clip_range("30-30"));
+        assert!(!is_valid_clip_range("45-10"));
+        assert!(!is_valid_clip_range("01:65-02:00"));
+
+        assert_eq!(
+            compose_video_spec("bv*+ba/b", Some(" 00:30 - 01:45 ")),
+            "bv*+ba/b|clip=00:30-01:45"
+        );
+        assert_eq!(
+            compose_video_spec(SUBTITLES_ONLY_SELECTOR, Some("00:30-01:45")),
+            SUBTITLES_ONLY_SELECTOR
+        );
+
+        let mp3 = parse_video_spec("audio:mp3|clip=00:10-00:25");
+        assert_eq!(mp3.mode, VideoMode::AudioMp3);
+        assert_eq!(mp3.selector, "ba/b");
+        assert_eq!(mp3.clip.as_deref(), Some("00:10-00:25"));
+        assert!(is_audio_only_selector("audio:mp3|clip=00:10-00:25"));
+
+        let subs = parse_video_spec(SUBTITLES_ONLY_SELECTOR);
+        assert_eq!(subs.mode, VideoMode::SubtitlesOnly);
+        assert!(subs.selector.is_empty());
+        assert_eq!(subs.clip, None);
+        assert!(!is_audio_only_selector(SUBTITLES_ONLY_SELECTOR));
     }
 
     #[test]

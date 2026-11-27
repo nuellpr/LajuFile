@@ -222,6 +222,8 @@ fn delete_cascades_segments() {
 fn category_mapping_is_case_insensitive() {
     assert_eq!(Category::from_file_name("movie.MP4"), Category::Video);
     assert_eq!(Category::from_file_name("song.mp3"), Category::Music);
+    assert_eq!(Category::from_file_name("photo.png"), Category::Images);
+    assert_eq!(Category::from_file_name("pic.WEBP"), Category::Images);
     assert_eq!(Category::from_file_name("report.pdf"), Category::Documents);
     assert_eq!(Category::from_file_name("setup.EXE"), Category::Programs);
     assert_eq!(
@@ -493,4 +495,44 @@ fn move_to_top_speed_limit_and_checksum_status_persist() {
     assert_eq!(updated.checksum_status.as_deref(), Some("mismatch"));
     assert_eq!(updated.status, DownloadStatus::Error);
     assert_eq!(updated.error.as_deref(), Some("SHA-256 mismatch"));
+}
+
+#[test]
+fn update_download_source_refreshes_url_and_headers_preserving_progress() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut new = sample("https://cdn.example.com/old.zip?sig=expired", 1000);
+    new.cookie_enc = Some(b"old-cookie".to_vec());
+    new.referrer = Some("https://example.com/old".to_string());
+    let id = store.insert_download(&new).unwrap();
+    store.update_progress(id, 0, 400).unwrap();
+    store
+        .update_status(id, DownloadStatus::Error, Some("HTTP 403"))
+        .unwrap();
+
+    store
+        .update_download_source(
+            id,
+            "https://cdn2.example.com/new.zip?sig=fresh",
+            Some(b"fresh-cookie"),
+            Some("https://example.com/new"),
+            Some("Browser/2.0"),
+        )
+        .unwrap();
+
+    let refreshed = store.get_download(id).unwrap();
+    assert_eq!(refreshed.url, "https://cdn2.example.com/new.zip?sig=fresh");
+    assert_eq!(refreshed.final_url, None);
+    assert_eq!(refreshed.etag, None);
+    assert_eq!(refreshed.last_modified, None);
+    assert_eq!(refreshed.error, None);
+    assert_eq!(refreshed.downloaded, 400);
+    assert_eq!(
+        refreshed.cookie_enc.as_deref(),
+        Some(b"fresh-cookie".as_slice())
+    );
+    assert_eq!(
+        refreshed.referrer.as_deref(),
+        Some("https://example.com/new")
+    );
+    assert_eq!(refreshed.user_agent.as_deref(), Some("Browser/2.0"));
 }

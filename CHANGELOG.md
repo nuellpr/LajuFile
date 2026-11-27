@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.3
+
+### Ekstensi Browser & Penangkapan Universal
+- **Auto-Capture Semua Tipe File:** Filter ekstensi browser & desktop default dikosongkan (`""` serta migrasi otomatis dari daftar default lama) agar seluruh unduhan HTTP/HTTPS (termasuk `.png`, `.jpg`, `.md`, dan berkas tanpa ekstensi) tertangkap ke LajuFile, disertai kenaikan timeout probe lokal ke 10 detik dan konteks menu klik kanan lebih luas (`link`, `image`, `video`, `audio`).
+- **Tombol Video Mengambang Universal:** Menambahkan tombol mengambang *"Download with LajuFile"* di pojok kanan atas pemutar video di berbagai situs (YouTube Watch/Shorts, TikTok, Instagram, X/Twitter, Facebook, embed, stream HLS/DASH, dan HTML5 `<video>`) lengkap dengan penerusan `--referer` tervalidasi untuk `yt-dlp`.
+- **Bulk Gallery / Page Asset Grabber:** Tab pemindaian aset pada popup ekstensi (`sniff-page-assets`) untuk mengumpulkan gambar beserta resolusinya, dokumen, dan arsip lalu memasukkannya ke antrean secara massal.
+
+### Fitur Desktop, Sumber Pintar, Keamanan & CLI
+- **GitHub Releases & Civitai Smart Downloader:** *Add Download* kini mendeteksi halaman GitHub Releases (`/releases`, `/releases/tag/...`, `/releases/latest`) dan model Civitai (`civitai.com/models/...`) di samping HuggingFace, lengkap dengan ranking aset OS/arsitektur, parsing checksum `.sha256`/`SHA256SUMS`, serta `civitai_token` terenkripsi.
+- **Kategori `Images` & Per-Domain Folder Routing:** Kategori baru **Images** plus aturan direktori simpan khusus per domain/subdomain.
+- **Mode Video Ekstra & Smart Link Refresh:** Pilihan konversi audio **MP3**, unduh subtitle saja (`.srt`), pemotongan bagian clip (`--download-sections`), serta **Smart Link Refresh** untuk memperbarui URL & header kedaluwarsa tanpa menghapus progres segmen yang sudah terunduh.
+- **Auto-Throttle Mode Gaming / Meeting:** Mendeteksi aplikasi *fullscreen* / *presentation* Windows (`SHQueryUserNotificationState`) dan otomatis membatasi kecepatan global sesuai `auto_throttle_kbps` (default `512` KB/s).
+- **Auto-Scan Keamanan:** Pemindaian otomatis berkas executable/installer selesai melalui Windows Defender (`MpCmdRun.exe`) serta lookup hash SHA-256 opsional via API VirusTotal.
+- **Statistik Unduhan, Backup Pengaturan & Floating Mini Widget:** Dialog **Statistics & Backup** (rekam kecepatan puncak, ringkasan 7/30 hari, kategori, serta ekspor/impor JSON tanpa rahasia/token) dan jendela mini *always-on-top* dengan tombol buka cepat serta *drag-and-drop* berkas `.url`/`.txt`/`.ef2`/`.md`.
+- **CLI Ringan:** Dukungan perintah `lajufile add <url> [--name] [--video] [--format] [--clip]` dan `lajufile status`.
+
 ## v2.0.1
 
 ### Integrasi Microsoft Edge Add-ons

@@ -49,7 +49,7 @@ impl EngineState {
         if download.kind == "video" {
             return self.spawn_video(download, generation, cookie);
         }
-        let authorization = self.hf_authorization_for(&url);
+        let authorization = self.auth_header_for(&url);
         let options = RequestOptions {
             user_agent: download
                 .user_agent
@@ -220,7 +220,7 @@ impl EngineState {
             .as_deref()
             .filter(|s| lajufile_core::video::is_valid_video_selector(s))
             .unwrap_or(DEFAULT_SELECTOR);
-        let audio_only = is_audio_only_selector(selector);
+        let mode = lajufile_core::video::parse_video_spec(selector).mode;
         let started_at = std::time::SystemTime::now();
         let work_dir = video::ytdlp_work_dir(download.save_path.parent());
         let proxy = self.configured_proxy();
@@ -236,6 +236,7 @@ impl EngineState {
                 self.settings.video_chapters,
                 js_runtime.as_deref(),
                 cookie_file.as_ref().map(video::TempCookieFile::path),
+                download.referrer.as_deref(),
                 proxy.as_deref(),
                 effective_video_speed_limit_kbps(
                     self.settings.global_speed_limit_kbps,
@@ -320,7 +321,7 @@ impl EngineState {
                 video: Some(video::VideoRun {
                     child,
                     save_path: download.save_path.clone(),
-                    audio_only,
+                    mode,
                     started_at,
                     last_error,
                     stdout_join,
@@ -361,7 +362,7 @@ impl EngineState {
                 // The row reserved its temp name before the run; a finished video leaves it empty.
                 let _ = std::fs::remove_file(temp_path_for(&run.save_path));
                 if let Some(actual_path) =
-                    video::resolve_video_output(&run.save_path, run.audio_only, run.started_at)
+                    video::resolve_video_output(&run.save_path, run.mode, run.started_at)
                 {
                     if actual_path != run.save_path
                         && let Some(actual_name) = actual_path.file_name().and_then(|n| n.to_str())
@@ -475,6 +476,7 @@ impl EngineState {
     }
 
     pub(super) fn resume(&mut self, id: i64) {
+        self.clear_pending(id);
         if let Ok(download) = self.store.get_download(id) {
             if matches!(
                 download.status,
@@ -559,6 +561,7 @@ impl EngineState {
     }
 
     pub(super) fn update_url_and_resume(&mut self, id: i64, raw_url: String) {
+        self.clear_pending(id);
         let parsed = match ssrf::validate_http_url(&raw_url) {
             Ok(url) => url,
             Err(error) => {
@@ -586,6 +589,27 @@ impl EngineState {
         self.cache_dirty = true;
         self.message = Some("URL updated, resuming download".to_string());
         self.resume(id);
+    }
+
+    pub(super) fn arm_link_refresh(&mut self, id: i64) {
+        let Ok(download) = self.store.get_download(id) else {
+            return;
+        };
+        if download.kind != "http"
+            || !matches!(
+                download.status,
+                DownloadStatus::Paused | DownloadStatus::Error
+            )
+        {
+            self.message =
+                Some("Only paused or errored HTTP downloads can refresh links".to_string());
+            return;
+        }
+        self.pending_refresh = Some((id, Instant::now() + Duration::from_secs(300)));
+        self.message = Some(format!(
+            "Waiting for refreshed link for {} — re-click download in your browser",
+            download.file_name
+        ));
     }
 
     pub(super) fn move_rename(&mut self, id: i64, raw_name: String, target_dir: Option<PathBuf>) {
@@ -727,8 +751,10 @@ impl EngineState {
         settings.max_concurrent = settings.max_concurrent.clamp(1, 10);
         settings.max_connections = settings.max_connections.clamp(1, 32);
         settings.global_speed_limit_kbps = settings.global_speed_limit_kbps.min(1_000_000);
+        settings.auto_throttle_kbps = settings.auto_throttle_kbps.min(1_000_000);
         settings.bridge_port = settings.bridge_port.clamp(1024, 65_535);
         settings.proxy_url = settings.proxy_url.trim().to_string();
+        settings.peak_speed_bps = settings.peak_speed_bps.max(self.settings.peak_speed_bps);
         settings.last_update_check_ms = settings
             .last_update_check_ms
             .max(self.settings.last_update_check_ms);
@@ -754,11 +780,20 @@ impl EngineState {
             || settings.schedule_stop != self.settings.schedule_stop;
         match settings.save(&self.data_dir) {
             Ok(()) => {
-                self.limiter.set_kbps(settings.global_speed_limit_kbps);
+                if !settings.auto_throttle_fullscreen {
+                    self.auto_throttle_active = false;
+                }
+                let eff = effective_global_speed_limit_kbps(
+                    settings.global_speed_limit_kbps,
+                    self.auto_throttle_active,
+                    settings.auto_throttle_kbps,
+                );
+                self.limiter.set_kbps(eff);
                 if let Ok(mut token) = self.bridge_token.write() {
                     *token = settings.bridge_token.clone();
                 }
                 self.settings = settings;
+                self.peak_dirty = false;
                 if schedule_changed {
                     self.schedule_was_active = None;
                     self.last_schedule_check = Instant::now() - Duration::from_secs(10);
@@ -773,6 +808,10 @@ impl EngineState {
     }
 
     pub(super) fn shutdown(&mut self) {
+        if self.peak_dirty {
+            let _ = self.settings.save(&self.data_dir);
+            self.peak_dirty = false;
+        }
         if let Some(bridge) = self.bridge.take() {
             bridge.shutdown();
         }
@@ -792,6 +831,21 @@ impl EngineState {
             }
             self.clear_pending(id);
         }
+    }
+}
+
+pub(super) fn effective_global_speed_limit_kbps(
+    global_kbps: u64,
+    throttle_active: bool,
+    throttle_kbps: u64,
+) -> u64 {
+    if !throttle_active || throttle_kbps == 0 {
+        return global_kbps;
+    }
+    if global_kbps == 0 {
+        throttle_kbps
+    } else {
+        global_kbps.min(throttle_kbps)
     }
 }
 
@@ -817,7 +871,7 @@ fn segmented_error(error: SegmentedError) -> DownloadError {
 
 #[cfg(test)]
 mod tests {
-    use super::effective_video_speed_limit_kbps;
+    use super::{effective_global_speed_limit_kbps, effective_video_speed_limit_kbps};
 
     #[test]
     fn video_speed_limit_uses_lowest_nonzero_cap() {
@@ -826,5 +880,14 @@ mod tests {
         assert_eq!(effective_video_speed_limit_kbps(1024, 0), 1024);
         assert_eq!(effective_video_speed_limit_kbps(1024, 256), 256);
         assert_eq!(effective_video_speed_limit_kbps(256, 1024), 256);
+    }
+
+    #[test]
+    fn global_auto_throttle_respects_lower_nonzero_cap() {
+        assert_eq!(effective_global_speed_limit_kbps(0, false, 512), 0);
+        assert_eq!(effective_global_speed_limit_kbps(0, true, 512), 512);
+        assert_eq!(effective_global_speed_limit_kbps(1024, true, 512), 512);
+        assert_eq!(effective_global_speed_limit_kbps(256, true, 512), 256);
+        assert_eq!(effective_global_speed_limit_kbps(1024, true, 0), 1024);
     }
 }

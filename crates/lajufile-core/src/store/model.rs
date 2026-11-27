@@ -45,6 +45,7 @@ impl DownloadStatus {
 pub enum Category {
     Video,
     Music,
+    Images,
     Documents,
     Programs,
     Compressed,
@@ -56,6 +57,7 @@ impl Category {
         match self {
             Self::Video => "video",
             Self::Music => "music",
+            Self::Images => "images",
             Self::Documents => "documents",
             Self::Programs => "programs",
             Self::Compressed => "compressed",
@@ -67,6 +69,7 @@ impl Category {
         match self {
             Self::Video => "Video",
             Self::Music => "Music",
+            Self::Images => "Images",
             Self::Documents => "Documents",
             Self::Programs => "Programs",
             Self::Compressed => "Compressed",
@@ -78,6 +81,7 @@ impl Category {
         match value {
             "video" => Ok(Self::Video),
             "music" => Ok(Self::Music),
+            "images" => Ok(Self::Images),
             "documents" => Ok(Self::Documents),
             "programs" => Ok(Self::Programs),
             "compressed" => Ok(Self::Compressed),
@@ -97,6 +101,8 @@ impl Category {
             "mp4" | "mkv" | "avi" | "mov" | "webm" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg"
             | "ts" => Self::Video,
             "mp3" | "flac" | "wav" | "aac" | "ogg" | "m4a" | "wma" | "opus" => Self::Music,
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "ico" | "avif" | "heic"
+            | "heif" | "tif" | "tiff" | "psd" => Self::Images,
             "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "rtf" | "csv"
             | "epub" | "md" => Self::Documents,
             "exe" | "msi" | "msix" | "appx" | "dll" | "bat" | "cmd" | "ps1" | "dmg" | "deb"

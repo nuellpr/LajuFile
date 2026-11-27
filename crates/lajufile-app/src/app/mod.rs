@@ -30,6 +30,7 @@ use helpers::*;
 #[derive(Debug, Clone)]
 pub(crate) enum FolderTarget {
     Category(String),
+    Domain(String),
     MoveDownload,
 }
 
@@ -55,6 +56,10 @@ pub struct LajuFileApp {
     pub(crate) show_settings: bool,
     pub(crate) show_browser_wizard: bool,
     pub(crate) show_language_picker: bool,
+    pub(crate) show_stats_backup: bool,
+    pub(crate) backup_import_buf: String,
+    pub(crate) backup_feedback: Option<(String, bool)>,
+    pub(crate) show_mini_widget: bool,
     pub(crate) show_update_dialog: bool,
     pub(crate) startup_update_checked: bool,
     pub(crate) update_state: UpdateUiState,
@@ -173,6 +178,10 @@ impl LajuFileApp {
             show_settings: false,
             show_browser_wizard: false,
             show_language_picker: false,
+            show_stats_backup: false,
+            backup_import_buf: String::new(),
+            backup_feedback: None,
+            show_mini_widget: false,
             show_update_dialog: false,
             startup_update_checked: false,
             update_state: UpdateUiState::Idle,
@@ -481,10 +490,7 @@ impl LajuFileApp {
                 }
                 let count = files.len();
                 self.add_draft.hf_files = files;
-                self.toast = Some((
-                    format!("Loaded {count} HuggingFace model file(s)"),
-                    Instant::now(),
-                ));
+                self.toast = Some((format!("Loaded {count} file(s)"), Instant::now()));
             }
             Some(Ok(Err(error))) => {
                 self.hf_files = None;
@@ -747,6 +753,9 @@ impl LajuFileApp {
             Some(FolderChoice::Select(path)) => match self.folder_picker_target.take() {
                 Some(FolderTarget::Category(cat)) => {
                     self.settings_draft.category_dirs.insert(cat, path);
+                }
+                Some(FolderTarget::Domain(domain)) => {
+                    self.settings_draft.domain_dirs.insert(domain, path);
                 }
                 Some(FolderTarget::MoveDownload) => {
                     if let Some(draft) = &mut self.properties_draft {
@@ -1054,6 +1063,32 @@ impl eframe::App for LajuFileApp {
         {
             self.handle_actions(&ctx, vec![action]);
         }
+        if self.show_stats_backup {
+            let downloads: Vec<_> = self
+                .snapshot
+                .as_ref()
+                .map(|s| s.downloads.clone())
+                .unwrap_or_default();
+            let settings = self
+                .snapshot
+                .as_ref()
+                .map(|s| s.settings.clone())
+                .unwrap_or_else(|| self.settings_draft.clone());
+            if let Some(action) = ui::dialogs::stats_backup_dialog(
+                &ctx,
+                &mut self.show_stats_backup,
+                &downloads,
+                &settings,
+                &mut self.backup_import_buf,
+                self.backup_feedback.as_ref(),
+                dark,
+            ) {
+                self.handle_actions(&ctx, vec![action]);
+            }
+        }
+        if self.show_mini_widget {
+            self.draw_mini_widget(&ctx, dark);
+        }
         if self.show_update_dialog
             && let Some(action) = ui::dialogs::update_dialog(
                 &ctx,
@@ -1228,6 +1263,146 @@ impl Drop for LajuFileApp {
         self.sleep_guard.sync(false);
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
+        }
+    }
+}
+
+impl LajuFileApp {
+    fn draw_mini_widget(&mut self, ctx: &egui::Context, dark: bool) {
+        let total_speed: u64 = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.speeds.values().sum())
+            .unwrap_or(0);
+        let active_count = self
+            .snapshot
+            .as_ref()
+            .map(|s| {
+                s.downloads
+                    .iter()
+                    .filter(|d| d.status == DownloadStatus::Downloading)
+                    .count()
+            })
+            .unwrap_or(0);
+        let throttled = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.auto_throttle_active);
+
+        let mut close_widget = false;
+        let mut open_main = false;
+        let mut dropped_urls = None;
+        let bg = if dark {
+            egui::Color32::from_rgb(0x14, 0x1A, 0x22)
+        } else {
+            egui::Color32::WHITE
+        };
+        let border = if dark {
+            egui::Color32::from_rgb(0x2D, 0x3A, 0x4A)
+        } else {
+            egui::Color32::from_rgb(0xD0, 0xD8, 0xE2)
+        };
+        let text_color = if dark {
+            egui::Color32::from_rgb(0xE7, 0xED, 0xF5)
+        } else {
+            egui::Color32::from_rgb(0x18, 0x21, 0x2B)
+        };
+        let muted = if dark {
+            egui::Color32::from_rgb(0x94, 0xA3, 0xB8)
+        } else {
+            egui::Color32::from_rgb(0x66, 0x70, 0x85)
+        };
+
+        let vp_id = egui::ViewportId::from_hash_of("lajufile_mini_widget");
+        ctx.show_viewport_immediate(
+            vp_id,
+            egui::ViewportBuilder::default()
+                .with_title("LajuFile Mini")
+                .with_inner_size([248.0, 56.0])
+                .with_always_on_top()
+                .with_decorations(false)
+                .with_resizable(false),
+            |mini_ctx, _class| {
+                if mini_ctx.input(|i| i.viewport().close_requested()) {
+                    close_widget = true;
+                }
+                dropped_urls = actions::collect_dropped_urls(mini_ctx);
+                let mut start_drag = false;
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::new()
+                            .fill(bg)
+                            .stroke(egui::Stroke::new(1.0, border))
+                            .corner_radius(10)
+                            .inner_margin(egui::Margin::symmetric(10, 8)),
+                    )
+                    .show(mini_ctx, |ui| {
+                        let drag = ui.interact(
+                            ui.max_rect(),
+                            egui::Id::unique("mini_drag"),
+                            egui::Sense::drag(),
+                        );
+                        if drag.drag_started() {
+                            start_drag = true;
+                        }
+                        ui.horizontal_centered(|ui| {
+                            let dot_color = if active_count > 0 {
+                                egui::Color32::from_rgb(0x3D, 0xDC, 0x97)
+                            } else {
+                                muted
+                            };
+                            let (dot_rect, _) = ui
+                                .allocate_exact_size(egui::Vec2::splat(10.0), egui::Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot_rect.center(), 4.5, dot_color);
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                let speed_line = if active_count > 0 {
+                                    ui::format::format_speed(Some(total_speed))
+                                } else {
+                                    "Drop URL / Ready".to_string()
+                                };
+                                ui.label(
+                                    egui::RichText::new(speed_line)
+                                        .size(12.5)
+                                        .strong()
+                                        .color(text_color),
+                                );
+                                let sub = if throttled {
+                                    format!("{active_count} active · Auto-throttled")
+                                } else {
+                                    format!("{active_count} active")
+                                };
+                                ui.label(egui::RichText::new(sub).size(10.0).color(muted));
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("×").clicked() {
+                                        close_widget = true;
+                                    }
+                                    if ui.small_button("Open").clicked() {
+                                        open_main = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+                if start_drag {
+                    mini_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            },
+        );
+
+        if close_widget {
+            self.show_mini_widget = false;
+        }
+        if open_main {
+            self.show_window(ctx);
+        }
+        if let Some(urls) = dropped_urls {
+            self.show_window(ctx);
+            self.open_dropped_urls(urls);
         }
     }
 }

@@ -2,6 +2,8 @@ mod actions;
 pub mod extract;
 pub mod huggingface;
 mod intake;
+pub mod security_scan;
+pub mod smart_sources;
 mod speed;
 mod ssrf;
 mod video;
@@ -40,7 +42,7 @@ use lajufile_core::speed::RateLimiter;
 use lajufile_core::store::{
     Category, Download, DownloadStatus, NewDownload, Segment, Store, StoreError, now_millis,
 };
-use lajufile_core::video::{DEFAULT_SELECTOR, VideoListing, is_audio_only_selector};
+use lajufile_core::video::{DEFAULT_SELECTOR, VideoListing};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -195,6 +197,7 @@ pub enum Command {
         kbps: u64,
     },
     CancelQueueComplete,
+    ArmLinkRefresh(i64),
     Redownload(i64),
     UpdateUrlAndResume {
         id: i64,
@@ -229,6 +232,7 @@ pub enum Command {
     VideoFormats {
         url: String,
         cookie: Option<String>,
+        referrer: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     },
     UpdateTools,
@@ -278,6 +282,7 @@ pub struct Snapshot {
     pub wake_seq: u64,
     pub exit_requested: bool,
     pub pending_queue_action: Option<(QueueCompleteAction, i64)>,
+    pub auto_throttle_active: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -335,6 +340,9 @@ enum Event {
         error: Option<String>,
     },
     Extracted {
+        message: String,
+    },
+    SecurityScanned {
         message: String,
     },
     Fallback {
@@ -417,6 +425,10 @@ struct EngineState {
     had_completed_in_batch: bool,
     in_flight_post_tasks: usize,
     pending_queue_action: Option<(QueueCompleteAction, i64)>,
+    pending_refresh: Option<(i64, Instant)>,
+    auto_throttle_active: bool,
+    last_throttle_check: Instant,
+    peak_dirty: bool,
 }
 
 struct PendingCapture {
@@ -479,6 +491,7 @@ fn engine_loop(
                     wake_seq: 0,
                     exit_requested: false,
                     pending_queue_action: None,
+                    auto_throttle_active: false,
                 }));
             }
             return;
@@ -542,6 +555,10 @@ fn engine_loop(
         had_completed_in_batch: false,
         in_flight_post_tasks: 0,
         pending_queue_action: None,
+        pending_refresh: None,
+        auto_throttle_active: false,
+        last_throttle_check: Instant::now() - Duration::from_secs(10),
+        peak_dirty: false,
     };
 
     state.normalize_startup();
@@ -572,6 +589,7 @@ fn engine_loop(
             state.dirty = true;
         }
         state.tick_scheduler();
+        state.tick_auto_throttle();
         state.tick_pending_queue_action();
 
         let captures_before = state.pending_captures.len();
@@ -677,6 +695,7 @@ impl EngineState {
                     self.immediate_publish = true;
                 }
             }
+            Command::ArmLinkRefresh(id) => self.arm_link_refresh(id),
             Command::Redownload(id) => self.redownload(id),
             Command::UpdateUrlAndResume { id, url } => self.update_url_and_resume(id, url),
             Command::MoveRename { id, file_name, dir } => self.move_rename(id, file_name, dir),
@@ -700,8 +719,13 @@ impl EngineState {
             }
             Command::GrabPageLinks { url, reply } => self.grab_page_links(url, reply),
             Command::LoadHfFiles { url, reply } => self.load_hf_files(url, reply),
-            Command::VideoFormats { url, cookie, reply } => {
-                self.video_formats(url, cookie, reply);
+            Command::VideoFormats {
+                url,
+                cookie,
+                referrer,
+                reply,
+            } => {
+                self.video_formats(url, cookie, referrer, reply);
             }
             Command::UpdateTools => self.update_tools(),
             Command::ToolsInstalled(result) => {
@@ -914,12 +938,19 @@ impl EngineState {
                     && let Ok(row) = self.store.get_download(id)
                 {
                     self.maybe_spawn_auto_extract(&row.save_path);
+                    self.maybe_spawn_security_scan(&row.save_path);
                 }
                 self.cache_dirty = true;
                 self.immediate_publish = true;
                 self.check_queue_complete();
             }
             Event::Extracted { message } => {
+                self.in_flight_post_tasks = self.in_flight_post_tasks.saturating_sub(1);
+                self.message = Some(message);
+                self.immediate_publish = true;
+                self.check_queue_complete();
+            }
+            Event::SecurityScanned { message } => {
                 self.in_flight_post_tasks = self.in_flight_post_tasks.saturating_sub(1);
                 self.message = Some(message);
                 self.immediate_publish = true;
@@ -987,6 +1018,11 @@ impl EngineState {
                             });
                         } else {
                             self.maybe_spawn_auto_extract(&outcome.final_path);
+                            self.maybe_spawn_security_scan(&outcome.final_path);
+                        }
+                        if self.peak_dirty {
+                            let _ = self.settings.save(&self.data_dir);
+                            self.peak_dirty = false;
                         }
                     }
                     Err(error) => {
@@ -1031,6 +1067,54 @@ impl EngineState {
             };
             let _ = events.send(Event::Extracted { message });
         });
+    }
+
+    fn maybe_spawn_security_scan(&mut self, path: &Path) {
+        if !self.settings.auto_scan_downloads || !security_scan::is_scannable_executable(path) {
+            return;
+        }
+        self.in_flight_post_tasks += 1;
+        let target = path.to_path_buf();
+        let client = self.client.clone();
+        let vt_key = (!self.settings.vt_api_key.trim().is_empty())
+            .then(|| self.settings.vt_api_key.trim().to_string());
+        let events = self.events.clone();
+        self.runtime.spawn(async move {
+            let message = security_scan::scan_file_async(client, target, vt_key).await;
+            let _ = events.send(Event::SecurityScanned { message });
+        });
+    }
+
+    pub(super) fn tick_auto_throttle(&mut self) {
+        if !self.settings.auto_throttle_fullscreen {
+            if self.auto_throttle_active {
+                self.auto_throttle_active = false;
+                self.limiter.set_kbps(self.settings.global_speed_limit_kbps);
+                self.message = Some("Auto-throttle cleared".to_string());
+                self.dirty = true;
+            }
+            return;
+        }
+        if self.last_throttle_check.elapsed() < Duration::from_secs(3) {
+            return;
+        }
+        self.last_throttle_check = Instant::now();
+        let busy = crate::platform::is_fullscreen_or_busy();
+        if busy != self.auto_throttle_active {
+            self.auto_throttle_active = busy;
+            let eff = actions::effective_global_speed_limit_kbps(
+                self.settings.global_speed_limit_kbps,
+                self.auto_throttle_active,
+                self.settings.auto_throttle_kbps,
+            );
+            self.limiter.set_kbps(eff);
+            self.message = Some(if busy {
+                "Auto-throttle active (fullscreen/gaming mode)".to_string()
+            } else {
+                "Auto-throttle cleared".to_string()
+            });
+            self.dirty = true;
+        }
     }
 
     pub(super) fn is_schedule_blocking(&self) -> bool {
@@ -1156,6 +1240,11 @@ impl EngineState {
             .or_insert_with(|| SpeedTracker::new(now, done));
         if let Some(speed) = tracker.record_at(now, done, previous_speed) {
             self.speeds.insert(id, speed);
+            let total_speed: u64 = self.speeds.values().sum();
+            if total_speed > self.settings.peak_speed_bps {
+                self.settings.peak_speed_bps = total_speed;
+                self.peak_dirty = true;
+            }
         }
     }
 
@@ -1204,6 +1293,9 @@ impl EngineState {
     fn clear_pending(&mut self, id: i64) {
         self.pending_segments
             .retain(|(download_id, _), _| *download_id != id);
+        if self.pending_refresh.is_some_and(|(target, _)| target == id) {
+            self.pending_refresh = None;
+        }
     }
 
     fn publish(&mut self) {
@@ -1237,6 +1329,7 @@ impl EngineState {
             wake_seq: self.wake_seq,
             exit_requested: self.exit_requested,
             pending_queue_action: self.pending_queue_action,
+            auto_throttle_active: self.auto_throttle_active,
         };
         if let Ok(mut slot) = self.snapshots.lock() {
             slot.version = slot.version.saturating_add(1);

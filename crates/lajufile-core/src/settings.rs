@@ -51,6 +51,8 @@ pub struct Settings {
     pub clipboard_monitor: bool,
     #[serde(default)]
     pub category_dirs: std::collections::BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    pub domain_dirs: std::collections::BTreeMap<String, PathBuf>,
     #[serde(default = "default_scale")]
     pub ui_scale_pct: u32,
     #[serde(default)]
@@ -90,7 +92,23 @@ pub struct Settings {
     #[serde(default)]
     pub hf_token: String,
     #[serde(default)]
+    pub civitai_token: String,
+    #[serde(default)]
+    pub vt_api_key: String,
+    #[serde(default)]
     pub auto_extract_archives: bool,
+    #[serde(default)]
+    pub auto_throttle_fullscreen: bool,
+    #[serde(default = "default_auto_throttle_kbps")]
+    pub auto_throttle_kbps: u64,
+    #[serde(default)]
+    pub auto_scan_downloads: bool,
+    #[serde(default)]
+    pub peak_speed_bps: u64,
+}
+
+fn default_auto_throttle_kbps() -> u64 {
+    512
 }
 
 fn default_schedule_start() -> String {
@@ -110,7 +128,7 @@ fn default_scale() -> u32 {
 }
 
 fn default_capture_extensions() -> String {
-    DEFAULT_CAPTURE_EXTENSIONS.to_string()
+    String::new()
 }
 
 fn default_language() -> String {
@@ -133,6 +151,7 @@ impl Default for Settings {
             ask_where_to_save: false,
             clipboard_monitor: true,
             category_dirs: std::collections::BTreeMap::new(),
+            domain_dirs: std::collections::BTreeMap::new(),
             ui_scale_pct: 100,
             excluded_domains: String::new(),
             captured_extensions: default_capture_extensions(),
@@ -152,7 +171,13 @@ impl Default for Settings {
             schedule_stop: default_schedule_stop(),
             on_queue_complete: QueueCompleteAction::None,
             hf_token: String::new(),
+            civitai_token: String::new(),
+            vt_api_key: String::new(),
             auto_extract_archives: false,
+            auto_throttle_fullscreen: false,
+            auto_throttle_kbps: default_auto_throttle_kbps(),
+            auto_scan_downloads: false,
+            peak_speed_bps: 0,
         }
     }
 }
@@ -178,7 +203,61 @@ pub fn is_within_schedule(now_mins: u16, start_mins: u16, stop_mins: u16) -> boo
     }
 }
 
+pub fn normalize_domain_rule(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let extracted = if let Ok(parsed) = url::Url::parse(trimmed)
+        && let Some(host) = parsed.host_str()
+    {
+        host.to_string()
+    } else {
+        let without_scheme = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"))
+            .unwrap_or(trimmed);
+        let host_port = without_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(without_scheme);
+        host_port.split(':').next().unwrap_or(host_port).to_string()
+    };
+    extracted
+        .trim()
+        .trim_start_matches("*.")
+        .trim_start_matches('.')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
 impl Settings {
+    pub fn domain_dir_for_url(&self, raw_url: &str) -> Option<&PathBuf> {
+        let parsed = url::Url::parse(raw_url.trim()).ok()?;
+        let host = parsed
+            .host_str()?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host.is_empty() {
+            return None;
+        }
+        self.domain_dirs
+            .iter()
+            .filter_map(|(rule, dir)| {
+                if dir.as_os_str().is_empty() {
+                    return None;
+                }
+                let clean = normalize_domain_rule(rule);
+                if clean.is_empty() {
+                    return None;
+                }
+                let matches = host == clean || host.ends_with(&format!(".{clean}"));
+                matches.then_some((clean.len(), dir))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, dir)| dir)
+    }
+
     pub fn is_domain_excluded(&self, host: &str) -> bool {
         let host = host.trim().to_ascii_lowercase();
         if host.is_empty() {
@@ -274,8 +353,58 @@ impl Settings {
         let mut settings: Self = serde_json::from_str(&text).ok()?;
         settings.bridge_token = unseal_secret(&settings.bridge_token);
         settings.hf_token = unseal_secret(&settings.hf_token);
+        settings.civitai_token = unseal_secret(&settings.civitai_token);
+        settings.vt_api_key = unseal_secret(&settings.vt_api_key);
         settings.proxy_url = unseal_secret(&settings.proxy_url);
         Some(settings)
+    }
+
+    pub fn to_safe_backup_json(&self) -> Result<String, SettingsError> {
+        let mut exported = self.clone();
+        exported.bridge_token.clear();
+        exported.hf_token.clear();
+        exported.civitai_token.clear();
+        exported.vt_api_key.clear();
+        if proxy_has_credentials(&exported.proxy_url) {
+            exported.proxy_url.clear();
+        }
+        serde_json::to_string_pretty(&exported).map_err(|source| SettingsError::Json {
+            path: PathBuf::from("settings-backup.json"),
+            source,
+        })
+    }
+
+    pub fn merge_from_backup_json(&self, raw: &str) -> Result<Self, SettingsError> {
+        let mut imported: Self =
+            serde_json::from_str(raw.trim()).map_err(|source| SettingsError::Json {
+                path: PathBuf::from("settings-backup.json"),
+                source,
+            })?;
+        if imported.download_dir.as_os_str().is_empty() {
+            imported.download_dir = self.download_dir.clone();
+        }
+        imported.max_concurrent = imported.max_concurrent.clamp(1, 10);
+        imported.max_connections = imported.max_connections.clamp(1, 32);
+        imported.ui_scale_pct = imported.ui_scale_pct.clamp(80, 150);
+        imported.bridge_port = imported.bridge_port.clamp(1024, 65_535);
+        imported.global_speed_limit_kbps = imported.global_speed_limit_kbps.min(1_000_000);
+        imported.auto_throttle_kbps = imported.auto_throttle_kbps.min(1_000_000);
+        imported.bridge_token = self.bridge_token.clone();
+        imported.browser_paired = self.browser_paired;
+        imported.peak_speed_bps = self.peak_speed_bps.max(imported.peak_speed_bps);
+        if imported.hf_token.trim().is_empty() {
+            imported.hf_token = self.hf_token.clone();
+        }
+        if imported.civitai_token.trim().is_empty() {
+            imported.civitai_token = self.civitai_token.clone();
+        }
+        if imported.vt_api_key.trim().is_empty() {
+            imported.vt_api_key = self.vt_api_key.clone();
+        }
+        if imported.proxy_url.trim().is_empty() {
+            imported.proxy_url = self.proxy_url.clone();
+        }
+        Ok(imported)
     }
 
     pub fn load_or_create(dir: &Path) -> Result<Self, SettingsError> {
@@ -320,6 +449,18 @@ impl Settings {
         }
         settings.hf_token = unseal_secret(&raw_hf);
 
+        let raw_civitai = settings.civitai_token.trim().to_string();
+        if !raw_civitai.is_empty() && !raw_civitai.starts_with(SEALED_SECRET_PREFIX) {
+            needs_resave = true;
+        }
+        settings.civitai_token = unseal_secret(&raw_civitai);
+
+        let raw_vt = settings.vt_api_key.trim().to_string();
+        if !raw_vt.is_empty() && !raw_vt.starts_with(SEALED_SECRET_PREFIX) {
+            needs_resave = true;
+        }
+        settings.vt_api_key = unseal_secret(&raw_vt);
+
         let raw_proxy = settings.proxy_url.trim().to_string();
         if !raw_proxy.is_empty()
             && !raw_proxy.starts_with(SEALED_SECRET_PREFIX)
@@ -328,6 +469,11 @@ impl Settings {
             needs_resave = true;
         }
         settings.proxy_url = unseal_secret(&raw_proxy);
+
+        if settings.captured_extensions.trim() == DEFAULT_CAPTURE_EXTENSIONS {
+            settings.captured_extensions.clear();
+            needs_resave = true;
+        }
 
         if needs_resave {
             settings.save(dir)?;
@@ -348,6 +494,8 @@ impl Settings {
         let mut persisted = self.clone();
         persisted.bridge_token = seal_secret(&persisted.bridge_token, &path)?;
         persisted.hf_token = seal_secret(&persisted.hf_token, &path)?;
+        persisted.civitai_token = seal_secret(&persisted.civitai_token, &path)?;
+        persisted.vt_api_key = seal_secret(&persisted.vt_api_key, &path)?;
         if proxy_has_credentials(&persisted.proxy_url) {
             persisted.proxy_url = seal_secret(&persisted.proxy_url, &path)?;
         }
@@ -512,5 +660,111 @@ mod tests {
         let after = std::fs::read_to_string(paths::settings_path(dir.path())).unwrap();
         assert!(!after.contains("hf_legacy_plain"));
         assert!(after.contains("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn default_capture_extensions_is_blank_and_migrates_legacy_default() {
+        let def = Settings::default();
+        assert!(def.captured_extensions.is_empty());
+        assert!(def.is_extension_captured("zip"));
+        assert!(!def.is_extension_captured("html"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = Settings {
+            bridge_token: generate_token(),
+            captured_extensions: DEFAULT_CAPTURE_EXTENSIONS.to_string(),
+            ..Settings::default()
+        };
+        legacy.save(dir.path()).unwrap();
+
+        let migrated = Settings::load_or_create(dir.path()).unwrap();
+        assert!(migrated.captured_extensions.is_empty());
+
+        let reloaded = Settings::load_readonly(dir.path()).unwrap();
+        assert!(reloaded.captured_extensions.is_empty());
+    }
+
+    #[test]
+    fn domain_dir_matching_prefers_longest_specific_rule() {
+        assert_eq!(
+            normalize_domain_rule("https://*.GitHub.com:443/nuellpr"),
+            "github.com"
+        );
+        assert_eq!(normalize_domain_rule("  .TikTok.com/ "), "tiktok.com");
+
+        let mut s = Settings::default();
+        s.domain_dirs
+            .insert("github.com".to_string(), PathBuf::from("D:/Dev"));
+        s.domain_dirs.insert(
+            "release-assets.githubusercontent.com".to_string(),
+            PathBuf::from("D:/Assets"),
+        );
+        s.domain_dirs
+            .insert("tiktok.com".to_string(), PathBuf::from("D:/TikTok"));
+
+        assert_eq!(
+            s.domain_dir_for_url("https://github.com/a/b.zip"),
+            Some(&PathBuf::from("D:/Dev"))
+        );
+        assert_eq!(
+            s.domain_dir_for_url("https://www.tiktok.com/@user/video/123"),
+            Some(&PathBuf::from("D:/TikTok"))
+        );
+        assert_eq!(
+            s.domain_dir_for_url("https://release-assets.githubusercontent.com/file.exe"),
+            Some(&PathBuf::from("D:/Assets"))
+        );
+        assert_eq!(s.domain_dir_for_url("https://notgithub.com/file.zip"), None);
+    }
+
+    #[test]
+    fn backup_strips_secrets_and_merge_preserves_local_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Settings {
+            bridge_token: generate_token(),
+            hf_token: "hf_secret".to_string(),
+            civitai_token: "civ_secret".to_string(),
+            vt_api_key: "vt_secret".to_string(),
+            proxy_url: "http://alice:pass@127.0.0.1:8080".to_string(),
+            browser_paired: true,
+            peak_speed_bps: 12_345_678,
+            ..Settings::default()
+        };
+        original.save(dir.path()).unwrap();
+        let loaded = Settings::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.civitai_token, "civ_secret");
+        assert_eq!(loaded.vt_api_key, "vt_secret");
+
+        let backup = loaded.to_safe_backup_json().unwrap();
+        assert!(!backup.contains(&loaded.bridge_token));
+        assert!(!backup.contains("hf_secret"));
+        assert!(!backup.contains("civ_secret"));
+        assert!(!backup.contains("vt_secret"));
+        assert!(!backup.contains("alice:pass"));
+
+        let mut modified: Settings = serde_json::from_str(&backup).unwrap();
+        modified.max_connections = 99;
+        modified.auto_throttle_fullscreen = true;
+        modified.auto_throttle_kbps = 256;
+        modified
+            .domain_dirs
+            .insert("github.com".to_string(), PathBuf::from("D:/GitHub"));
+        let modified_json = serde_json::to_string_pretty(&modified).unwrap();
+
+        let merged = loaded.merge_from_backup_json(&modified_json).unwrap();
+        assert_eq!(merged.max_connections, 32);
+        assert!(merged.auto_throttle_fullscreen);
+        assert_eq!(merged.auto_throttle_kbps, 256);
+        assert_eq!(
+            merged.domain_dirs.get("github.com"),
+            Some(&PathBuf::from("D:/GitHub"))
+        );
+        assert_eq!(merged.bridge_token, loaded.bridge_token);
+        assert!(merged.browser_paired);
+        assert_eq!(merged.hf_token, "hf_secret");
+        assert_eq!(merged.civitai_token, "civ_secret");
+        assert_eq!(merged.vt_api_key, "vt_secret");
+        assert_eq!(merged.proxy_url, "http://alice:pass@127.0.0.1:8080");
+        assert_eq!(merged.peak_speed_bps, 12_345_678);
     }
 }

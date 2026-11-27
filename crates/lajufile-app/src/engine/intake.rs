@@ -77,7 +77,7 @@ impl EngineState {
             .user_agent
             .clone()
             .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
-        let authorization = self.hf_authorization_for(&url);
+        let authorization = self.auth_header_for(&url);
         let probe_request = ProbeRequest {
             url,
             options: RequestOptions {
@@ -122,6 +122,45 @@ impl EngineState {
             return;
         }
         let normalized_url = url.to_string();
+
+        if request.video_format.is_none()
+            && let Some((target_id, deadline)) = self.pending_refresh.take()
+            && Instant::now() <= deadline
+            && let Ok(existing) = self.store.get_download(target_id)
+            && existing.kind == "http"
+            && matches!(
+                existing.status,
+                DownloadStatus::Paused | DownloadStatus::Error
+            )
+        {
+            let cookie_enc = match encrypt_cookie(request.cookie.as_deref()) {
+                Ok(enc) => enc,
+                Err(error) => {
+                    let _ = reply.send(BridgeAddOutcome::Internal(error));
+                    return;
+                }
+            };
+            if let Err(error) = self.store.update_download_source(
+                target_id,
+                &normalized_url,
+                cookie_enc.as_deref(),
+                request.referrer.as_deref(),
+                request.user_agent.as_deref(),
+            ) {
+                let _ = reply.send(BridgeAddOutcome::Internal(error.to_string()));
+                return;
+            }
+            self.cache_dirty = true;
+            self.resume(target_id);
+            self.message = Some(format!("Link refreshed & resumed: {}", existing.file_name));
+            self.trigger_wake();
+            let _ = reply.send(BridgeAddOutcome::Created {
+                id: target_id,
+                filename: existing.file_name,
+                size: existing.size,
+            });
+            return;
+        }
 
         match self.check_duplicate_url(&normalized_url) {
             Ok(DuplicateAction::Proceed) => {}
@@ -186,7 +225,7 @@ impl EngineState {
             self.message = Some("Waiting for a save folder".to_string());
             self.trigger_wake();
             if add.video_format.is_none() {
-                let authorization = self.hf_authorization_for(&url);
+                let authorization = self.auth_header_for(&url);
                 let probe_request = ProbeRequest {
                     url,
                     options: RequestOptions {
@@ -198,7 +237,7 @@ impl EngineState {
                         cookie: add.cookie.clone(),
                         authorization,
                     },
-                    timeout: Duration::from_secs(3),
+                    timeout: Duration::from_secs(10),
                 };
                 let client = self.client.clone();
                 let events = self.events.clone();
@@ -250,7 +289,7 @@ impl EngineState {
         add: AddRequest,
         reply: tokio::sync::oneshot::Sender<BridgeAddOutcome>,
     ) {
-        let authorization = self.hf_authorization_for(&url);
+        let authorization = self.auth_header_for(&url);
         let probe_request = ProbeRequest {
             url,
             options: RequestOptions {
@@ -262,7 +301,7 @@ impl EngineState {
                 cookie: add.cookie.clone(),
                 authorization,
             },
-            timeout: Duration::from_secs(3),
+            timeout: Duration::from_secs(10),
         };
         let client = self.client.clone();
         let events = self.events.clone();
@@ -367,11 +406,23 @@ impl EngineState {
         }
     }
 
-    pub(super) fn resolve_save_dir(&self, category: Category, requested: Option<&Path>) -> PathBuf {
+    pub(super) fn resolve_save_dir(
+        &self,
+        category: Category,
+        requested: Option<&Path>,
+        url: Option<&str>,
+        referrer: Option<&str>,
+    ) -> PathBuf {
         if let Some(dir) = requested
             && !dir.as_os_str().is_empty()
         {
             return dir.to_path_buf();
+        }
+        if let Some(dir) = url.and_then(|u| self.settings.domain_dir_for_url(u)) {
+            return dir.clone();
+        }
+        if let Some(dir) = referrer.and_then(|r| self.settings.domain_dir_for_url(r)) {
+            return dir.clone();
         }
         if let Some(dir) = self.settings.category_dirs.get(category.label())
             && !dir.as_os_str().is_empty()
@@ -402,7 +453,12 @@ impl EngineState {
             &result.final_url,
         );
         let category = Category::from_file_name(&base_name);
-        let dir = self.resolve_save_dir(category, request.save_dir.as_deref());
+        let dir = self.resolve_save_dir(
+            category,
+            request.save_dir.as_deref(),
+            Some(&request.url),
+            request.referrer.as_deref(),
+        );
         if let Err(error) = ensure_dir(&dir) {
             return Err(InsertError::Failed(error.to_string()));
         }
@@ -515,16 +571,25 @@ impl EngineState {
             }
         }
 
-        let audio_only = request
-            .video_format
-            .as_deref()
-            .is_some_and(is_audio_only_selector);
-        let category = if audio_only {
-            Category::Music
-        } else {
-            Category::Video
+        let mode = lajufile_core::video::parse_video_spec(
+            request
+                .video_format
+                .as_deref()
+                .unwrap_or(lajufile_core::video::DEFAULT_SELECTOR),
+        )
+        .mode;
+        let category = match mode {
+            lajufile_core::video::VideoMode::SubtitlesOnly => Category::Documents,
+            lajufile_core::video::VideoMode::AudioM4a
+            | lajufile_core::video::VideoMode::AudioMp3 => Category::Music,
+            lajufile_core::video::VideoMode::Video => Category::Video,
         };
-        let dir = self.resolve_save_dir(category, request.save_dir.as_deref());
+        let dir = self.resolve_save_dir(
+            category,
+            request.save_dir.as_deref(),
+            Some(&request.url),
+            request.referrer.as_deref(),
+        );
         if let Err(error) = ensure_dir(&dir) {
             return Err(InsertError::Failed(error.to_string()));
         }
@@ -649,6 +714,7 @@ impl EngineState {
         &mut self,
         url: String,
         cookie: Option<String>,
+        referrer: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     ) {
         let parsed = match ssrf::validate_http_url(&url) {
@@ -678,15 +744,22 @@ impl EngineState {
                 &data_dir,
                 &url,
                 cookie.as_deref(),
+                referrer.as_deref(),
                 proxy.as_deref(),
             ));
         });
     }
 
-    pub(super) fn hf_authorization_for(&self, url: &Url) -> Option<String> {
-        let token = self.settings.hf_token.trim();
-        (!token.is_empty() && huggingface::is_huggingface_host(url))
-            .then(|| format!("Bearer {token}"))
+    pub(super) fn auth_header_for(&self, url: &Url) -> Option<String> {
+        let hf = self.settings.hf_token.trim();
+        if !hf.is_empty() && huggingface::is_huggingface_host(url) {
+            return Some(format!("Bearer {hf}"));
+        }
+        let civitai = self.settings.civitai_token.trim();
+        if !civitai.is_empty() && smart_sources::is_civitai_host(url) {
+            return Some(format!("Bearer {civitai}"));
+        }
+        None
     }
 
     pub(super) fn load_hf_files(
@@ -694,16 +767,25 @@ impl EngineState {
         raw_url: String,
         reply: tokio::sync::oneshot::Sender<Result<Vec<huggingface::HfModelFile>, String>>,
     ) {
-        let Some((repo_id, revision)) = huggingface::parse_hf_repo_url(&raw_url) else {
-            let _ = reply.send(Err("Not a HuggingFace model repository URL".to_string()));
+        let Some(source) = smart_sources::detect_source(&raw_url) else {
+            let _ = reply.send(Err(
+                "Not a supported HuggingFace, GitHub Releases, or Civitai URL".to_string(),
+            ));
             return;
         };
         let client = self.client.clone();
-        let token = (!self.settings.hf_token.trim().is_empty())
+        let hf_token = (!self.settings.hf_token.trim().is_empty())
             .then(|| self.settings.hf_token.trim().to_string());
+        let civitai_token = (!self.settings.civitai_token.trim().is_empty())
+            .then(|| self.settings.civitai_token.trim().to_string());
         self.runtime.spawn(async move {
-            let result =
-                huggingface::list_repo_files(&client, &repo_id, &revision, token.as_deref()).await;
+            let result = smart_sources::list_source_files(
+                &client,
+                &source,
+                hf_token.as_deref(),
+                civitai_token.as_deref(),
+            )
+            .await;
             let _ = reply.send(result);
         });
     }

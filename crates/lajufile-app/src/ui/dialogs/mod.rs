@@ -3,11 +3,13 @@
 mod batch_update;
 mod browser_lang;
 mod settings;
+mod stats_backup;
 mod transfers;
 
 pub use batch_update::{BatchDraft, BatchMode, UpdateUiState, batch_dialog, update_dialog};
 pub use browser_lang::{browser_setup_dialog, language_dialog};
 pub use settings::settings_dialog;
+pub use stats_backup::{DownloadStats, stats_backup_dialog};
 pub use transfers::{
     PropertiesDraft, clipboard_download_url, clipboard_download_url_with_rules, complete_dialog,
     delete_confirm_dialog, progress_dialog, properties_dialog,
@@ -19,10 +21,14 @@ use egui::{
     Align, Align2, Color32, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2,
 };
 use lajufile_core::settings::Settings;
-use lajufile_core::video::{DEFAULT_SELECTOR, QualityChoice, is_audio_only_selector};
+use lajufile_core::video::{
+    DEFAULT_SELECTOR, MP3_SELECTOR, QualityChoice, SUBTITLES_ONLY_SELECTOR, VideoMode,
+    compose_video_spec, is_valid_clip_range, parse_video_spec,
+};
 
 use crate::engine::AddRequest;
-use crate::engine::huggingface::{HfModelFile, parse_hf_repo_url};
+use crate::engine::huggingface::HfModelFile;
+use crate::engine::smart_sources::{SmartSource, detect_source};
 
 use super::Action;
 use super::format::format_size;
@@ -38,6 +44,7 @@ pub struct AddDraft {
     pub quality: Option<String>,
     /// Pre-estimated byte size for the selected quality choice.
     pub quality_size: Option<u64>,
+    pub video_clip: String,
     pub formats: Vec<QualityChoice>,
     pub hf_files: Vec<HfModelFile>,
     pub hf_selected: Option<usize>,
@@ -54,6 +61,7 @@ impl Default for AddDraft {
             connections: 8,
             quality: None,
             quality_size: None,
+            video_clip: String::new(),
             formats: Vec::new(),
             hf_files: Vec::new(),
             hf_selected: None,
@@ -80,20 +88,28 @@ impl AddDraft {
             .map(|f| f.download_url.clone())
             .unwrap_or_else(|| self.url.trim().to_string());
         let is_video = chosen_hf.is_none() && is_video_site_url(&target_url);
+        let clip = non_empty(self.video_clip);
         let video_format = is_video.then(|| {
-            self.quality
+            let base = self
+                .quality
                 .clone()
-                .unwrap_or_else(|| DEFAULT_SELECTOR.to_string())
+                .unwrap_or_else(|| DEFAULT_SELECTOR.to_string());
+            compose_video_spec(&base, clip.as_deref())
         });
-        let audio_only = video_format.as_deref().is_some_and(is_audio_only_selector);
+        let mode = video_format.as_deref().map(|s| parse_video_spec(s).mode);
         let mut file_name =
             non_empty(self.file_name).or_else(|| chosen_hf.as_ref().map(|f| f.file_name.clone()));
-        if audio_only
-            && let Some(ref mut name) = file_name
-            && name.to_ascii_lowercase().ends_with(".mp4")
-        {
-            let stem = &name[..name.len() - 4];
-            *name = format!("{stem}.m4a");
+        if let (Some(mode), Some(name)) = (mode, file_name.as_mut()) {
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".mp4") {
+                let stem = &name[..name.len() - 4];
+                match mode {
+                    VideoMode::AudioM4a => *name = format!("{stem}.m4a"),
+                    VideoMode::AudioMp3 => *name = format!("{stem}.mp3"),
+                    VideoMode::SubtitlesOnly => *name = format!("{stem}.srt"),
+                    VideoMode::Video => {}
+                }
+            }
         }
         let video_size = is_video
             .then(|| {
@@ -194,6 +210,7 @@ pub fn add_dialog(
                 draft.formats.clear();
                 draft.quality = None;
                 draft.quality_size = None;
+                draft.video_clip.clear();
                 draft.hf_files.clear();
                 draft.hf_selected = None;
                 if had_hf {
@@ -254,11 +271,16 @@ pub fn add_dialog(
                     .color(ui.visuals().weak_text_color()),
             );
 
-            if parse_hf_repo_url(&draft.url).is_some() {
+            if let Some(source) = detect_source(&draft.url) {
+                let source_label = match source {
+                    SmartSource::HuggingFace { .. } => "HuggingFace model file",
+                    SmartSource::GitHubRelease { .. } => "GitHub Release asset",
+                    SmartSource::Civitai { .. } => "Civitai model file",
+                };
                 ui.add_space(8.0);
-                ui.label(RichText::new("HuggingFace model file").strong());
+                ui.label(RichText::new(source_label).strong());
                 if draft.hf_files.is_empty() {
-                    if ui.button("Load model files").clicked() {
+                    if ui.button("Load files").clicked() {
                         action = Some(Action::LoadHfFiles(draft.url.trim().to_string()));
                     }
                 } else {
@@ -293,62 +315,105 @@ pub fn add_dialog(
                 }
             }
 
-            if is_video_site_url(&draft.url) {
+            let is_video_url = is_video_site_url(&draft.url);
+            let mut clip_invalid = false;
+            if is_video_url {
                 ui.add_space(8.0);
-                ui.label(RichText::new("Video quality").strong());
-                if draft.formats.is_empty() {
-                    if ui.button("Load qualities").clicked() {
-                        action = Some(Action::LoadFormats(draft.url.trim().to_string()));
-                    }
-                } else {
-                    let chosen = draft
-                        .formats
-                        .iter()
-                        .position(|choice| Some(&choice.selector) == draft.quality.as_ref())
-                        .map_or(0, |index| index + 1);
-                    let mut selected = chosen;
-                    let best_hint = draft
-                        .formats
-                        .first()
-                        .and_then(|c| c.size)
-                        .map(|sz| format!("Best available (~{})", format_size(sz)))
-                        .unwrap_or_else(|| "Best available".to_string());
-                    let choice_text = |c: &QualityChoice| match c.size {
-                        Some(sz) if sz > 0 => format!("{} (~{})", c.label, format_size(sz)),
-                        _ => c.label.clone(),
-                    };
+                ui.label(RichText::new("Video quality / format").strong());
+                let best_hint = draft
+                    .formats
+                    .first()
+                    .and_then(|c| c.size)
+                    .map(|sz| format!("Best available (~{})", format_size(sz)))
+                    .unwrap_or_else(|| "Best available".to_string());
+                let choice_text = |c: &QualityChoice| match c.size {
+                    Some(sz) if sz > 0 => format!("{} (~{})", c.label, format_size(sz)),
+                    _ => c.label.clone(),
+                };
+                let mut options: Vec<(Option<String>, Option<u64>, String)> = Vec::new();
+                options.push((
+                    None,
+                    draft.formats.first().and_then(|c| c.size),
+                    best_hint.clone(),
+                ));
+                for c in &draft.formats {
+                    options.push((Some(c.selector.clone()), c.size, choice_text(c)));
+                }
+                options.push((
+                    Some(MP3_SELECTOR.to_string()),
+                    None,
+                    "Audio only (MP3)".to_string(),
+                ));
+                options.push((
+                    Some(SUBTITLES_ONLY_SELECTOR.to_string()),
+                    None,
+                    "Subtitles only (.srt)".to_string(),
+                ));
+
+                let chosen = options
+                    .iter()
+                    .position(|(sel, _, _)| *sel == draft.quality)
+                    .unwrap_or(0);
+                let mut selected = chosen;
+                ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("quality")
-                        .selected_text(match selected {
-                            0 => best_hint.clone(),
-                            index => choice_text(&draft.formats[index - 1]),
-                        })
+                        .selected_text(&options[selected].2)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut selected, 0, &best_hint);
-                            for (index, choice) in draft.formats.iter().enumerate() {
-                                ui.selectable_value(&mut selected, index + 1, choice_text(choice));
+                            for (index, (_, _, label)) in options.iter().enumerate() {
+                                ui.selectable_value(&mut selected, index, label);
                             }
                         });
-                    draft.quality =
-                        (selected > 0).then(|| draft.formats[selected - 1].selector.clone());
-                    draft.quality_size = (selected > 0)
-                        .then(|| draft.formats[selected - 1].size)
-                        .flatten();
-                    if selected != chosen {
-                        let audio_sel =
-                            draft.quality.as_deref().is_some_and(is_audio_only_selector);
-                        let trimmed = draft.file_name.trim().to_string();
-                        if audio_sel && trimmed.to_ascii_lowercase().ends_with(".mp4") {
-                            draft.file_name = format!("{}.m4a", &trimmed[..trimmed.len() - 4]);
-                        } else if !audio_sel && trimmed.to_ascii_lowercase().ends_with(".m4a") {
-                            draft.file_name = format!("{}.mp4", &trimmed[..trimmed.len() - 4]);
-                        }
+                    if draft.formats.is_empty() && ui.button("Load qualities").clicked() {
+                        action = Some(Action::LoadFormats(draft.url.trim().to_string()));
+                    }
+                });
+                draft.quality = options[selected].0.clone();
+                draft.quality_size = (selected > 0).then(|| options[selected].1).flatten();
+                if selected != chosen {
+                    let mode = draft
+                        .quality
+                        .as_deref()
+                        .map(|s| parse_video_spec(s).mode)
+                        .unwrap_or(VideoMode::Video);
+                    let trimmed = draft.file_name.trim().to_string();
+                    let lower = trimmed.to_ascii_lowercase();
+                    let stem = [".mp4", ".m4a", ".mp3", ".srt"].iter().find_map(|ext| {
+                        lower
+                            .ends_with(ext)
+                            .then(|| &trimmed[..trimmed.len() - ext.len()])
+                    });
+                    if let Some(stem) = stem {
+                        draft.file_name = match mode {
+                            VideoMode::AudioM4a => format!("{stem}.m4a"),
+                            VideoMode::AudioMp3 => format!("{stem}.mp3"),
+                            VideoMode::SubtitlesOnly => format!("{stem}.srt"),
+                            VideoMode::Video => format!("{stem}.mp4"),
+                        };
+                    }
+                }
+
+                if draft.quality.as_deref() != Some(SUBTITLES_ONLY_SELECTOR) {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Clip / trim range (optional)").strong());
+                    ui.add_sized(
+                        [ui.available_width(), 28.0],
+                        egui::TextEdit::singleline(&mut draft.video_clip)
+                            .hint_text("e.g. 00:30-01:45 or 1:02:00-1:05:30"),
+                    );
+                    clip_invalid = !draft.video_clip.trim().is_empty()
+                        && !is_valid_clip_range(&draft.video_clip);
+                    if clip_invalid {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Clip range must use start-end timestamps (e.g. 00:30-01:45).",
+                        );
                     }
                 }
             }
 
             ui.add_space(12.0);
             ui.separator();
-            let can_add = !draft.url.trim().is_empty() && !sha_invalid;
+            let can_add = !draft.url.trim().is_empty() && !sha_invalid && !clip_invalid;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add_enabled(can_add, egui::Button::new("Add download"))

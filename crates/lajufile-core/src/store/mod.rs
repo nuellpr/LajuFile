@@ -569,6 +569,27 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_download_source(
+        &mut self,
+        id: i64,
+        url: &str,
+        cookie_enc: Option<&[u8]>,
+        referrer: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE downloads
+             SET url = ?1, final_url = NULL, etag = NULL, last_modified = NULL, error = NULL,
+                 cookie_enc = ?2, referrer = ?3, user_agent = ?4
+             WHERE id = ?5",
+            params![url, cookie_enc, referrer, user_agent, id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn update_location(
         &mut self,
         id: i64,

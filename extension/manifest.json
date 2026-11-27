@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LajuFile Capture",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "minimum_chrome_version": "102",
   "description": "Send downloads from Chrome, Brave, Edge, Vivaldi, Opera, and Chromium browsers on Windows, macOS, and Linux to LajuFile.",
   "permissions": [
@@ -25,14 +25,14 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.youtube.com/*",
-        "https://m.youtube.com/*",
-        "https://youtube.com/*"
+        "http://*/*",
+        "https://*/*"
       ],
       "js": [
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     },
     {
       "matches": [
@@ -75,9 +75,8 @@
         "icons/icon-48.png"
       ],
       "matches": [
-        "https://www.youtube.com/*",
-        "https://m.youtube.com/*",
-        "https://youtube.com/*"
+        "http://*/*",
+        "https://*/*"
       ]
     }
   ]

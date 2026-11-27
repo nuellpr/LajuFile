@@ -366,7 +366,12 @@ test("video-formats supports multi-site platforms like Vimeo and capture-media r
   assert.ok(fetchCalls.some((c) => c.url.endsWith("/video")));
 });
 
-function loadInterceptorHarness({ isTopFrame = true, mediaElements = [] } = {}) {
+function loadInterceptorHarness({
+  isTopFrame = true,
+  mediaElements = [],
+  imgElements = [],
+  anchorElements = [],
+} = {}) {
   const clickListeners = [];
   const messageListeners = [];
   const sentMessages = [];
@@ -397,7 +402,11 @@ function loadInterceptorHarness({ isTopFrame = true, mediaElements = [] } = {}) 
       addEventListener: (event, fn) => {
         if (event === "click") clickListeners.push(fn);
       },
-      querySelectorAll: () => mediaElements,
+      querySelectorAll: (selector) => {
+        if (selector === "img") return imgElements;
+        if (selector === "a[href]") return anchorElements;
+        return mediaElements;
+      },
     },
     chrome: {
       storage: {
@@ -425,6 +434,7 @@ function loadInterceptorHarness({ isTopFrame = true, mediaElements = [] } = {}) 
   return {
     onClick: clickListeners[0],
     onMessage: messageListeners[0],
+    onAssetsMessage: messageListeners[1],
     sentMessages,
   };
 }
@@ -508,4 +518,175 @@ test("sniff-page-media survives malformed percent encoding and skips empty subfr
   assert.equal(foundReply?.items?.length, 1);
   assert.equal(foundReply.items[0].url, "https://cdn.example.org/media/clip%ZZname.mp4");
   assert.equal(foundReply.items[0].label, "clip%ZZname.mp4");
+});
+
+test("auto-capture catches png, jpg, md, and extensionless files when rules are blank or legacy default", async () => {
+  const legacyDefault =
+    "zip rar 7z tar gz bz2 xz tgz exe msi msix apk dmg deb rpm iso img bin mp4 mkv webm avi mov flv wmv m4v mp3 m4a wav flac ogg aac opus pdf doc docx xls xlsx ppt pptx epub csv torrent";
+  for (const capturedExtensions of ["", legacyDefault]) {
+    const { onDetermining, fetchCalls } = loadBackgroundHarness({
+      rules: { excluded_domains: "", captured_extensions: capturedExtensions },
+    });
+    const cases = [
+      { id: 101, url: "https://github.com/nuellpr/LajuFile/raw/main/logo.png", filename: "logo.png" },
+      { id: 102, url: "https://cdn.example.org/photo_2K.jpg", filename: "photo_2K.jpg" },
+      { id: 103, url: "https://github.com/nuellpr/LajuFile/raw/main/qris.md", filename: "qris.md" },
+      { id: 104, url: "https://example.org/download?id=99", filename: "artifact" },
+    ];
+    for (const item of cases) {
+      await new Promise((resolve) => {
+        onDetermining({ ...item, state: "in_progress" }, resolve);
+      });
+    }
+    const dlCalls = fetchCalls.filter((c) => c.url.endsWith("/downloads"));
+    assert.equal(dlCalls.length, 4);
+    assert.deepEqual(
+      dlCalls.map((c) => JSON.parse(c.init.body).url),
+      cases.map((c) => c.url),
+    );
+  }
+});
+
+test("universal video-formats and video-download support TikTok, generic sites, streams, and embeds while keeping SSRF/origin guards", async () => {
+  const { onMessage, fetchCalls } = loadBackgroundHarness();
+
+  // TikTok feed item on top-level TikTok tab forwards referrer.
+  const tiktokPage = "https://www.tiktok.com/foryou";
+  const tiktokVideo = "https://www.tiktok.com/@creator/video/7400000111222";
+  const ttFormats = await dispatch(
+    onMessage,
+    { type: "video-formats", url: tiktokVideo, referrer: tiktokPage },
+    { id: EXT_ID, tab: { id: 10, url: tiktokPage }, url: tiktokPage, frameId: 0 },
+  );
+  assert.equal(ttFormats.ret, true);
+  assert.equal(ttFormats.reply.status, 200);
+  const ttFmtCall = fetchCalls.find((c) => c.url.endsWith("/video/formats"));
+  assert.equal(JSON.parse(ttFmtCall.init.body).referrer, tiktokPage);
+
+  // Generic website video page + video-download forwards referrer.
+  const genericUrl = "https://videos.example.org/watch/clip-42";
+  const genericDl = await dispatch(
+    onMessage,
+    { type: "video-download", url: genericUrl, selector: "bv*+ba/b", referrer: genericUrl },
+    { id: EXT_ID, tab: { id: 11, url: genericUrl }, url: genericUrl, frameId: 0 },
+  );
+  assert.equal(genericDl.ret, true);
+  assert.equal(genericDl.reply.status, 201);
+  const genericCall = fetchCalls.find((c) => c.url.endsWith("/video"));
+  assert.equal(JSON.parse(genericCall.init.body).referrer, genericUrl);
+
+  // Embedded iframe HLS stream (.m3u8) is allowed and forwards iframe referrer.
+  const embedFrameUrl = "https://player.embedhost.example/embed/99";
+  const hlsUrl = "https://cdn-hls.othercdn.net/hls/master.m3u8?token=abc";
+  const hlsRes = await dispatch(
+    onMessage,
+    { type: "video-formats", url: hlsUrl, referrer: embedFrameUrl },
+    { id: EXT_ID, tab: { id: 12, url: "https://hostsite.example/post" }, url: embedFrameUrl, frameId: 2 },
+  );
+  assert.equal(hlsRes.ret, true);
+  assert.equal(hlsRes.reply.status, 200);
+
+  // Matching YouTube embed iframe can request its own video ID, mismatched one is rejected.
+  const matchingEmbed = await dispatch(
+    onMessage,
+    { type: "video-formats", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+    { id: EXT_ID, tab: { id: 13, url: "https://blog.example/" }, url: "https://www.youtube.com/embed/dQw4w9WgXcQ", frameId: 1 },
+  );
+  assert.equal(matchingEmbed.ret, true);
+
+  // Reject loopback targets and non-HTTP schemes.
+  const loopback = await dispatch(
+    onMessage,
+    { type: "video-formats", url: "http://127.0.0.1:8080/video.mp4" },
+    { id: EXT_ID, tab: { id: 14, url: "http://127.0.0.1:8080/" }, url: "http://127.0.0.1:8080/", frameId: 0 },
+  );
+  assert.equal(loopback.ret, false);
+
+  const fileScheme = await dispatch(
+    onMessage,
+    { type: "video-download", url: "file:///C:/video.mp4", selector: "bv*+ba/b" },
+    { id: EXT_ID, tab: { id: 15, url: "https://example.org/" }, url: "https://example.org/", frameId: 0 },
+  );
+  assert.equal(fileScheme.ret, false);
+});
+
+test("direct-video-download captures direct MP4s from pages and enforces security boundaries", async () => {
+  const { onMessage, fetchCalls } = loadBackgroundHarness({
+    rules: { excluded_domains: "", captured_extensions: "zip" },
+  });
+
+  const directRes = await dispatch(
+    onMessage,
+    {
+      type: "direct-video-download",
+      url: "https://cdn.example.org/videos/clip.mp4",
+      filename: "My Clip.mp4",
+      referrer: "https://site.example/post/1",
+    },
+    { id: EXT_ID, tab: { id: 20, url: "https://site.example/post/1" }, url: "https://site.example/post/1", frameId: 0 },
+  );
+  assert.equal(directRes.ret, true);
+  assert.equal(directRes.reply.status, 201);
+  const dlCall = fetchCalls.find((c) => c.url.endsWith("/downloads"));
+  assert.ok(dlCall);
+  const body = JSON.parse(dlCall.init.body);
+  assert.equal(body.url, "https://cdn.example.org/videos/clip.mp4");
+  assert.equal(body.filename, "My Clip.mp4");
+  assert.equal(body.referrer, "https://site.example/post/1");
+
+  // Reject loopback and cross-site YouTube pages on direct-video-download.
+  const loopback = await dispatch(
+    onMessage,
+    { type: "direct-video-download", url: "http://127.0.0.1:53841/secret.mp4" },
+    { id: EXT_ID, tab: { id: 21, url: "https://evil.example/" }, url: "https://evil.example/", frameId: 0 },
+  );
+  assert.equal(loopback.ret, false);
+
+  const crossSiteYt = await dispatch(
+    onMessage,
+    { type: "direct-video-download", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+    { id: EXT_ID, tab: { id: 22, url: "https://evil.example/" }, url: "https://evil.example/", frameId: 0 },
+  );
+  assert.equal(crossSiteYt.ret, false);
+});
+
+test("sniff-page-assets collects images with dimensions, classifies docs/archives, and rejects subframes", () => {
+  const subframe = loadInterceptorHarness({ isTopFrame: false });
+  let subReply = null;
+  const subRet = subframe.onAssetsMessage(
+    { type: "sniff-page-assets" },
+    { id: EXT_ID },
+    (r) => {
+      subReply = r;
+    },
+  );
+  assert.equal(subRet, false);
+  assert.equal(subReply, null);
+
+  const top = loadInterceptorHarness({
+    isTopFrame: true,
+    imgElements: [
+      { currentSrc: "https://cdn.example.org/hero.png", naturalWidth: 1200, naturalHeight: 800 },
+      { currentSrc: "https://cdn.example.org/hero.png", naturalWidth: 1200, naturalHeight: 800 },
+      { currentSrc: "data:image/png;base64,AAA", naturalWidth: 16, naturalHeight: 16 },
+    ],
+    anchorElements: [
+      { href: "https://example.org/manual.pdf" },
+      { href: "https://example.org/release.zip" },
+      { href: "javascript:alert(1)" },
+    ],
+  });
+  let reply = null;
+  top.onAssetsMessage({ type: "sniff-page-assets" }, { id: EXT_ID }, (r) => {
+    reply = r;
+  });
+  assert.equal(reply?.items?.length, 3);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(reply.items.map((i) => [i.kind, i.width]))),
+    [
+      ["image", 1200],
+      ["doc", 0],
+      ["archive", 0],
+    ],
+  );
 });

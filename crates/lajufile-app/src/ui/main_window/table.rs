@@ -246,6 +246,16 @@ pub(super) fn draw_table(
                         actions.push(Action::Resume(download.id));
                         ui.close();
                     }
+                    if download.kind == "http"
+                        && matches!(
+                            download.status,
+                            DownloadStatus::Paused | DownloadStatus::Error
+                        )
+                        && ui.button("Refresh link in browser").clicked()
+                    {
+                        actions.push(Action::RefreshLink(download.id));
+                        ui.close();
+                    }
                     if download.status != DownloadStatus::Done
                         && ui.button("Move to top of queue").clicked()
                     {

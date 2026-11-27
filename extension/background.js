@@ -11,6 +11,8 @@ const HEALTH_TTL_MS = 5000;
 const RULES_TTL_MS = 5000;
 const BYPASS_TTL_MS = 10000;
 const MAX_CACHE_ENTRIES = 512;
+const LEGACY_DEFAULT_EXTENSIONS =
+  "zip rar 7z tar gz bz2 xz tgz exe msi msix apk dmg deb rpm iso img bin mp4 mkv webm avi mov flv wmv m4v mp3 m4a wav flac ogg aac opus pdf doc docx xls xlsx ppt pptx epub csv torrent";
 const handledIds = new Set();
 const bypassUrls = new Map();
 let healthCache = { port: null, ok: false, at: 0 };
@@ -268,9 +270,12 @@ function autoCaptureSkipReason(item, url, config, remoteRules) {
     remoteRules && typeof remoteRules === "object"
       ? String(remoteRules.capturedExtensions || "")
       : "";
+  const trimmedRemoteExt = remoteCapturedExtensions.trim();
+  const effectiveRemoteExt =
+    trimmedRemoteExt === LEGACY_DEFAULT_EXTENSIONS ? "" : trimmedRemoteExt;
   const rawExtensions = String(config.fileTypes || "").trim()
     ? config.fileTypes
-    : remoteCapturedExtensions;
+    : effectiveRemoteExt;
   const extRules = parseRuleTokens(rawExtensions).map((t) => t.replace(/^\./, "")).filter(Boolean);
   if (extRules.length > 0 && !extRules.includes("*")) {
     const ext = detectExtension(item, url);
@@ -448,7 +453,7 @@ chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
       id: "lajufile-download",
       title: "Download with LajuFile",
-      contexts: ["link"],
+      contexts: ["link", "image", "video", "audio"],
     });
   });
 });
@@ -463,18 +468,64 @@ function isHttpUrl(rawUrl) {
   }
 }
 
-function isYouTubeHost(host) {
-  return host === "youtube.com" || host === "www.youtube.com" || host === "m.youtube.com";
+function isLoopbackHost(host) {
+  const clean = String(host || "").toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    clean === "localhost" ||
+    clean === "127.0.0.1" ||
+    clean === "::1" ||
+    clean === "0.0.0.0" ||
+    clean.endsWith(".localhost")
+  );
 }
 
-function isYouTubePageUrl(rawUrl) {
-  if (!isHttpUrl(rawUrl)) return false;
-  try {
-    const parsed = new URL(rawUrl);
-    return isYouTubeHost(parsed.hostname.toLowerCase());
-  } catch {
-    return false;
+function isRemoteHttpUrl(rawUrl) {
+  return isHttpUrl(rawUrl) && !isLoopbackHost(urlHost(rawUrl));
+}
+
+function isStreamUrl(rawUrl) {
+  return /\.(m3u8|mpd)(\?|$|#)/i.test(String(rawUrl || ""));
+}
+
+function registrableDomain(host) {
+  const clean = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!clean || /^\d+\.\d+\.\d+\.\d+$/.test(clean) || clean.includes(":")) return clean;
+  const parts = clean.split(".");
+  if (parts.length <= 2) return clean;
+  const lastTwo = parts.slice(-2).join(".");
+  if (/^(co|com|org|net|edu|gov|ac)\.[a-z]{2}$/.test(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join(".");
   }
+  return lastTwo;
+}
+
+function isYouTubeHost(host) {
+  return (
+    host === "youtube.com" ||
+    host.endsWith(".youtube.com") ||
+    host === "youtu.be" ||
+    host === "youtube-nocookie.com" ||
+    host.endsWith(".youtube-nocookie.com")
+  );
+}
+
+function isXHost(host) {
+  return (
+    host === "x.com" ||
+    host.endsWith(".x.com") ||
+    host === "twitter.com" ||
+    host.endsWith(".twitter.com")
+  );
+}
+
+function sameSiteHost(hostA, hostB) {
+  const a = String(hostA || "").toLowerCase();
+  const b = String(hostB || "").toLowerCase();
+  if (!a || !b) return false;
+  if (a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`)) return true;
+  if (isYouTubeHost(a) && isYouTubeHost(b)) return true;
+  if (isXHost(a) && isXHost(b)) return true;
+  return registrableDomain(a) === registrableDomain(b);
 }
 
 function isOwnExtensionPage(sender) {
@@ -490,20 +541,61 @@ function isSupportedVideoSiteUrl(rawUrl) {
   return isHttpUrl(rawUrl) && isSupportedVideoPage(rawUrl);
 }
 
-function isSupportedVideoSenderUrl(rawUrl) {
-  if (!isHttpUrl(rawUrl)) return false;
-  if (isYouTubePageUrl(rawUrl)) return true;
-  return isSupportedVideoPage(rawUrl);
+function extractYouTubeEmbedId(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!isYouTubeHost(parsed.hostname.toLowerCase())) return "";
+    const match = parsed.pathname.match(/^\/embed\/([A-Za-z0-9_-]+)/);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
+}
+
+function extractYouTubeTargetId(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (host === "youtu.be") return parsed.pathname.slice(1).split("/")[0] || "";
+    if (isYouTubeHost(host)) {
+      if (parsed.pathname === "/watch") return parsed.searchParams.get("v") || "";
+      const m = parsed.pathname.match(/^\/(?:shorts|embed)\/([A-Za-z0-9_-]+)/);
+      return m ? m[1] : "";
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function canPageRequestVideo(senderUrl, targetUrl, topFrame) {
+  if (!isHttpUrl(senderUrl) || !isRemoteHttpUrl(targetUrl)) return false;
+  const senderHost = urlHost(senderUrl);
+  const targetHost = urlHost(targetUrl);
+  if (isSupportedVideoPage(targetUrl)) {
+    if (!sameSiteHost(senderHost, targetHost)) return false;
+    if (!topFrame) {
+      if (targetUrl === senderUrl) return true;
+      const embedId = extractYouTubeEmbedId(senderUrl);
+      const targetId = extractYouTubeTargetId(targetUrl);
+      return Boolean(embedId && targetId && embedId === targetId);
+    }
+    return true;
+  }
+  return sameSiteHost(senderHost, targetHost) || isStreamUrl(targetUrl);
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== "lajufile-download" || !info.linkUrl) return;
-  if (isSupportedVideoSiteUrl(info.linkUrl)) {
+  const targetUrl = info.linkUrl || info.srcUrl;
+  if (info.menuItemId !== "lajufile-download" || !targetUrl) return;
+  const referrer = tab && isHttpUrl(tab.url) ? tab.url : undefined;
+  if (isSupportedVideoSiteUrl(targetUrl) || isStreamUrl(targetUrl)) {
     try {
-      const cookie = await netscapeCookies(info.linkUrl);
+      const cookie = await netscapeCookies(targetUrl);
       const result = await post("video", {
-        url: info.linkUrl,
+        url: targetUrl,
         video_format: "bv*+ba/b",
+        referrer,
         cookie: cookie || undefined,
       });
       if (result.status === 201) {
@@ -526,7 +618,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   const result = await capture(
-    { url: info.linkUrl, referrer: tab && tab.url ? tab.url : undefined },
+    { url: targetUrl, referrer },
     false,
   );
   if (result.status === 201) {
@@ -602,16 +694,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "video-formats") {
     if (
-      !(ownPage || (fromPage && topFrame && isSupportedVideoSenderUrl(senderUrl))) ||
-      !isSupportedVideoSiteUrl(message.url)
+      !(
+        (ownPage && isRemoteHttpUrl(message.url)) ||
+        (fromPage && canPageRequestVideo(senderUrl, message.url, topFrame))
+      )
     ) {
       return false;
     }
+    const safeReferrer = isHttpUrl(message.referrer)
+      ? message.referrer
+      : fromPage && isHttpUrl(senderUrl)
+        ? senderUrl
+        : undefined;
     (async () => {
       const cookie = await netscapeCookies(message.url);
       return post("video/formats", {
         url: message.url,
         cookie: cookie || undefined,
+        referrer: safeReferrer,
       });
     })()
       .then(sendResponse)
@@ -620,19 +720,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "video-download") {
     if (
-      !(ownPage || (fromPage && topFrame && isSupportedVideoSenderUrl(senderUrl))) ||
-      !isSupportedVideoSiteUrl(message.url) ||
+      !(
+        (ownPage && isRemoteHttpUrl(message.url)) ||
+        (fromPage && canPageRequestVideo(senderUrl, message.url, topFrame))
+      ) ||
       typeof message.selector !== "string" ||
       !message.selector.trim()
     ) {
       return false;
     }
+    const safeReferrer = isHttpUrl(message.referrer)
+      ? message.referrer
+      : fromPage && isHttpUrl(senderUrl)
+        ? senderUrl
+        : undefined;
     (async () => {
       const cookie = await netscapeCookies(message.url);
       return post("video", {
         url: message.url,
         video_format: message.selector,
         filename: typeof message.filename === "string" ? message.filename : undefined,
+        referrer: safeReferrer,
         size:
           typeof message.size === "number" &&
           Number.isFinite(message.size) &&
@@ -647,10 +755,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => sendResponse({ status: 0, error: String(error) }));
     return true;
   }
+  if (message.type === "direct-video-download") {
+    if (!fromPage || !isHttpUrl(senderUrl) || !isRemoteHttpUrl(message.url)) return false;
+    if (
+      isSupportedVideoPage(message.url) &&
+      !sameSiteHost(urlHost(senderUrl), urlHost(message.url))
+    ) {
+      return false;
+    }
+    const safeReferrer = isHttpUrl(message.referrer) ? message.referrer : senderUrl;
+    capture(
+      {
+        url: message.url,
+        referrer: safeReferrer,
+        filename: typeof message.filename === "string" ? message.filename : undefined,
+      },
+      false,
+    )
+      .then(sendResponse)
+      .catch((error) => sendResponse({ status: 0, error: String(error) }));
+    return true;
+  }
   if (message.type === "capture-media") {
     if (!ownPage || !isHttpUrl(message.url)) return false;
     const safeReferrer = isHttpUrl(message.referrer) ? message.referrer : undefined;
-    const isStream = /\.(m3u8|mpd)(\?|$)/i.test(message.url) || isSupportedVideoSiteUrl(message.url);
+    const isStream = isStreamUrl(message.url) || isSupportedVideoSiteUrl(message.url);
     (async () => {
       if (isStream) {
         const cookie = await netscapeCookies(message.url);
@@ -658,6 +787,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           url: message.url,
           video_format: "bv*+ba/b",
           filename: typeof message.filename === "string" ? message.filename : undefined,
+          referrer: safeReferrer,
           cookie: cookie || undefined,
         });
       }
