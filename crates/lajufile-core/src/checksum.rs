@@ -184,10 +184,92 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-pub fn sha256_file(path: &Path) -> io::Result<String> {
+#[cfg(windows)]
+fn sha256_file_cng(path: &Path) -> Option<io::Result<String>> {
+    use windows_sys::Win32::Security::Cryptography::{
+        BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALGORITHM,
+        BCryptCloseAlgorithmProvider, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash,
+        BCryptHashData, BCryptOpenAlgorithmProvider,
+    };
+
+    struct AlgGuard(BCRYPT_ALG_HANDLE);
+    impl Drop for AlgGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = BCryptCloseAlgorithmProvider(self.0, 0);
+            }
+        }
+    }
+
+    struct HashGuard(BCRYPT_HASH_HANDLE);
+    impl Drop for HashGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = BCryptDestroyHash(self.0);
+            }
+        }
+    }
+
+    let mut alg: BCRYPT_ALG_HANDLE = std::ptr::null_mut();
+    let status = unsafe {
+        BCryptOpenAlgorithmProvider(&mut alg, BCRYPT_SHA256_ALGORITHM, std::ptr::null(), 0)
+    };
+    if status < 0 || alg.is_null() {
+        return None;
+    }
+    let _alg = AlgGuard(alg);
+
+    let mut hash: BCRYPT_HASH_HANDLE = std::ptr::null_mut();
+    let status = unsafe {
+        BCryptCreateHash(
+            alg,
+            &mut hash,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            0,
+            0,
+        )
+    };
+    if status < 0 || hash.is_null() {
+        return None;
+    }
+    let _hash = HashGuard(hash);
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => return Some(Err(err)),
+    };
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(err) => return Some(Err(err)),
+        };
+        if n == 0 {
+            break;
+        }
+        let Ok(chunk_len) = u32::try_from(n) else {
+            return None;
+        };
+        let status = unsafe { BCryptHashData(hash, buf.as_ptr(), chunk_len, 0) };
+        if status < 0 {
+            return None;
+        }
+    }
+
+    let mut digest = [0u8; 32];
+    let status = unsafe { BCryptFinishHash(hash, digest.as_mut_ptr(), 32, 0) };
+    if status < 0 {
+        return None;
+    }
+    Some(Ok(hex::encode(digest)))
+}
+
+fn sha256_file_portable(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 512 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -196,6 +278,14 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize())
+}
+
+pub fn sha256_file(path: &Path) -> io::Result<String> {
+    #[cfg(windows)]
+    if let Some(res) = sha256_file_cng(path) {
+        return res;
+    }
+    sha256_file_portable(path)
 }
 
 /// Normalizes user-pasted checksum text (strips `sha256:` prefixes or `.sha256` trailing filenames).
@@ -261,5 +351,24 @@ mod tests {
         altered[31] ^= 1;
         assert!(!constant_time_eq(&mac, &altered));
         assert!(!constant_time_eq(&mac, &altered[..31]));
+    }
+
+    #[test]
+    fn sha256_file_matches_portable_on_empty_and_large_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.bin");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            sha256_file(&empty).unwrap(),
+            sha256_file_portable(&empty).unwrap()
+        );
+
+        let large = dir.path().join("large.bin");
+        let payload: Vec<u8> = (0..2_600_000usize).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&large, &payload).unwrap();
+        assert_eq!(
+            sha256_file(&large).unwrap(),
+            sha256_file_portable(&large).unwrap()
+        );
     }
 }

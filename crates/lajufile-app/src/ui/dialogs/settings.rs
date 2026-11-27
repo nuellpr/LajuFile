@@ -774,7 +774,7 @@ fn draw_browser_capture_card(
             }
             ui.add_space(8.0);
             if figma_button(ui, "Quick-Pair", 92.0, 34.0, false, sp) {
-                ui.ctx().copy_text(quick_pair_payload(settings));
+                ui.ctx().copy_text(quick_pair_payload(settings, bridge));
             }
             ui.add_space(8.0);
             if figma_button(ui, "Regenerate", 104.0, 34.0, false, sp) {

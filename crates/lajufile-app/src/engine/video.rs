@@ -162,7 +162,7 @@ pub(super) struct TempCookieFile {
 }
 
 impl TempCookieFile {
-    pub(super) fn from_netscape(raw: &str) -> Option<Self> {
+    pub(super) fn from_netscape_in(raw: &str, base_dir: &Path) -> Option<Self> {
         let trimmed = raw.trim();
         if !trimmed.starts_with("# Netscape HTTP Cookie File") {
             return None;
@@ -176,7 +176,8 @@ impl TempCookieFile {
 
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let pid = std::process::id();
-        let dir = std::env::temp_dir();
+        let dir = base_dir.join("cookies-tmp");
+        lajufile_core::paths::ensure_private_dir(&dir).ok()?;
         for _ in 0..8 {
             let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = dir.join(format!("lajufile-yt-{pid}-{seq}.cookies"));
@@ -269,11 +270,12 @@ pub(super) fn ytdlp_work_dir(preferred: Option<&Path>) -> PathBuf {
 /// `yt-dlp -J`, killed if it stalls: a hung run must not outlive the request.
 pub(super) fn ytdlp_listing(
     dir: &Path,
+    data_dir: &Path,
     url: &str,
     cookie: Option<&str>,
     proxy: Option<&str>,
 ) -> Result<VideoListing, String> {
-    let cookie_file = cookie.and_then(TempCookieFile::from_netscape);
+    let cookie_file = cookie.and_then(|c| TempCookieFile::from_netscape_in(c, data_dir));
     let js_runtime = tools::js_runtime_arg(dir);
     let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
     command
@@ -324,6 +326,64 @@ pub(super) fn ytdlp_listing(
         return Err("this link has no downloadable formats".to_string());
     }
     Ok(listing)
+}
+
+/// Expands a supported video playlist URL via `yt-dlp --flat-playlist -J` (up to 200 items).
+pub(super) fn ytdlp_playlist_urls(
+    dir: &Path,
+    url: &str,
+    proxy: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let js_runtime = tools::js_runtime_arg(dir);
+    let mut command = std::process::Command::new(tools::tool_path(dir, tools::YTDLP));
+    command.current_dir(ytdlp_work_dir(None)).args([
+        "--flat-playlist",
+        "--playlist-end",
+        "200",
+        "-J",
+    ]);
+    if let Some(proxy_url) = lajufile_core::http::validate_proxy_url(proxy.unwrap_or(""))? {
+        command.args(["--proxy", &proxy_url]);
+    }
+    if let Some(runtime) = js_runtime.as_deref() {
+        command.args(["--js-runtimes", runtime]);
+    }
+    command
+        .args(["--", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    tools::no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("yt-dlp: {error}"))?;
+    let stdout = read_all(child.stdout.take());
+    let stderr = read_all(child.stderr.take());
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                tools::kill_tree(child.id());
+                let _ = child.wait();
+                return Err("yt-dlp did not answer in time".to_string());
+            }
+            Err(error) => return Err(format!("yt-dlp: {error}")),
+        }
+    };
+    let output = stdout.join().unwrap_or_default();
+    if !status.success() {
+        let error = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).to_string();
+        return Err(format_ytdlp_error(&error));
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&output).map_err(|error| format!("yt-dlp: {error}"))?;
+    let urls = video::parse_playlist_urls(&json);
+    if urls.is_empty() {
+        return Err("no downloadable videos found in playlist".to_string());
+    }
+    Ok(urls)
 }
 
 fn read_all<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<Vec<u8>> {
@@ -884,13 +944,18 @@ mod tests {
 
     #[test]
     fn temp_cookie_file_writes_netscape_cookies_and_cleans_up_on_drop() {
-        assert!(TempCookieFile::from_netscape("SID=abc; HSID=xyz").is_none());
-        assert!(TempCookieFile::from_netscape("# Netscape HTTP Cookie File\n").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(TempCookieFile::from_netscape_in("SID=abc; HSID=xyz", dir.path()).is_none());
+        assert!(
+            TempCookieFile::from_netscape_in("# Netscape HTTP Cookie File\n", dir.path()).is_none()
+        );
 
         let netscape =
             "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tvalue123\n";
         let path = {
-            let file = TempCookieFile::from_netscape(netscape).expect("valid cookie file");
+            let file =
+                TempCookieFile::from_netscape_in(netscape, dir.path()).expect("valid cookie file");
+            assert!(file.path().starts_with(dir.path().join("cookies-tmp")));
             let saved = std::fs::read_to_string(file.path()).unwrap();
             assert!(saved.contains("SID\tvalue123"));
             file.path().to_path_buf()

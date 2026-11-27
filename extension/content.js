@@ -280,6 +280,24 @@ document.addEventListener("click", () => {
   if (menu) menu.style.display = "none";
 });
 
-// YouTube swaps the player on in-page navigation, so re-mount on a slow timer.
-setInterval(mount, 1000);
+// YouTube swaps the player on in-page navigation, so mount on navigation and debounced DOM updates.
+let mountTimer = null;
+function scheduleMount() {
+  if (mountTimer !== null) return;
+  mountTimer = setTimeout(() => {
+    mountTimer = null;
+    if (/^\/(watch|shorts\/)/.test(location.pathname) && !document.getElementById(PANEL_ID)) {
+      mount();
+    }
+  }, 350);
+}
+
+window.addEventListener("yt-navigate-finish", mount);
+window.addEventListener("popstate", mount);
+if (document.documentElement) {
+  new MutationObserver(scheduleMount).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+}
 mount();

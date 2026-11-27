@@ -185,11 +185,11 @@ pub fn batch_dialog(
                     );
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label("From web page:");
+                        ui.label("Web page / Playlist:");
                         ui.add_sized(
                             [ui.available_width() - 104.0, 26.0],
                             egui::TextEdit::singleline(&mut draft.page_url)
-                                .hint_text("https://example.com/releases"),
+                                .hint_text("https://example.com/releases or YouTube playlist URL"),
                         );
                         let label = if grabbing_page {
                             "Fetching..."

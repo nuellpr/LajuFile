@@ -70,9 +70,38 @@ pub struct EngineHandle {
     join: Option<JoinHandle<()>>,
 }
 
+fn backup_corrupt_db(db_path: &Path) {
+    let suffix = format!("corrupt-{}", now_millis());
+    for ext in [None, Some("-wal"), Some("-shm")] {
+        let src = match ext {
+            Some(s) => PathBuf::from(format!("{}{}", db_path.display(), s)),
+            None => db_path.to_path_buf(),
+        };
+        if src.exists() {
+            let dst = PathBuf::from(format!("{}.{suffix}", src.display()));
+            let _ = std::fs::rename(&src, &dst);
+        }
+    }
+}
+
+fn open_store_with_recovery(db_path: &Path) -> Result<(Store, Option<String>), StoreError> {
+    match Store::open(db_path) {
+        Ok(store) => Ok((store, None)),
+        Err(ref err) if err.is_corrupt() => {
+            backup_corrupt_db(db_path);
+            let store = Store::open(db_path)?;
+            Ok((
+                store,
+                Some("Database was corrupted; backed up and recreated".to_string()),
+            ))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 impl EngineHandle {
     pub fn start(config: EngineConfig) -> Result<Self, EngineError> {
-        let store = Store::open(&config.db_path)?;
+        let (store, db_warn) = open_store_with_recovery(&config.db_path)?;
         let (command_tx, command_rx) = mpsc::channel();
         let bridge_commands = command_tx.clone();
         let snapshots = Arc::new(Mutex::new(SnapshotSlot::default()));
@@ -90,6 +119,7 @@ impl EngineHandle {
                     bridge_commands,
                     engine_snapshots,
                     engine_wake,
+                    db_warn,
                 )
             })?;
 
@@ -405,6 +435,7 @@ fn engine_loop(
     bridge_commands: Sender<Command>,
     snapshots: Arc<Mutex<SnapshotSlot>>,
     wake_callback: Arc<RwLock<Option<WakeCallback>>>,
+    db_warn: Option<String>,
 ) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -417,7 +448,7 @@ fn engine_loop(
     let (client, mut startup_message) = if proxy_trimmed.is_empty() {
         (
             build_client(Duration::from_secs(10), Duration::from_secs(30)),
-            None,
+            db_warn,
         )
     } else {
         match build_client_with_proxy(
@@ -425,7 +456,7 @@ fn engine_loop(
             Duration::from_secs(30),
             Some(&proxy_trimmed),
         ) {
-            Ok(client) => (Ok(client), None),
+            Ok(client) => (Ok(client), db_warn),
             Err(err) => (
                 build_client(Duration::from_secs(10), Duration::from_secs(30)),
                 Some(format!("Proxy ignored ({err})")),
@@ -537,7 +568,7 @@ fn engine_loop(
             state.dirty = true;
         }
 
-        if state.poll_videos() || !state.active.is_empty() {
+        if state.poll_videos() {
             state.dirty = true;
         }
         state.tick_scheduler();
@@ -599,6 +630,7 @@ fn engine_loop(
 impl EngineState {
     fn normalize_startup(&mut self) {
         video::cleanup_stale_cookie_files(&std::env::temp_dir());
+        video::cleanup_stale_cookie_files(&self.data_dir.join("cookies-tmp"));
         let Ok(downloads) = self.store.list_downloads() else {
             return;
         };
@@ -864,6 +896,7 @@ impl EngineState {
                 if self.active.get(&id).map(|active| active.generation) != Some(generation) {
                     return;
                 }
+                self.clear_pending(id);
                 if self.store.upsert_segments(id, &segments).is_ok() {
                     self.cached_segments.insert(id, segments);
                 } else {

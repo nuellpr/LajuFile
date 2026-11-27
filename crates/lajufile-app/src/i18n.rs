@@ -1183,6 +1183,11 @@ fn lookup_external_tsv(code: &str, en: &str) -> Option<String> {
         return map.get(en).cloned();
     }
     let map = find_tsv_path(code)
+        .filter(|path| {
+            std::fs::metadata(path)
+                .map(|m| m.len() <= 2 * 1024 * 1024)
+                .unwrap_or(false)
+        })
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|raw| parse_tsv_catalog(&raw))
         .unwrap_or_default();
@@ -1242,6 +1247,7 @@ fn builtin_lookup(code: &str, en: &str) -> Option<&'static str> {
             "Language..." => Some("Bahasa..."),
             "Check for updates..." => Some("Periksa pembaruan..."),
             "Hide" => Some("Sembunyikan"),
+            "Show LajuFile" => Some("Tampilkan LajuFile"),
             "Show progress" => Some("Tampilkan progres"),
             "Software Update" => Some("Pembaruan Aplikasi"),
             "Browser extension wizard..." => Some("Wizard ekstensi browser..."),

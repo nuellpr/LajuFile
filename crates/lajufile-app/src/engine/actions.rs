@@ -213,9 +213,13 @@ impl EngineState {
         }
         let cookie_file = cookie_text
             .as_deref()
-            .and_then(video::TempCookieFile::from_netscape);
+            .and_then(|c| video::TempCookieFile::from_netscape_in(c, &self.data_dir));
         let js_runtime = tools::js_runtime_arg(&dir);
-        let selector = download.video_format.as_deref().unwrap_or(DEFAULT_SELECTOR);
+        let selector = download
+            .video_format
+            .as_deref()
+            .filter(|s| lajufile_core::video::is_valid_video_selector(s))
+            .unwrap_or(DEFAULT_SELECTOR);
         let audio_only = is_audio_only_selector(selector);
         let started_at = std::time::SystemTime::now();
         let work_dir = video::ytdlp_work_dir(download.save_path.parent());
@@ -405,11 +409,7 @@ impl EngineState {
     }
 
     pub(super) fn reset_to_single(&mut self, id: i64, reason: &str) {
-        let Ok(download) = self.store.get_download(id) else {
-            return;
-        };
-        let segments = plan_segments(download.size.unwrap_or(0), false, 1);
-        if self.store.replace_segments(id, &segments, 1, false).is_ok() {
+        if self.store.reset_for_fallback(id).is_ok() {
             let _ = self.store.update_status(id, DownloadStatus::Queued, None);
             self.cache_dirty = true;
             self.message = Some(format!("Falling back to single stream: {reason}"));
@@ -566,6 +566,10 @@ impl EngineState {
                 return;
             }
         };
+        if let Err(error) = ssrf::reject_self_bridge_url(&parsed, self.bridge_status.port) {
+            self.message = Some(error);
+            return;
+        }
         let Ok(download) = self.store.get_download(id) else {
             return;
         };

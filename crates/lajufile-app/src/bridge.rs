@@ -105,6 +105,8 @@ impl BridgeServer {
 struct BridgeAppState {
     token: Arc<RwLock<String>>,
     commands: Sender<Command>,
+    requests_limit: Arc<tokio::sync::Semaphore>,
+    formats_limit: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn start(
@@ -139,7 +141,12 @@ pub async fn start(
         }
     };
 
-    let state = BridgeAppState { token, commands };
+    let state = BridgeAppState {
+        token,
+        commands,
+        requests_limit: Arc::new(tokio::sync::Semaphore::new(16)),
+        formats_limit: Arc::new(tokio::sync::Semaphore::new(2)),
+    };
     let app = router(state);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -297,6 +304,12 @@ async fn downloads(
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     authorize_and_pair(&headers, &state)?;
+    let _permit = state.requests_limit.try_acquire().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "bridge busy" })),
+        )
+    })?;
     let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
     queue_add(&state, request).await
 }
@@ -307,16 +320,28 @@ async fn video(
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     authorize_and_pair(&headers, &state)?;
+    let _permit = state.requests_limit.try_acquire().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "bridge busy" })),
+        )
+    })?;
     let request: BridgeAddRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
-    if request
+    let Some(selector) = request
         .video_format
         .as_deref()
         .map(str::trim)
-        .is_none_or(str::is_empty)
-    {
+        .filter(|s| !s.is_empty())
+    else {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "video_format is required" })),
+        ));
+    };
+    if !lajufile_core::video::is_valid_video_selector(selector) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid video_format" })),
         ));
     }
     queue_add(&state, request).await
@@ -328,6 +353,18 @@ async fn video_formats(
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_and_pair(&headers, &state)?;
+    let _permit = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.formats_limit.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "video format lookup busy, try again" })),
+        )
+    })?
+    .map_err(|_| internal("bridge closed"))?;
     let request: FormatsRequest = serde_json::from_slice(&body).map_err(|_| invalid_body())?;
 
     let (reply, response) = tokio::sync::oneshot::channel();

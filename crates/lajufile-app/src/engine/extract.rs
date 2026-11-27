@@ -38,8 +38,37 @@ pub fn is_supported_archive(path: &Path) -> bool {
     archive_kind(path).is_some()
 }
 
+/// Validates a downloaded tool or archive file before invoking external extraction tools.
+pub(crate) fn validate_archive_before_extract(archive: &Path) -> Result<(), String> {
+    let kind = archive_kind(archive).map(|(k, _)| k).unwrap_or_else(|| {
+        let is_zip = archive
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+        if is_zip {
+            ArchiveKind::Zip
+        } else {
+            ArchiveKind::Tar
+        }
+    });
+    match kind {
+        ArchiveKind::Tar => validate_tar_listing(archive),
+        ArchiveKind::Zip => {
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                validate_zip_listing_unix(archive)
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            {
+                validate_tar_listing(archive)
+            }
+        }
+    }
+}
+
 /// Returns true only for safe relative archive member paths that cannot escape
-/// the destination folder (blocks absolute paths, Windows drive letters, NULs, and `..`).
+/// the destination folder (blocks absolute paths, Windows drive letters, NULs, `..`,
+/// alternate data streams, control/invalid chars, and Windows reserved device names).
 pub fn is_safe_archive_entry(raw: &str) -> bool {
     let trimmed = raw.trim_end_matches(['\r', '\n']);
     if trimmed.is_empty() || trimmed.contains('\0') {
@@ -54,7 +83,16 @@ pub fn is_safe_archive_entry(raw: &str) -> bool {
     }
     let normalized = trimmed.replace('\\', "/");
     for segment in normalized.split('/') {
-        if segment == ".." {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".."
+            || segment.ends_with([' ', '.'])
+            || segment
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+            || lajufile_core::naming::is_reserved_device_name(segment)
+        {
             return false;
         }
     }
@@ -311,7 +349,7 @@ pub fn extract_archive_safely(archive: &Path) -> Result<PathBuf, String> {
     let stem = if raw_stem.trim().is_empty() {
         "extracted".to_string()
     } else {
-        raw_stem
+        lajufile_core::naming::sanitize_file_name(&raw_stem)
     };
     let parent = archive
         .parent()
@@ -334,6 +372,8 @@ pub fn extract_archive_safely(archive: &Path) -> Result<PathBuf, String> {
     let status = match kind {
         ArchiveKind::Tar => {
             let mut cmd = Command::new("tar");
+            #[cfg(unix)]
+            cmd.args(["--no-same-owner", "--no-same-permissions"]);
             cmd.arg("-xf").arg(archive).arg("-C").arg(&dest);
             crate::tools::no_window(&mut cmd);
             cmd.status()
@@ -353,6 +393,8 @@ pub fn extract_archive_safely(archive: &Path) -> Result<PathBuf, String> {
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             {
                 let mut cmd = Command::new("tar");
+                #[cfg(unix)]
+                cmd.args(["--no-same-owner", "--no-same-permissions"]);
                 cmd.arg("-xf").arg(archive).arg("-C").arg(&dest);
                 crate::tools::no_window(&mut cmd);
                 cmd.status()
@@ -449,10 +491,14 @@ mod tests {
     fn safe_archive_entry_blocks_traversal_and_absolute_paths() {
         assert!(is_safe_archive_entry("readme.txt"));
         assert!(is_safe_archive_entry("sub/dir/file.bin"));
+        assert!(is_safe_archive_entry("folder/"));
         assert!(!is_safe_archive_entry("../evil.txt"));
         assert!(!is_safe_archive_entry("a/../../evil.txt"));
         assert!(!is_safe_archive_entry("/etc/passwd"));
         assert!(!is_safe_archive_entry("C:\\Windows\\win.ini"));
+        assert!(!is_safe_archive_entry("sub/payload.txt:ads"));
+        assert!(!is_safe_archive_entry("sub/CON.txt"));
+        assert!(!is_safe_archive_entry("sub/trailing."));
         assert!(!is_safe_archive_entry(""));
     }
 

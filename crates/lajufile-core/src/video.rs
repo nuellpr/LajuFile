@@ -185,11 +185,127 @@ pub fn selector_for_height(height: u32) -> String {
     format!("bv*[height<={height}]+ba/b[height<={height}]/bv*+ba")
 }
 
+/// Validates a yt-dlp `-f` format selector against a strict allowlist of expression characters.
+pub fn is_valid_video_selector(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && !trimmed.starts_with('-')
+        && trimmed.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'+'
+                        | b'*'
+                        | b'/'
+                        | b'.'
+                        | b','
+                        | b':'
+                        | b'['
+                        | b']'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b'!'
+                        | b'('
+                        | b')'
+                        | b'-'
+                        | b' '
+                )
+        })
+}
+
 /// Returns true when the yt-dlp format selector targets audio-only output.
 pub fn is_audio_only_selector(selector: &str) -> bool {
     let lower = selector.to_ascii_lowercase();
     (lower.contains("ba") || lower.contains("bestaudio"))
         && !(lower.contains("bv") || lower.contains("bestvideo"))
+}
+
+const PLAYLIST_HOSTS: &[&str] = &[
+    "youtube.com",
+    "youtu.be",
+    "vimeo.com",
+    "soundcloud.com",
+    "dailymotion.com",
+    "bilibili.com",
+    "twitch.tv",
+];
+
+/// Returns true when a URL points to a supported video playlist or collection.
+pub fn is_playlist_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(url::Host::Domain(domain)) = url.host() else {
+        return false;
+    };
+    let lower = domain.trim_end_matches('.').to_ascii_lowercase();
+    let known_host = PLAYLIST_HOSTS
+        .iter()
+        .any(|h| lower == *h || lower.ends_with(&format!(".{h}")));
+    if !known_host {
+        return false;
+    }
+    url.path().contains("/playlist")
+        || url.path().contains("/sets/")
+        || url
+            .query_pairs()
+            .any(|(k, v)| k == "list" && !v.trim().is_empty())
+}
+
+fn is_youtube_video_id(val: &str) -> bool {
+    val.len() == 11
+        && val
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Extracts up to 200 unique `http`/`https` video URLs from `yt-dlp --flat-playlist -J` output.
+pub fn parse_playlist_urls(json: &Value) -> Vec<String> {
+    const MAX_PLAYLIST_ITEMS: usize = 200;
+    let Some(entries) = json.get("entries").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut urls = Vec::new();
+    for entry in entries {
+        let candidate = entry
+            .get("webpage_url")
+            .and_then(Value::as_str)
+            .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+            .map(str::to_string)
+            .or_else(|| {
+                let raw = entry.get("url").and_then(Value::as_str)?;
+                if raw.starts_with("http://") || raw.starts_with("https://") {
+                    Some(raw.to_string())
+                } else if is_youtube_video_id(raw) {
+                    Some(format!("https://www.youtube.com/watch?v={raw}"))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                let id = entry.get("id").and_then(Value::as_str)?;
+                let is_yt = entry
+                    .get("ie_key")
+                    .or_else(|| entry.get("extractor_key"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|k| k.to_ascii_lowercase().contains("youtube"));
+                (is_yt && !id.is_empty()).then(|| format!("https://www.youtube.com/watch?v={id}"))
+            });
+        if let Some(u) = candidate
+            && !urls.contains(&u)
+        {
+            urls.push(u);
+            if urls.len() >= MAX_PLAYLIST_ITEMS {
+                break;
+            }
+        }
+    }
+    urls
 }
 
 #[cfg(test)]
@@ -251,5 +367,55 @@ mod tests {
         assert_eq!(parsed.title, "A clip");
         assert_eq!(parsed.choices.len(), 4);
         assert_eq!(listing(&json!({})).title, "video");
+    }
+
+    #[test]
+    fn video_selector_allowlist_accepts_expressions_and_blocks_flags() {
+        assert!(is_valid_video_selector(DEFAULT_SELECTOR));
+        assert!(is_valid_video_selector(
+            "bestvideo[height<=1080]+bestaudio/best"
+        ));
+        assert!(is_valid_video_selector("137+140"));
+        assert!(!is_valid_video_selector(""));
+        assert!(!is_valid_video_selector("   "));
+        assert!(!is_valid_video_selector("--exec calc"));
+        assert!(!is_valid_video_selector("-o evil"));
+        assert!(!is_valid_video_selector("best\n--exec calc"));
+        assert!(!is_valid_video_selector(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn playlist_url_detection_and_json_extraction_work() {
+        assert!(is_playlist_url(
+            "https://www.youtube.com/playlist?list=PL123456"
+        ));
+        assert!(is_playlist_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ"
+        ));
+        assert!(is_playlist_url("https://soundcloud.com/artist/sets/album"));
+        assert!(!is_playlist_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
+        assert!(!is_playlist_url("https://example.com/playlist?list=1"));
+
+        let playlist = json!({
+            "entries": [
+                {"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"},
+                {"url": "bbbbbbbbbbb", "ie_key": "Youtube"},
+                {"id": "ccccccccccc", "extractor_key": "Youtube"},
+                {"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"},
+                {"webpage_url": "https://vimeo.com/123456"},
+                {"url": "javascript:alert(1)"}
+            ]
+        });
+        assert_eq!(
+            parse_playlist_urls(&playlist),
+            vec![
+                "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+                "https://www.youtube.com/watch?v=ccccccccccc",
+                "https://vimeo.com/123456",
+            ]
+        );
     }
 }

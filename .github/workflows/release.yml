@@ -37,7 +37,7 @@ jobs:
                 Sort-Object FullName -Descending |
                 Select-Object -First 1 -ExpandProperty FullName
               if (-not $signTool) { throw "signtool.exe not found" }
-              $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+              $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "https://timestamp.digicert.com" }
               $signArgs = @("sign", "/fd", "SHA256", "/tr", $ts, "/td", "SHA256", "/f", $pfx)
               if ($env:WINDOWS_PFX_PASSWORD) { $signArgs += @("/p", $env:WINDOWS_PFX_PASSWORD) }
               & $signTool @signArgs "target/release/lajufile.exe"
@@ -60,7 +60,7 @@ jobs:
             if ($proc.ExitCode -ne 0) { throw "Installer pack failed with exit code $($proc.ExitCode)" }
 
             if ($signTool -and $pfx) {
-              $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+              $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "https://timestamp.digicert.com" }
               $signArgs = @("sign", "/fd", "SHA256", "/tr", $ts, "/td", "SHA256", "/f", $pfx)
               if ($env:WINDOWS_PFX_PASSWORD) { $signArgs += @("/p", $env:WINDOWS_PFX_PASSWORD) }
               & $signTool @signArgs $installer

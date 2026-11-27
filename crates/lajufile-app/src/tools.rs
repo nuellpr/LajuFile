@@ -403,27 +403,32 @@ pub fn install_tools_with_proxy(dir: &Path, proxy: Option<&str>) -> Result<(), S
     let client = build_tool_client(std::time::Duration::from_secs(300), proxy)?;
 
     let ytdlp = tool_path(dir, YTDLP);
-    rt.block_on(download_verified(
+    let ytdlp_sha = rt.block_on(download_verified(
         &client,
         &ytdlp,
         YTDLP_URL,
         YTDLP_SHA256SUMS_URL,
         Some(YTDLP_ASSET),
+        Some("LAJUFILE_YTDLP_SHA256"),
     ))?;
     make_executable(&ytdlp);
 
+    let mut ffmpeg_sha = None;
     if !tool_path(dir, FFMPEG).is_file() {
         let archive = dir.join("ffmpeg-archive");
         let extract = dir.join("ffmpeg-extract");
         let _cleanup = TempCleanup(vec![archive.clone(), extract.clone()]);
 
-        rt.block_on(download_verified(
+        let sha = rt.block_on(download_verified(
             &client,
             &archive,
             FFMPEG_ZIP_URL,
             FFMPEG_SHA256_URL,
             FFMPEG_ASSET,
+            Some("LAJUFILE_FFMPEG_SHA256"),
         ))?;
+        crate::engine::extract::validate_archive_before_extract(&archive)?;
+        ffmpeg_sha = Some(sha);
 
         let _ = std::fs::remove_dir_all(&extract);
         // tar refuses an extraction directory that does not exist yet.
@@ -441,11 +446,24 @@ pub fn install_tools_with_proxy(dir: &Path, proxy: Option<&str>) -> Result<(), S
     }
 
     let mut deno_err = None;
-    if js_runtime_arg(dir).is_none()
-        && let Err(err) = install_deno(&rt, &client, dir)
-    {
-        deno_err = Some(err);
+    let mut deno_sha = None;
+    if js_runtime_arg(dir).is_none() {
+        match install_deno(&rt, &client, dir) {
+            Ok(sha) => deno_sha = Some(sha),
+            Err(err) => deno_err = Some(err),
+        }
     }
+
+    let lock = serde_json::json!({
+        "yt_dlp_sha256": ytdlp_sha,
+        "ffmpeg_sha256": ffmpeg_sha,
+        "deno_sha256": deno_sha,
+        "updated_at_ms": lajufile_core::store::now_millis(),
+    });
+    let _ = std::fs::write(
+        dir.join("tools-lock.json"),
+        serde_json::to_string_pretty(&lock).unwrap_or_default(),
+    );
 
     if !tools_ready(dir) {
         return Err("tools are still missing after install".to_string());
@@ -464,18 +482,20 @@ fn install_deno(
     rt: &tokio::runtime::Runtime,
     client: &reqwest::Client,
     dir: &Path,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let archive = dir.join("deno-archive.zip");
     let extract = dir.join("deno-extract");
     let _cleanup = TempCleanup(vec![archive.clone(), extract.clone()]);
 
-    rt.block_on(download_verified(
+    let deno_sha = rt.block_on(download_verified(
         client,
         &archive,
         DENO_ZIP_URL,
         DENO_SHA256_URL,
         None,
+        Some("LAJUFILE_DENO_SHA256"),
     ))?;
+    crate::engine::extract::validate_archive_before_extract(&archive)?;
 
     let _ = std::fs::remove_dir_all(&extract);
     std::fs::create_dir_all(&extract).map_err(|error| format!("create {extract:?}: {error}"))?;
@@ -512,7 +532,7 @@ fn install_deno(
     let deno = tool_path(dir, DENO);
     std::fs::copy(&found, &deno).map_err(|error| format!("copy deno: {error}"))?;
     make_executable(&deno);
-    Ok(())
+    Ok(deno_sha)
 }
 
 struct TempCleanup(Vec<PathBuf>);
@@ -578,10 +598,32 @@ pub fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<(), String>
     Ok(())
 }
 
+fn is_trusted_tool_host(domain: &str) -> bool {
+    let host = domain.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "github.com"
+            | "api.github.com"
+            | "objects.githubusercontent.com"
+            | "release-assets.githubusercontent.com"
+            | "codeload.github.com"
+            | "gyan.dev"
+            | "www.gyan.dev"
+            | "ffmpeg.martin-riedl.de"
+            | "microsoftedge.microsoft.com"
+    ) || host.ends_with(".githubusercontent.com")
+}
+
 pub fn validate_tool_https_url(raw: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw.trim()).map_err(|e| format!("invalid tool URL: {e}"))?;
-    if url.scheme() != "https" || !url.has_host() {
+    if url.scheme() != "https" {
         return Err(format!("tool URL must use HTTPS: {raw}"));
+    }
+    let Some(url::Host::Domain(domain)) = url.host() else {
+        return Err(format!("tool URL must use a trusted hostname: {raw}"));
+    };
+    if !is_trusted_tool_host(domain) {
+        return Err(format!("untrusted tool host: {domain}"));
     }
     Ok(url)
 }
@@ -644,16 +686,28 @@ async fn download_verified(
     raw_url: &str,
     checksum_url: &str,
     asset_name: Option<&str>,
-) -> Result<(), String> {
+    pinned_env: Option<&str>,
+) -> Result<String, String> {
     use std::io::Write;
 
-    let text = fetch_https_text(client, checksum_url).await?;
-    let expected = parse_tool_sha256(&text, asset_name).ok_or_else(|| {
-        format!(
-            "SHA-256 digest for {} missing from checksum manifest",
-            asset_name.unwrap_or(raw_url)
-        )
-    })?;
+    let expected = if let Some(var) = pinned_env
+        && let Ok(val) = std::env::var(var)
+        && !val.trim().is_empty()
+    {
+        let clean = val.trim().to_ascii_lowercase();
+        if clean.len() != 64 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("{var} must be a 64-character hex SHA-256 digest"));
+        }
+        clean
+    } else {
+        let text = fetch_https_text(client, checksum_url).await?;
+        parse_tool_sha256(&text, asset_name).ok_or_else(|| {
+            format!(
+                "SHA-256 digest for {} missing from checksum manifest",
+                asset_name.unwrap_or(raw_url)
+            )
+        })?
+    };
 
     let url = validate_tool_https_url(raw_url)?;
     let mut part = target.as_os_str().to_owned();
@@ -686,7 +740,8 @@ async fn download_verified(
     drop(writer);
 
     verify_file_sha256(&part, &expected)?;
-    std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))
+    std::fs::rename(&part, target).map_err(|error| format!("rename {target:?}: {error}"))?;
+    Ok(expected)
 }
 
 /// Keeps a console window from flashing: the app has no console in release.
@@ -864,6 +919,8 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *deno-x86_64-pc
         assert!(validate_tool_https_url(DENO_SHA256_URL).is_ok());
         assert!(validate_tool_https_url(EDGE_ADDONS_STORE_URL).is_ok());
         assert!(validate_tool_https_url("http://example.com/ffmpeg.zip").is_err());
+        assert!(validate_tool_https_url("https://evil.example/yt-dlp.exe").is_err());
+        assert!(validate_tool_https_url("https://127.0.0.1/yt-dlp.exe").is_err());
         assert!(validate_tool_https_url("file:///tmp/ffmpeg.zip").is_err());
         assert!(validate_tool_https_url("https://").is_err());
     }

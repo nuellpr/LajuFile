@@ -94,8 +94,30 @@ fn reserved_windows_device_names_are_prefixed() {
     assert_eq!(sanitize_file_name("con.txt"), "_con.txt");
     assert_eq!(sanitize_file_name("AUX"), "_AUX");
     assert_eq!(sanitize_file_name("COM1"), "_COM1");
+    assert_eq!(sanitize_file_name("COM\u{00b9}.txt"), "_COM\u{00b9}.txt");
+    assert_eq!(sanitize_file_name("CONIN$"), "_CONIN$");
     assert_eq!(sanitize_file_name("COM0"), "COM0");
     assert_eq!(sanitize_file_name("LPT10"), "LPT10");
+}
+
+#[test]
+fn dedupe_path_after_truncation_still_blocks_windows_device_names() {
+    let root = tempfile::tempdir().unwrap();
+    let dir_units = root
+        .path()
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .count();
+    let target_len = 250usize.saturating_sub(8);
+    let pad = target_len.saturating_sub(dir_units + 1).max(8);
+    let deep = root.path().join("d".repeat(pad));
+    std::fs::create_dir_all(&deep).unwrap();
+
+    let out = dedupe_path(&deep, "CONference.txt");
+    let name = out.file_name().unwrap().to_str().unwrap();
+    assert!(!name.eq_ignore_ascii_case("CON.txt"), "got {name}");
+    assert!(name.starts_with('_'), "got {name}");
 }
 
 #[test]

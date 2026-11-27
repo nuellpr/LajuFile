@@ -38,6 +38,14 @@ impl EngineState {
             Ok(url) => url,
             Err(error) => return Some(format!("Add failed: {error}")),
         };
+        if let Err(error) = ssrf::reject_self_bridge_url(&url, self.bridge_status.port) {
+            return Some(format!("Add failed: {error}"));
+        }
+        if let Some(ref selector) = request.video_format
+            && !lajufile_core::video::is_valid_video_selector(selector)
+        {
+            return Some("Add failed: invalid video_format".to_string());
+        }
         let normalized_url = url.to_string();
 
         if check_duplicate {
@@ -109,6 +117,10 @@ impl EngineState {
                 return;
             }
         };
+        if let Err(error) = ssrf::reject_self_bridge_url(&url, self.bridge_status.port) {
+            let _ = reply.send(BridgeAddOutcome::Invalid(error));
+            return;
+        }
         let normalized_url = url.to_string();
 
         match self.check_duplicate_url(&normalized_url) {
@@ -639,7 +651,14 @@ impl EngineState {
         cookie: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<VideoListing, String>>,
     ) {
-        if let Err(error) = ssrf::validate_http_url(&url) {
+        let parsed = match ssrf::validate_http_url(&url) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        if let Err(error) = ssrf::reject_self_bridge_url(&parsed, self.bridge_status.port) {
             let _ = reply.send(Err(error));
             return;
         }
@@ -651,10 +670,12 @@ impl EngineState {
             ));
             return;
         }
+        let data_dir = self.data_dir.clone();
         let proxy = self.configured_proxy();
         thread::spawn(move || {
             let _ = reply.send(video::ytdlp_listing(
                 &dir,
+                &data_dir,
                 &url,
                 cookie.as_deref(),
                 proxy.as_deref(),
@@ -688,7 +709,7 @@ impl EngineState {
     }
 
     pub(super) fn grab_page_links(
-        &self,
+        &mut self,
         raw_url: String,
         reply: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     ) {
@@ -707,6 +728,24 @@ impl EngineState {
         }
         let proxy = (!self.settings.proxy_url.trim().is_empty())
             .then(|| self.settings.proxy_url.trim().to_string());
+        if lajufile_core::video::is_playlist_url(parsed.as_str()) {
+            let dir = tools::tools_dir();
+            if !tools::tools_ready(&dir) {
+                self.ensure_tools();
+                let _ = reply.send(Err(
+                    "the video tools are downloading, try again in a minute".to_string(),
+                ));
+                return;
+            }
+            thread::spawn(move || {
+                let _ = reply.send(video::ytdlp_playlist_urls(
+                    &dir,
+                    parsed.as_str(),
+                    proxy.as_deref(),
+                ));
+            });
+            return;
+        }
         self.runtime.spawn(async move {
             let _ = reply.send(ssrf::fetch_page_links(parsed, proxy).await);
         });

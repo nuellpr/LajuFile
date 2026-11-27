@@ -112,10 +112,7 @@ impl Drop for SingleInstanceGuard {
 }
 
 fn load_existing_settings() -> Option<Settings> {
-    let dir = paths::data_dir();
-    let path = paths::settings_path(&dir);
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    Settings::load_readonly(&paths::data_dir())
 }
 
 /// Grants foreground activation (on Windows) and posts an authenticated `/wake`
@@ -194,39 +191,140 @@ unsafe extern "system" fn enum_own_window(
     1
 }
 
+#[cfg(windows)]
+fn find_own_hwnd(title: &str) -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows;
+    let title_utf16: Vec<u16> = title.encode_utf16().collect();
+    let mut ctx = FindOwnWindowCtx {
+        pid: std::process::id(),
+        title: &title_utf16,
+        found: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumWindows(
+            Some(enum_own_window),
+            (&mut ctx as *mut FindOwnWindowCtx<'_>) as isize,
+        );
+    }
+    ctx.found
+}
+
 /// Restores and activates this process's window matching `title` on Windows.
 pub fn focus_window_by_title(title: &str) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow,
-            ShowWindow,
+            IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
         };
-        let title_utf16: Vec<u16> = title.encode_utf16().collect();
-        let mut ctx = FindOwnWindowCtx {
-            pid: std::process::id(),
-            title: &title_utf16,
-            found: std::ptr::null_mut(),
-        };
-        unsafe {
-            EnumWindows(
-                Some(enum_own_window),
-                (&mut ctx as *mut FindOwnWindowCtx<'_>) as isize,
-            );
-        }
-        if !ctx.found.is_null() {
+        let hwnd = find_own_hwnd(title);
+        if !hwnd.is_null() {
             unsafe {
-                if IsIconic(ctx.found) != 0 {
-                    ShowWindow(ctx.found, SW_RESTORE);
-                } else if IsWindowVisible(ctx.found) == 0 {
-                    ShowWindow(ctx.found, SW_SHOW);
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                } else if IsWindowVisible(hwnd) == 0 {
+                    ShowWindow(hwnd, SW_SHOW);
                 }
-                SetForegroundWindow(ctx.found);
+                SetForegroundWindow(hwnd);
             }
         }
     }
     #[cfg(not(windows))]
     let _ = title;
+}
+
+#[cfg(any(windows, test))]
+fn copy_utf16_trunc(dst: &mut [u16], text: &str) {
+    dst.fill(0);
+    if dst.len() <= 1 {
+        return;
+    }
+    let cap = dst.len() - 1;
+    let mut pos = 0usize;
+    for ch in text.chars() {
+        let len = ch.len_utf16();
+        if pos + len > cap {
+            break;
+        }
+        ch.encode_utf16(&mut dst[pos..pos + len]);
+        pos += len;
+    }
+}
+
+/// Shows an OS-native notification when a download finishes while LajuFile is hidden or minimized.
+pub fn notify_download_complete(title: &str, body: &str) {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::Shell::{
+            NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NOTIFYICONDATAW, Shell_NotifyIconW,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IDI_INFORMATION, LoadIconW};
+
+        const NOTIFY_ID: u32 = 0x4C46_5453;
+        static NOTIFY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let hwnd = find_own_hwnd("LajuFile");
+        if hwnd.is_null() {
+            return;
+        }
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = NOTIFY_ID;
+        nid.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
+        nid.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_INFORMATION) };
+        nid.dwInfoFlags = NIIF_INFO;
+        copy_utf16_trunc(&mut nid.szTip, "LajuFile");
+        copy_utf16_trunc(&mut nid.szInfoTitle, title);
+        copy_utf16_trunc(&mut nid.szInfo, body);
+
+        let seq = NOTIFY_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        unsafe {
+            if Shell_NotifyIconW(NIM_MODIFY, &nid) == 0 {
+                let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+            }
+        }
+        let hwnd_raw = hwnd as isize;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            if NOTIFY_SEQ.load(Ordering::Relaxed) == seq {
+                let mut del: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+                del.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                del.hWnd = hwnd_raw as HWND;
+                del.uID = NOTIFY_ID;
+                unsafe {
+                    let _ = Shell_NotifyIconW(NIM_DELETE, &del);
+                }
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        let _ = Command::new("osascript")
+            .env("LF_TITLE", title)
+            .env("LF_BODY", body)
+            .args([
+                "-e",
+                "display notification (system attribute \"LF_BODY\") with title (system attribute \"LF_TITLE\")",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::process::{Command, Stdio};
+        let _ = Command::new("notify-send")
+            .args(["-a", "LajuFile", "--", title, body])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
 }
 
 fn set_prevent_sleep_os(prevent: bool) {
@@ -570,5 +668,15 @@ mod tests {
     fn local_minutes_since_midnight_is_within_day_bounds() {
         let mins = local_minutes_since_midnight().expect("local clock available");
         assert!(mins < 24 * 60);
+    }
+
+    #[test]
+    fn copy_utf16_trunc_never_splits_surrogate_pair_or_overflows() {
+        let mut buf = [0u16; 4];
+        // "ab🚀" is 2 + 2 = 4 UTF-16 code units; with 3 usable slots before NUL,
+        // the emoji surrogate pair must not be split in half.
+        copy_utf16_trunc(&mut buf, "ab🚀");
+        assert_eq!(buf, [b'a' as u16, b'b' as u16, 0, 0]);
+        assert_eq!(String::from_utf16(&buf[..2]).unwrap(), "ab");
     }
 }

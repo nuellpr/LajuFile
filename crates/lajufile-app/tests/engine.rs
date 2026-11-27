@@ -2112,3 +2112,326 @@ fn queue_complete_action_waits_for_in_flight_probes() {
     );
     handle.shutdown();
 }
+
+#[test]
+fn fallback_updates_size_when_remote_file_changes_on_if_range_200() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    const V1_SIZE: usize = 128 * 1024;
+    const V2_SIZE: usize = 192 * 1024;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let use_v2 = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let use_v2_srv = Arc::clone(&use_v2);
+    let stop_srv = Arc::clone(&stop);
+
+    let srv_thread = std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                    let is_v2 = use_v2_srv.load(Ordering::SeqCst);
+                    let is_probe = req.contains("range: bytes=0-0\r\n");
+
+                    if !is_v2 && is_probe {
+                        let header = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/{V1_SIZE}\r\nETag: \"v1\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(b"A");
+                    } else if !is_v2 {
+                        let header = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {V1_SIZE}\r\nContent-Range: bytes 0-{}/{V1_SIZE}\r\nETag: \"v1\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            V1_SIZE - 1
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&vec![b'A'; 16 * 1024]);
+                        let _ = stream.flush();
+                        let chunk = vec![b'A'; 1024];
+                        for _ in 0..((V1_SIZE - 16 * 1024) / 1024) {
+                            if stop_srv.load(Ordering::SeqCst) || use_v2_srv.load(Ordering::SeqCst)
+                            {
+                                break;
+                            }
+                            if stream.write_all(&chunk).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(80));
+                        }
+                    } else {
+                        let body = vec![b'B'; V2_SIZE];
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {V2_SIZE}\r\nETag: \"v2\"\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("http://{addr}/changing.bin"),
+            file_name: Some("changing.bin".to_string()),
+            save_dir: None,
+            start_now: true,
+            connections: Some(2),
+            referrer: None,
+            user_agent: None,
+            cookie: None,
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    let active = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Downloading && d.downloaded > 0)
+        },
+        Duration::from_secs(15),
+    );
+    let id = active.downloads[0].id;
+    handle.send(Command::Pause(id)).unwrap();
+    wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+
+    // Server now swaps to a larger v2 file and responds 200 OK on If-Range mismatch.
+    use_v2.store(true, Ordering::SeqCst);
+    handle.send(Command::Resume(id)).unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(done.downloads[0].size, Some(V2_SIZE as u64));
+    assert_eq!(
+        std::fs::read(&done.downloads[0].save_path).unwrap(),
+        vec![b'B'; V2_SIZE]
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    handle.shutdown();
+    let _ = srv_thread.join();
+}
+
+#[test]
+fn update_url_to_new_host_strips_cookies() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let l1 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a1 = l1.local_addr().unwrap();
+    l1.set_nonblocking(true).unwrap();
+
+    let l2 = TcpListener::bind("[::1]:0").unwrap();
+    let a2 = l2.local_addr().unwrap();
+    l2.set_nonblocking(true).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2_cookies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stop1 = Arc::clone(&stop);
+    let stop2 = Arc::clone(&stop);
+    let s2_cookies_srv = Arc::clone(&s2_cookies);
+
+    let spawn_srv = |listener: TcpListener,
+                     stop_flag: Arc<AtomicBool>,
+                     seen_cookies: Option<Arc<Mutex<Vec<String>>>>| {
+        std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if let Some(ref log) = seen_cookies {
+                            for line in req.lines() {
+                                if line.to_ascii_lowercase().starts_with("cookie:") {
+                                    log.lock().unwrap().push(line.to_string());
+                                }
+                            }
+                        }
+                        let body = b"ok-cookie-test";
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.write_all(body);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    let t1 = spawn_srv(l1, stop1, None);
+    let t2 = spawn_srv(l2, stop2, Some(s2_cookies_srv));
+
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    handle
+        .send(Command::Add(AddRequest {
+            url: format!("http://{a1}/secret.bin"),
+            file_name: Some("secret.bin".to_string()),
+            save_dir: None,
+            start_now: false,
+            connections: Some(1),
+            referrer: Some("https://origin.example/page".to_string()),
+            user_agent: None,
+            cookie: Some("session=topsecret".to_string()),
+            video_format: None,
+            video_size: None,
+            expected_sha256: None,
+        }))
+        .unwrap();
+
+    let paused = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Paused)
+        },
+        Duration::from_secs(15),
+    );
+    let id = paused.downloads[0].id;
+    assert!(paused.downloads[0].cookie_enc.is_some());
+
+    handle
+        .send(Command::UpdateUrlAndResume {
+            id,
+            url: format!("http://{a2}/secret.bin"),
+        })
+        .unwrap();
+
+    let done = wait_for(
+        &handle,
+        |s| {
+            s.downloads
+                .first()
+                .is_some_and(|d| d.status == DownloadStatus::Done)
+        },
+        Duration::from_secs(15),
+    );
+    assert_eq!(done.downloads[0].cookie_enc, None);
+    assert_eq!(done.downloads[0].referrer, None);
+    assert!(
+        s2_cookies.lock().unwrap().is_empty(),
+        "cookies leaked to new host: {:?}",
+        *s2_cookies.lock().unwrap()
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    handle.shutdown();
+    let _ = t1.join();
+    let _ = t2.join();
+}
+
+#[test]
+fn add_rejects_cloud_metadata_and_self_bridge_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = EngineHandle::start(EngineConfig {
+        data_dir: dir.path().to_path_buf(),
+        db_path: dir.path().join("lajufile.db"),
+        settings: test_settings(dir.path()),
+    })
+    .unwrap();
+
+    let bound = wait_for(
+        &handle,
+        |s| s.bridge.state == lajufile_app::bridge::BridgeState::Bound && s.bridge.port != 0,
+        Duration::from_secs(10),
+    );
+    let bridge_port = bound.bridge.port;
+
+    for bad_url in [
+        "http://169.254.169.254/latest/meta-data/",
+        &format!("http://127.0.0.1:{bridge_port}/health"),
+    ] {
+        handle
+            .send(Command::Add(AddRequest {
+                url: bad_url.to_string(),
+                file_name: None,
+                save_dir: None,
+                start_now: true,
+                connections: None,
+                referrer: None,
+                user_agent: None,
+                cookie: None,
+                video_format: None,
+                video_size: None,
+                expected_sha256: None,
+            }))
+            .unwrap();
+    }
+
+    let snap = wait_for(
+        &handle,
+        |s| {
+            s.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Add failed"))
+        },
+        Duration::from_secs(5),
+    );
+    assert!(snap.downloads.is_empty());
+    handle.shutdown();
+}

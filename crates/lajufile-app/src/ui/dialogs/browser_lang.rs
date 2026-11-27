@@ -20,9 +20,13 @@ enum BrowserKind {
     Firefox,
 }
 
-pub(super) fn quick_pair_payload(settings: &Settings) -> String {
+pub(super) fn quick_pair_payload(settings: &Settings, bridge: Option<&BridgeStatus>) -> String {
+    let port = bridge
+        .filter(|status| status.port != 0)
+        .map(|status| status.port)
+        .unwrap_or(settings.bridge_port);
     serde_json::json!({
-        "port": settings.bridge_port,
+        "port": port,
         "token": settings.bridge_token,
     })
     .to_string()
@@ -256,7 +260,9 @@ pub fn browser_setup_dialog(
                                                         };
                                                         if !browser.is_firefox {
                                                             ui.ctx().copy_text(
-                                                                quick_pair_payload(settings),
+                                                                quick_pair_payload(
+                                                                    settings, bridge,
+                                                                ),
                                                             );
                                                             action = Some(Action::LaunchBrowser {
                                                                 browser_name: browser
@@ -320,6 +326,10 @@ pub fn browser_setup_dialog(
                             });
                         } else if selected_browser == BrowserKind::Edge {
                             let store_url = crate::tools::EDGE_ADDONS_STORE_URL;
+                            let bound_port = bridge
+                                .filter(|status| status.port != 0)
+                                .map(|status| status.port)
+                                .unwrap_or(settings.bridge_port);
                             settings_card(ui, &sp, |ui| {
                                 card_kicker(
                                     ui,
@@ -350,7 +360,7 @@ pub fn browser_setup_dialog(
                                     }
                                     ui.add_space(8.0);
                                     if figma_button(ui, "Open Store", 98.0, 30.0, true, &sp) {
-                                        ui.ctx().copy_text(quick_pair_payload(settings));
+                                        ui.ctx().copy_text(quick_pair_payload(settings, bridge));
                                         action = Some(Action::LaunchBrowser {
                                             browser_name: "Microsoft Edge".to_string(),
                                             extensions_url: store_url.to_string(),
@@ -365,7 +375,7 @@ pub fn browser_setup_dialog(
                                     ui.label(
                                         RichText::new(format!(
                                             "Port {} · Token {}",
-                                            settings.bridge_port,
+                                            bound_port,
                                             mask_token(&settings.bridge_token)
                                         ))
                                         .monospace()
@@ -383,7 +393,9 @@ pub fn browser_setup_dialog(
                                                 false,
                                                 &sp,
                                             ) {
-                                                ui.ctx().copy_text(quick_pair_payload(settings));
+                                                ui.ctx().copy_text(quick_pair_payload(
+                                                    settings, bridge,
+                                                ));
                                             }
                                         },
                                     );
@@ -464,11 +476,15 @@ pub fn browser_setup_dialog(
                                 ui.add_space(10.0);
                                 card_kicker(ui, "3. PASTE QUICK-PAIR IN POPUP OR OPTIONS", &sp);
                                 ui.add_space(6.0);
+                                let bound_port = bridge
+                                    .filter(|status| status.port != 0)
+                                    .map(|status| status.port)
+                                    .unwrap_or(settings.bridge_port);
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         RichText::new(format!(
                                             "Port {} · Token {}",
-                                            settings.bridge_port,
+                                            bound_port,
                                             mask_token(&settings.bridge_token)
                                         ))
                                         .monospace()
@@ -486,7 +502,9 @@ pub fn browser_setup_dialog(
                                                 true,
                                                 &sp,
                                             ) {
-                                                ui.ctx().copy_text(quick_pair_payload(settings));
+                                                ui.ctx().copy_text(quick_pair_payload(
+                                                    settings, bridge,
+                                                ));
                                             }
                                         },
                                     );

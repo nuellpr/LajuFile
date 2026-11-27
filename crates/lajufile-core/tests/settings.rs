@@ -89,9 +89,11 @@ fn non_hex_token_is_repaired_and_persisted() {
 
     let raw = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(
-        json["bridge_token"].as_str(),
-        Some(loaded.bridge_token.as_str())
+    assert!(!raw.contains(&loaded.bridge_token));
+    assert!(
+        json["bridge_token"]
+            .as_str()
+            .is_some_and(|v| v.starts_with("enc:v1:"))
     );
 
     let again = Settings::load_or_create(dir.path()).unwrap();
@@ -113,8 +115,13 @@ fn short_token_is_repaired_and_persisted() {
 
     let raw = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(
-        json["bridge_token"].as_str(),
-        Some(loaded.bridge_token.as_str())
+    assert!(!raw.contains(&loaded.bridge_token));
+    assert!(
+        json["bridge_token"]
+            .as_str()
+            .is_some_and(|v| v.starts_with("enc:v1:"))
     );
+
+    let again = Settings::load_or_create(dir.path()).unwrap();
+    assert_eq!(again.bridge_token, loaded.bridge_token);
 }

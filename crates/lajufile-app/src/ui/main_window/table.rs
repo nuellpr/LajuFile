@@ -613,15 +613,8 @@ fn paint_status_icon(ui: &egui::Ui, rect: Rect, status: DownloadStatus, color: C
             );
         }
         DownloadStatus::Queued => {
-            ui.ctx().request_repaint_after(Duration::from_millis(80));
-            let t = ui.ctx().input(|i| i.time);
-            let phase = (t * 1.3).fract() as f32;
-            painter.circle_filled(c, 2.0, color);
-            painter.circle_stroke(
-                c,
-                2.0 + phase * 2.6,
-                Stroke::new(1.0, color.gamma_multiply(0.7 * (1.0 - phase))),
-            );
+            painter.circle_filled(c, 1.8, color);
+            painter.circle_stroke(c, 4.0, Stroke::new(1.1, color.gamma_multiply(0.55)));
         }
         DownloadStatus::Paused => {
             painter.rect_filled(

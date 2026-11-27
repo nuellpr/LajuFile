@@ -1,7 +1,7 @@
 param(
     [string]$PfxPath = $env:WINDOWS_PFX_PATH,
     [string]$PfxPassword = $env:WINDOWS_PFX_PASSWORD,
-    [string]$TimestampUrl = $(if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" })
+    [string]$TimestampUrl = $(if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "https://timestamp.digicert.com" })
 )
 
 $ErrorActionPreference = "Stop"

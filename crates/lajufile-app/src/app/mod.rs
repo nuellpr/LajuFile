@@ -69,6 +69,7 @@ pub struct LajuFileApp {
     pub(crate) theme: Theme,
     pub(crate) ui_scale_pct: u32,
     pub(crate) tray: Option<Tray>,
+    pub(crate) hidden_to_tray: bool,
     pub(crate) allow_exit: bool,
     pub(crate) tray_tooltip: String,
     pub(crate) bridge_test: Option<mpsc::Receiver<Result<(), String>>>,
@@ -123,7 +124,7 @@ impl LajuFileApp {
         .ok();
         let tray = icon
             .as_ref()
-            .and_then(|icon| tray::create(icon, &cc.egui_ctx));
+            .and_then(|icon| tray::create(icon, &cc.egui_ctx, &language));
 
         let add_draft = AddDraft::for_settings(&settings);
         let batch_draft = BatchDraft::for_settings(&settings);
@@ -186,6 +187,7 @@ impl LajuFileApp {
             theme,
             ui_scale_pct,
             tray,
+            hidden_to_tray: false,
             allow_exit: false,
             tray_tooltip: String::new(),
             bridge_test: None,
@@ -290,6 +292,8 @@ impl LajuFileApp {
             .map(|download| download.id)
             .collect();
         if let Some(seen) = &mut self.seen_done {
+            let backgrounded =
+                self.hidden_to_tray || ctx.input(|i| i.viewport().minimized.unwrap_or(false));
             for id in &done_now {
                 if !seen.contains(id) {
                     if self.progress_id == Some(*id) {
@@ -297,6 +301,12 @@ impl LajuFileApp {
                     }
                     if self.hidden_progress_id == Some(*id) {
                         self.hidden_progress_id = None;
+                    }
+                    if backgrounded
+                        && let Some(download) = snapshot.downloads.iter().find(|d| d.id == *id)
+                    {
+                        let title = crate::i18n::translate(&self.language, "Download complete");
+                        crate::platform::notify_download_complete(&title, &download.file_name);
                     }
                     if snapshot.settings.show_complete_dialog {
                         self.completed_id = Some(*id);
@@ -541,7 +551,8 @@ impl LajuFileApp {
         }
     }
 
-    fn show_window(&self, ctx: &egui::Context) {
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden_to_tray = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -913,6 +924,7 @@ impl LajuFileApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden_to_tray = true;
             self.clipboard = None;
             crate::platform::trim_process_memory();
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -935,13 +947,18 @@ impl eframe::App for LajuFileApp {
         self.poll_checksum();
         self.poll_updater(ctx);
         self.update_tray_tooltip();
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= Duration::from_secs(4))
+        {
+            self.toast = None;
+        }
         let has_active_downloads = self.snapshot.as_ref().is_some_and(|s| {
-            s.downloads.iter().any(|d| {
-                matches!(
-                    d.status,
-                    DownloadStatus::Downloading | DownloadStatus::Queued
-                )
-            })
+            !s.speeds.is_empty()
+                || s.downloads
+                    .iter()
+                    .any(|d| d.status == DownloadStatus::Downloading)
         });
         let is_busy = has_active_downloads
             || self.bridge_test.is_some()

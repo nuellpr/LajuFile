@@ -268,6 +268,16 @@ fn unseal_secret(stored: &str) -> String {
 }
 
 impl Settings {
+    /// Reads and unseals settings from disk without creating or modifying the file.
+    pub fn load_readonly(dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(paths::settings_path(dir)).ok()?;
+        let mut settings: Self = serde_json::from_str(&text).ok()?;
+        settings.bridge_token = unseal_secret(&settings.bridge_token);
+        settings.hf_token = unseal_secret(&settings.hf_token);
+        settings.proxy_url = unseal_secret(&settings.proxy_url);
+        Some(settings)
+    }
+
     pub fn load_or_create(dir: &Path) -> Result<Self, SettingsError> {
         paths::ensure_private_dir(dir).map_err(|source| SettingsError::Io {
             path: dir.to_path_buf(),
@@ -295,6 +305,11 @@ impl Settings {
             })?;
 
         let mut needs_resave = false;
+        let raw_bridge = settings.bridge_token.trim().to_string();
+        if !raw_bridge.is_empty() && !raw_bridge.starts_with(SEALED_SECRET_PREFIX) {
+            needs_resave = true;
+        }
+        settings.bridge_token = unseal_secret(&raw_bridge);
         if !is_valid_token(&settings.bridge_token) {
             settings.bridge_token = generate_token();
             needs_resave = true;
@@ -331,6 +346,7 @@ impl Settings {
         let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = dir.join(format!("settings.json.tmp.{}.{seq}", std::process::id()));
         let mut persisted = self.clone();
+        persisted.bridge_token = seal_secret(&persisted.bridge_token, &path)?;
         persisted.hf_token = seal_secret(&persisted.hf_token, &path)?;
         if proxy_has_credentials(&persisted.proxy_url) {
             persisted.proxy_url = seal_secret(&persisted.proxy_url, &path)?;
@@ -468,13 +484,18 @@ mod tests {
         settings.save(dir.path()).unwrap();
 
         let raw = std::fs::read_to_string(paths::settings_path(dir.path())).unwrap();
+        assert!(!raw.contains(&settings.bridge_token));
         assert!(!raw.contains("hf_secret_token_12345"));
         assert!(!raw.contains("s3cr3t"));
         assert!(raw.contains(SEALED_SECRET_PREFIX));
 
         let loaded = Settings::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.bridge_token, settings.bridge_token);
         assert_eq!(loaded.hf_token, "hf_secret_token_12345");
         assert_eq!(loaded.proxy_url, "http://alice:s3cr3t@127.0.0.1:8080");
+        let ro = Settings::load_readonly(dir.path()).unwrap();
+        assert_eq!(ro.bridge_token, settings.bridge_token);
+        assert_eq!(ro.hf_token, "hf_secret_token_12345");
 
         // Legacy plaintext settings migrate seamlessly and get sealed on load.
         let mut legacy: serde_json::Value = serde_json::from_str(&raw).unwrap();

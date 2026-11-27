@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use lajufile_core::http::DEFAULT_USER_AGENT;
+use lajufile_core::http::{DEFAULT_USER_AGENT, is_forbidden_download_url, is_public_ip};
 use url::Url;
 
 pub(super) fn validate_http_url(raw: &str) -> Result<Url, String> {
@@ -8,43 +8,29 @@ pub(super) fn validate_http_url(raw: &str) -> Result<Url, String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("only http:// and https:// URLs are supported".to_string());
     }
+    if is_forbidden_download_url(&url) {
+        return Err("refusing link-local, metadata, or reserved IP address".to_string());
+    }
     Ok(url)
 }
 
-fn is_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let oct = v4.octets();
-            let shared_cgnat = oct[0] == 100 && (oct[1] & 0xc0) == 64;
-            let benchmark = oct[0] == 198 && (oct[1] & 0xfe) == 18;
-            let reserved = oct[0] == 0 || oct[0] >= 240;
-            !v4.is_private()
-                && !v4.is_loopback()
-                && !v4.is_link_local()
-                && !v4.is_broadcast()
-                && !v4.is_documentation()
-                && !v4.is_unspecified()
-                && !v4.is_multicast()
-                && !shared_cgnat
-                && !benchmark
-                && !reserved
-        }
-        std::net::IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_ip(std::net::IpAddr::V4(mapped));
-            }
-            let seg = v6.segments();
-            let ula = (seg[0] & 0xfe00) == 0xfc00;
-            let link_local = (seg[0] & 0xffc0) == 0xfe80;
-            let site_local = (seg[0] & 0xffc0) == 0xfec0;
-            !v6.is_loopback()
-                && !v6.is_unspecified()
-                && !v6.is_multicast()
-                && !ula
-                && !link_local
-                && !site_local
-        }
+pub(super) fn reject_self_bridge_url(url: &Url, bridge_port: u16) -> Result<(), String> {
+    if bridge_port == 0 || url.port_or_known_default() != Some(bridge_port) {
+        return Ok(());
     }
+    let is_loopback = match url.host() {
+        Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
+        Some(url::Host::Ipv6(v6)) => v6.is_loopback(),
+        Some(url::Host::Domain(domain)) => {
+            let lower = domain.trim_end_matches('.').to_ascii_lowercase();
+            lower == "localhost" || lower.ends_with(".localhost")
+        }
+        None => false,
+    };
+    if is_loopback {
+        return Err("refusing to target LajuFile's own local bridge".to_string());
+    }
+    Ok(())
 }
 
 pub(super) fn validate_public_page_url(url: &Url) -> Result<(), String> {
@@ -238,10 +224,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_http_url_rejects_non_http_schemes() {
+    fn validate_http_url_rejects_non_http_schemes_and_metadata_ips() {
         assert!(validate_http_url("https://example.com/a.zip").is_ok());
         assert!(validate_http_url("http://example.com/a.zip").is_ok());
+        assert!(validate_http_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(validate_http_url("http://[::ffff:169.254.169.254]/").is_err());
         assert!(validate_http_url("file:///tmp/a.zip").is_err());
         assert!(validate_http_url("javascript:alert(1)").is_err());
+
+        let self_bridge = Url::parse("http://127.0.0.1:53841/health").unwrap();
+        assert!(reject_self_bridge_url(&self_bridge, 53841).is_err());
+        let other_port = Url::parse("http://127.0.0.1:8080/file.bin").unwrap();
+        assert!(reject_self_bridge_url(&other_port, 53841).is_ok());
     }
 }

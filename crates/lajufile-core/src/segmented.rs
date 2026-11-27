@@ -407,6 +407,14 @@ where
         }
     }
 
+    let temp_file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&spec.temp_path)
+        .await
+        .map_err(DownloadError::Io)?;
+    temp_file.sync_all().await.map_err(DownloadError::Io)?;
+    drop(temp_file);
+
     let actual = tokio::fs::metadata(&spec.temp_path)
         .await
         .map_err(DownloadError::Io)?
@@ -531,7 +539,6 @@ where
         match result {
             Ok(()) => {
                 file.flush().await.map_err(DownloadError::Io)?;
-                file.sync_all().await.map_err(DownloadError::Io)?;
                 let target_len = seg_bounds
                     .lock()
                     .expect("segment bounds mutex poisoned")
@@ -556,6 +563,7 @@ where
     Err(SegmentedError::Download(DownloadError::Status(0)))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn flush_segment_buf<F>(
     segment: &Segment,
     seg_bounds: &Mutex<SegmentBounds>,
@@ -564,6 +572,8 @@ async fn flush_segment_buf<F>(
     done: &mut u64,
     total_done: &AtomicU64,
     on_progress: &Mutex<F>,
+    force_emit: bool,
+    last_emit: &mut std::time::Instant,
 ) -> Result<bool, SegmentedError>
 where
     F: FnMut(u32, u64, u64),
@@ -594,10 +604,13 @@ where
         *done = b.done;
     }
     let total = total_done.fetch_add(flushed, Ordering::Relaxed) + flushed;
-    let mut callback = on_progress
-        .lock()
-        .expect("progress callback mutex poisoned");
-    callback(segment.idx, *done, total);
+    if force_emit || reached_end || last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+        let mut callback = on_progress
+            .lock()
+            .expect("progress callback mutex poisoned");
+        callback(segment.idx, *done, total);
+        *last_emit = std::time::Instant::now();
+    }
     Ok(reached_end)
 }
 
@@ -672,6 +685,7 @@ where
     const WRITE_BUF_CAP: usize = 128 * 1024;
     let mut write_buf: Vec<u8> = Vec::with_capacity(WRITE_BUF_CAP);
     let mut last_notify = std::time::Instant::now();
+    let mut last_emit = std::time::Instant::now();
     let mut response = response;
     while let Some(chunk) = response.chunk().await.map_err(DownloadError::Request)? {
         let (current_end, committed_done) = {
@@ -714,6 +728,7 @@ where
                 || last_notify.elapsed() >= std::time::Duration::from_millis(50)
                 || reached_end)
         {
+            let force_emit = *done == 0;
             let finished = flush_segment_buf(
                 segment,
                 seg_bounds,
@@ -722,6 +737,8 @@ where
                 done,
                 total_done,
                 on_progress,
+                force_emit,
+                &mut last_emit,
             )
             .await?;
             last_notify = std::time::Instant::now();
@@ -739,6 +756,8 @@ where
             done,
             total_done,
             on_progress,
+            true,
+            &mut last_emit,
         )
         .await?;
     }

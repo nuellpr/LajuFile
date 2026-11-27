@@ -143,7 +143,7 @@ where
 
 pub(crate) fn is_retryable_error(err: &DownloadError) -> bool {
     match err {
-        DownloadError::Request(_) | DownloadError::SizeMismatch { .. } => true,
+        DownloadError::Request(_) => true,
         DownloadError::Status(status) => *status == 429 || (500..600).contains(status),
         _ => false,
     }

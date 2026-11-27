@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LajuFile Capture",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "minimum_chrome_version": "102",
   "description": "Send downloads from Chrome, Brave, Edge, Vivaldi, Opera, and Chromium browsers on Windows, macOS, and Linux to LajuFile.",
   "permissions": [
@@ -16,6 +16,9 @@
     "<all_urls>",
     "http://127.0.0.1/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none';"
+  },
   "background": {
     "service_worker": "background.js"
   },

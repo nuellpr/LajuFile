@@ -403,6 +403,49 @@ fn update_url_clears_validators_and_error() {
 }
 
 #[test]
+fn update_url_strips_cookies_and_referrer_across_hosts_or_https_downgrade() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut new = sample("https://origin.example/old.zip", 100);
+    new.cookie_enc = Some(b"sealed-secret".to_vec());
+    new.referrer = Some("https://origin.example/page".to_string());
+    let id = store.insert_download(&new).unwrap();
+
+    // Same HTTPS host preserves cookie & referrer.
+    store
+        .update_url(id, "https://origin.example/refreshed.zip")
+        .unwrap();
+    let same_host = store.get_download(id).unwrap();
+    assert_eq!(
+        same_host.cookie_enc.as_deref(),
+        Some(b"sealed-secret".as_slice())
+    );
+    assert_eq!(
+        same_host.referrer.as_deref(),
+        Some("https://origin.example/page")
+    );
+
+    // Different host strips cookie & referrer.
+    store
+        .update_url(id, "https://mirror.example/refreshed.zip")
+        .unwrap();
+    let diff_host = store.get_download(id).unwrap();
+    assert_eq!(diff_host.cookie_enc, None);
+    assert_eq!(diff_host.referrer, None);
+
+    // HTTPS -> HTTP downgrade on same host also strips cookie & referrer.
+    let mut https_row = sample("https://origin.example/file.zip", 100);
+    https_row.cookie_enc = Some(b"sealed-secret".to_vec());
+    https_row.referrer = Some("https://origin.example/page".to_string());
+    let id2 = store.insert_download(&https_row).unwrap();
+    store
+        .update_url(id2, "http://origin.example/file.zip")
+        .unwrap();
+    let downgraded = store.get_download(id2).unwrap();
+    assert_eq!(downgraded.cookie_enc, None);
+    assert_eq!(downgraded.referrer, None);
+}
+
+#[test]
 fn update_location_renames_and_updates_paths() {
     let mut store = Store::open_in_memory().unwrap();
     let id = store

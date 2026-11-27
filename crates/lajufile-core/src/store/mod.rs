@@ -8,6 +8,24 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
 use std::time::Duration;
 
+#[inline]
+fn to_sql_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
+fn same_cookie_origin(old_raw: &str, new_raw: &str) -> bool {
+    let (Ok(old_u), Ok(new_u)) = (url::Url::parse(old_raw), url::Url::parse(new_raw)) else {
+        return false;
+    };
+    if old_u.scheme() == "https" && new_u.scheme() != "https" {
+        return false;
+    }
+    matches!(
+        (old_u.host_str(), new_u.host_str()),
+        (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)
+    )
+}
+
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 
 const DOWNLOAD_COLUMNS: &str = "id, url, final_url, file_name, save_path, temp_path, size, \
@@ -41,6 +59,19 @@ pub enum StoreError {
     InvalidStatus(String),
     #[error("invalid category in DB: {0}")]
     InvalidCategory(String),
+}
+
+impl StoreError {
+    pub fn is_corrupt(&self) -> bool {
+        matches!(
+            self,
+            StoreError::Sqlite(err)
+                if matches!(
+                    err.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                )
+        )
+    }
 }
 
 impl Store {
@@ -118,7 +149,7 @@ impl Store {
                 new.file_name,
                 new.save_path.to_string_lossy(),
                 new.temp_path.to_string_lossy(),
-                new.size.map(|v| v as i64),
+                new.size.map(to_sql_i64),
                 new.status.as_str(),
                 new.category.as_str(),
                 new.kind,
@@ -132,7 +163,7 @@ impl Store {
                 new.user_agent,
                 new.queue_order,
                 new.created_at,
-                new.speed_limit_kbps as i64,
+                to_sql_i64(new.speed_limit_kbps),
                 new.expected_sha256,
             ],
         )?;
@@ -145,9 +176,9 @@ impl Store {
                 params![
                     id,
                     segment.idx as i64,
-                    segment.start as i64,
-                    segment.end as i64,
-                    segment.done as i64,
+                    to_sql_i64(segment.start),
+                    to_sql_i64(segment.end),
+                    to_sql_i64(segment.done),
                 ],
             )?;
         }
@@ -230,7 +261,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(
             "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = ?3",
-            params![done as i64, id, segment_idx as i64],
+            params![to_sql_i64(done), id, segment_idx as i64],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
@@ -248,7 +279,7 @@ impl Store {
             return Err(StoreError::NotFound(id));
         }
         tx.commit()?;
-        Ok(total as u64)
+        Ok(total.max(0) as u64)
     }
 
     pub fn update_progress_batch(
@@ -260,7 +291,7 @@ impl Store {
         for (segment_idx, done) in updates {
             let changed = tx.execute(
                 "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = ?3",
-                params![*done as i64, id, *segment_idx as i64],
+                params![to_sql_i64(*done), id, *segment_idx as i64],
             )?;
             if changed == 0 {
                 return Err(StoreError::NotFound(id));
@@ -279,7 +310,7 @@ impl Store {
             return Err(StoreError::NotFound(id));
         }
         tx.commit()?;
-        Ok(total as u64)
+        Ok(total.max(0) as u64)
     }
 
     pub fn replace_segments(
@@ -309,9 +340,9 @@ impl Store {
                 insert.execute(params![
                     id,
                     segment.idx as i64,
-                    segment.start as i64,
-                    segment.end as i64,
-                    segment.done as i64
+                    to_sql_i64(segment.start),
+                    to_sql_i64(segment.end),
+                    to_sql_i64(segment.done)
                 ])?;
                 total = total.saturating_add(segment.done);
             }
@@ -319,13 +350,41 @@ impl Store {
         let changed = tx.execute(
             "UPDATE downloads SET connections = ?1, ranged = ?2, downloaded = ?3
              WHERE id = ?4",
-            params![connections as i64, ranged as i64, total as i64, id],
+            params![connections as i64, ranged as i64, to_sql_i64(total), id],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
         tx.commit()?;
         Ok(total)
+    }
+
+    /// Resets segments and stale HTTP size/validators when falling back to single-stream.
+    pub fn reset_for_fallback(&mut self, id: i64) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        tx.execute("DELETE FROM segments WHERE download_id = ?1", [id])?;
+        tx.execute(
+            "INSERT INTO segments (download_id, idx, start, end, done)
+             VALUES (?1, 0, 0, 0, 0)",
+            [id],
+        )?;
+        tx.execute(
+            "UPDATE downloads
+             SET connections = 1, ranged = 0, downloaded = 0,
+                 size = NULL, etag = NULL, last_modified = NULL, final_url = NULL, error = NULL
+             WHERE id = ?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Moves a download ahead of every other row in queue order.
@@ -350,7 +409,7 @@ impl Store {
     pub fn update_speed_limit(&mut self, id: i64, kbps: u64) -> Result<(), StoreError> {
         let changed = self.conn.execute(
             "UPDATE downloads SET speed_limit_kbps = ?1 WHERE id = ?2",
-            params![kbps as i64, id],
+            params![to_sql_i64(kbps), id],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
@@ -403,16 +462,16 @@ impl Store {
                 insert.execute(params![
                     id,
                     segment.idx as i64,
-                    segment.start as i64,
-                    segment.end as i64,
-                    segment.done as i64
+                    to_sql_i64(segment.start),
+                    to_sql_i64(segment.end),
+                    to_sql_i64(segment.done)
                 ])?;
                 total = total.saturating_add(segment.done);
             }
         }
         tx.execute(
             "UPDATE downloads SET downloaded = ?1 WHERE id = ?2",
-            params![total as i64, id],
+            params![to_sql_i64(total), id],
         )?;
         tx.commit()?;
         Ok(total)
@@ -422,7 +481,7 @@ impl Store {
     pub fn set_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE downloads SET size = ?1 WHERE id = ?2 AND size IS NULL",
-            params![size as i64, id],
+            params![to_sql_i64(size), id],
         )?;
         Ok(())
     }
@@ -431,7 +490,7 @@ impl Store {
     pub fn set_video_size(&mut self, id: i64, size: u64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE downloads SET size = ?1 WHERE id = ?2 AND kind = 'video'",
-            params![size as i64, id],
+            params![to_sql_i64(size), id],
         )?;
         Ok(())
     }
@@ -461,33 +520,51 @@ impl Store {
             return self.mark_done(id, completed_at);
         };
         let tx = self.conn.transaction()?;
+        let sql_bytes = to_sql_i64(bytes);
         let changed = tx.execute(
             "UPDATE downloads
              SET status = 'done', completed_at = ?1,
                  size = ?2, downloaded = ?2, error = NULL
              WHERE id = ?3",
-            params![completed_at, bytes as i64, id],
+            params![completed_at, sql_bytes, id],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
         tx.execute(
             "UPDATE segments SET done = ?1 WHERE download_id = ?2 AND idx = 0",
-            params![bytes as i64, id],
+            params![sql_bytes, id],
         )?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn update_url(&mut self, id: i64, url: &str) -> Result<(), StoreError> {
-        let changed = self.conn.execute(
-            "UPDATE downloads
-             SET url = ?1, final_url = NULL, etag = NULL, last_modified = NULL, error = NULL
-             WHERE id = ?2",
-            params![url, id],
-        )?;
-        if changed == 0 {
+        let old_url: Option<String> = self
+            .conn
+            .query_row("SELECT url FROM downloads WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(old_url) = old_url else {
             return Err(StoreError::NotFound(id));
+        };
+        if same_cookie_origin(&old_url, url) {
+            self.conn.execute(
+                "UPDATE downloads
+                 SET url = ?1, final_url = NULL, etag = NULL, last_modified = NULL, error = NULL
+                 WHERE id = ?2",
+                params![url, id],
+            )?;
+        } else {
+            // Strip bound session cookies and referrer when switching host or downgrading HTTPS.
+            self.conn.execute(
+                "UPDATE downloads
+                 SET url = ?1, final_url = NULL, etag = NULL, last_modified = NULL, error = NULL,
+                     cookie_enc = NULL, referrer = NULL
+                 WHERE id = ?2",
+                params![url, id],
+            )?;
         }
         Ok(())
     }

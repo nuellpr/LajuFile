@@ -1,9 +1,11 @@
+use std::net::IpAddr;
 use std::time::Duration;
 
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, COOKIE, HeaderMap, REFERER,
     USER_AGENT,
 };
+use url::{Host, Url};
 
 pub const DEFAULT_USER_AGENT: &str = concat!("LajuFile/", env!("CARGO_PKG_VERSION"));
 
@@ -36,15 +38,105 @@ pub fn validate_proxy_url(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(parsed.to_string()))
 }
 
+pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            let benchmark = oct[0] == 198 && (oct[1] & 0xfe) == 18;
+            let reserved = oct[0] == 0 || oct[0] >= 240;
+            v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || benchmark
+                || reserved
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_forbidden_ip(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            let link_local = (seg[0] & 0xffc0) == 0xfe80;
+            v6.is_unspecified() || v6.is_multicast() || link_local
+        }
+    }
+}
+
+pub fn is_public_ip(ip: IpAddr) -> bool {
+    if is_forbidden_ip(ip) {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            let shared_cgnat = oct[0] == 100 && (oct[1] & 0xc0) == 64;
+            !v4.is_private() && !v4.is_loopback() && !shared_cgnat
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            let ula = (seg[0] & 0xfe00) == 0xfc00;
+            let site_local = (seg[0] & 0xffc0) == 0xfec0;
+            !v6.is_loopback() && !ula && !site_local
+        }
+    }
+}
+
+pub fn is_forbidden_download_url(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return true;
+    }
+    match url.host() {
+        Some(Host::Ipv4(v4)) => is_forbidden_ip(IpAddr::V4(v4)),
+        Some(Host::Ipv6(v6)) => is_forbidden_ip(IpAddr::V6(v6)),
+        Some(Host::Domain(_)) => false,
+        None => true,
+    }
+}
+
+pub fn is_public_url_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(v4)) => is_public_ip(IpAddr::V4(v4)),
+        Some(Host::Ipv6(v6)) => is_public_ip(IpAddr::V6(v6)),
+        Some(Host::Domain(domain)) => {
+            let lower = domain.trim_end_matches('.').to_ascii_lowercase();
+            !(lower == "localhost"
+                || lower.ends_with(".localhost")
+                || lower.ends_with(".local")
+                || lower.ends_with(".internal"))
+        }
+        None => false,
+    }
+}
+
 fn base_client_builder(
     connect_timeout: Duration,
     read_timeout: Duration,
 ) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            let target = attempt.url();
+            if is_forbidden_download_url(target) {
+                return attempt
+                    .error("redirect to link-local, metadata, or reserved address blocked");
+            }
+            if let Some(origin) = attempt.previous().first()
+                && is_public_url_host(origin)
+                && !is_public_url_host(target)
+            {
+                return attempt
+                    .error("redirect from public host to private or local address blocked");
+            }
+            attempt.follow()
+        }))
         .tcp_nodelay(true)
-        // shortcut: cap idle pool at 4 per host to keep idle RAM low (v1.0.8); raise if segment reuse stalls.
-        .pool_max_idle_per_host(4)
+        .pool_max_idle_per_host(32)
         .pool_idle_timeout(Duration::from_secs(30))
         .connect_timeout(connect_timeout)
         .read_timeout(read_timeout)
@@ -281,5 +373,37 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn ip_and_url_ssrf_classifiers_block_metadata_and_private_targets() {
+        assert!(is_forbidden_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_forbidden_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_forbidden_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!is_forbidden_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("10.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_public_ip("93.184.216.34".parse().unwrap()));
+
+        assert!(is_forbidden_download_url(
+            &Url::parse("http://169.254.169.254/latest/meta-data/").unwrap()
+        ));
+        assert!(is_forbidden_download_url(
+            &Url::parse("file:///C:/Windows/win.ini").unwrap()
+        ));
+        assert!(!is_forbidden_download_url(
+            &Url::parse("http://127.0.0.1:8080/file.bin").unwrap()
+        ));
+
+        assert!(is_public_url_host(
+            &Url::parse("https://example.com/file.bin").unwrap()
+        ));
+        assert!(!is_public_url_host(
+            &Url::parse("http://127.0.0.1:8080/file.bin").unwrap()
+        ));
+        assert!(!is_public_url_host(
+            &Url::parse("http://sub.localhost/file.bin").unwrap()
+        ));
     }
 }

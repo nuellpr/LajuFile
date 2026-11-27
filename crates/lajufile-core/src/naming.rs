@@ -38,8 +38,26 @@ pub fn sanitize_file_name(name: &str) -> String {
     out
 }
 
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+fn take_utf16(s: &str, max_units: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let len = c.len_utf16();
+        if used + len > max_units {
+            break;
+        }
+        out.push(c);
+        used += len;
+    }
+    out
+}
+
 pub fn truncate_file_name(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
+    if utf16_len(name) <= max_chars {
         return name.to_string();
     }
     if max_chars == 0 {
@@ -47,40 +65,53 @@ pub fn truncate_file_name(name: &str, max_chars: usize) -> String {
     }
 
     let (mut stem, mut ext) = split_name(name);
-    if ext.chars().count() > MAX_EXTENSION_CHARS {
+    if utf16_len(ext) > MAX_EXTENSION_CHARS {
         stem = name;
         ext = "";
     }
-    let ext_chars = ext.chars().count();
-    if ext_chars >= max_chars {
-        return name.chars().take(max_chars).collect();
+    let ext_units = utf16_len(ext);
+    if ext_units >= max_chars {
+        return take_utf16(name, max_chars);
     }
 
-    let stem_limit = max_chars - ext_chars;
-    let mut truncated: String = stem.chars().take(stem_limit).collect();
+    let stem_limit = max_chars - ext_units;
+    let mut truncated = take_utf16(stem, stem_limit);
     while truncated.ends_with([' ', '.']) {
         truncated.pop();
     }
     if truncated.is_empty() {
-        truncated.push_str("download");
-        truncated = truncated.chars().take(stem_limit).collect();
+        truncated = take_utf16("download", stem_limit);
     }
     truncated.push_str(ext);
     truncated
 }
 
-fn is_reserved_device_name(name: &str) -> bool {
-    let stem = name
+pub fn is_reserved_device_name(name: &str) -> bool {
+    let raw_stem = name
         .split('.')
         .next()
         .unwrap_or(name)
-        .trim_end_matches([' ', '.'])
-        .to_ascii_uppercase();
+        .trim_end_matches([' ', '.']);
+    let upper = raw_stem.to_ascii_uppercase();
 
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+
+    if let Some(rest) = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+    {
+        let mut chars = rest.chars();
+        return matches!(
+            (chars.next(), chars.next()),
+            (Some('1'..='9' | '\u{00b9}' | '\u{00b2}' | '\u{00b3}'), None)
+        );
+    }
+    false
 }
 
 pub fn resolve_file_name(
@@ -110,11 +141,15 @@ pub fn resolve_file_name(
 }
 
 pub fn dedupe_path(dir: &Path, file_name: &str) -> PathBuf {
-    let dir_chars = dir.as_os_str().to_string_lossy().chars().count();
+    let dir_units = utf16_len(&dir.as_os_str().to_string_lossy());
     let max_name = MAX_FILE_NAME_CHARS
-        .min(250usize.saturating_sub(dir_chars + 1))
+        .min(250usize.saturating_sub(dir_units + 1))
         .max(1);
-    let name = truncate_file_name(file_name, max_name);
+    let mut name = truncate_file_name(file_name, max_name);
+    if is_reserved_device_name(&name) {
+        name.insert(0, '_');
+        name = truncate_file_name(&name, max_name);
+    }
 
     let candidate = dir.join(&name);
     if !candidate.exists() && !temp_path_for(&candidate).exists() {
@@ -136,27 +171,27 @@ pub fn dedupe_path(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 fn build_numbered_name(stem: &str, ext: &str, suffix: &str, max_name: usize) -> String {
-    let ext_chars = ext.chars().count();
-    let suffix_chars = suffix.chars().count();
+    let ext_units = utf16_len(ext);
+    let suffix_units = utf16_len(suffix);
     let (base, kept_ext) = if !ext.is_empty()
-        && ext_chars <= MAX_EXTENSION_CHARS
-        && ext_chars + suffix_chars <= max_name
+        && ext_units <= MAX_EXTENSION_CHARS
+        && ext_units + suffix_units <= max_name
     {
         (stem.to_string(), ext)
     } else {
         (format!("{stem}{ext}"), "")
     };
-    let kept_ext_chars = kept_ext.chars().count();
-    if suffix_chars + kept_ext_chars <= max_name {
-        let base_budget = max_name - suffix_chars - kept_ext_chars;
-        let truncated_base: String = base.chars().take(base_budget).collect();
+    let kept_ext_units = utf16_len(kept_ext);
+    if suffix_units + kept_ext_units <= max_name {
+        let base_budget = max_name - suffix_units - kept_ext_units;
+        let truncated_base = take_utf16(&base, base_budget);
         return format!("{truncated_base}{suffix}{kept_ext}");
     }
     let digits: String = suffix.chars().filter(|c| c.is_ascii_digit()).collect();
     if !digits.is_empty() {
-        return digits.chars().take(max_name).collect();
+        return take_utf16(&digits, max_name);
     }
-    suffix.chars().take(max_name).collect()
+    take_utf16(suffix, max_name)
 }
 
 pub fn temp_path_for(final_path: &Path) -> PathBuf {

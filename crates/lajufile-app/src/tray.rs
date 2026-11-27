@@ -17,14 +17,15 @@ pub struct Tray {
     events: Arc<Mutex<Vec<TrayEvent>>>,
 }
 
-pub fn create(icon: &egui::IconData, ctx: &egui::Context) -> Option<Tray> {
+pub fn create(icon: &egui::IconData, ctx: &egui::Context, lang: &str) -> Option<Tray> {
     let icon = Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height).ok()?;
     let menu = Menu::new();
-    let show = MenuItem::with_id("show", "Show LajuFile", true, None);
-    let add = MenuItem::with_id("add", "Add URL…", true, None);
-    let pause = MenuItem::with_id("pause-all", "Pause all", true, None);
-    let resume = MenuItem::with_id("resume-all", "Resume all", true, None);
-    let exit = MenuItem::with_id("exit", "Exit", true, None);
+    let t = |en: &str| crate::i18n::translate(lang, en).into_owned();
+    let show = MenuItem::with_id("show", t("Show LajuFile"), true, None);
+    let add = MenuItem::with_id("add", t("Add URL..."), true, None);
+    let pause = MenuItem::with_id("pause-all", t("Stop all"), true, None);
+    let resume = MenuItem::with_id("resume-all", t("Resume all"), true, None);
+    let exit = MenuItem::with_id("exit", t("Exit"), true, None);
     let items: [&dyn IsMenuItem; 5] = [&show, &add, &pause, &resume, &exit];
     menu.append_items(&items).ok()?;
 
